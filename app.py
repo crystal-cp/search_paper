@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import requests
 import streamlit as st
 
 from lit_screening.agents.human_feedback import HumanFeedbackAgent
@@ -28,6 +29,7 @@ from lit_screening.pipeline import (
     ranked_to_row,
     run_pipeline,
 )
+from lit_screening.run_logging import ScreeningRunLogger
 
 
 PROVIDER_OPTIONS = {
@@ -35,6 +37,12 @@ PROVIDER_OPTIONS = {
     "OpenAlex": ["openalex"],
     "Semantic Scholar": ["semantic_scholar"],
 }
+PROVIDER_HEALTH_URLS = {
+    "openalex": "https://api.openalex.org/works",
+    "semantic_scholar": "https://api.semanticscholar.org/graph/v1/paper/search",
+}
+API_ENV_NAMES = ["OPENALEX_API_KEY", "S2_API_KEY", "DEEPSEEK_API_KEY"]
+ORIGINAL_API_ENV_VALUES = {name: os.environ.get(name) for name in API_ENV_NAMES}
 PROJECTS_DIR = Path("outputs/projects")
 HISTORY_PATH = PROJECTS_DIR / "history.json"
 DEFAULT_UI_WEIGHTS = {
@@ -203,6 +211,7 @@ def save_project_manifest(
         "paper_cards_path": str(Path(result.output_dir) / "paper_cards.md"),
         "reading_path_path": str(Path(result.output_dir) / "reading_path.md"),
         "agent_trace_path": str(Path(result.output_dir) / "agent_trace.json"),
+        "run_events_path": str(Path(result.output_dir) / "run_events.jsonl"),
     }
     output_dir = Path(result.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -283,17 +292,21 @@ def set_runtime_api_keys() -> None:
     for env_name, value in key_map.items():
         if value:
             os.environ[env_name] = value
+        elif ORIGINAL_API_ENV_VALUES.get(env_name):
+            os.environ[env_name] = ORIGINAL_API_ENV_VALUES[env_name] or ""
+        else:
+            os.environ.pop(env_name, None)
 
 
 def render_key_warnings(providers: list[str], llm_backend: str, language: str) -> None:
     """Show missing-key status without exposing key values."""
 
     if "openalex" in providers and not os.getenv("OPENALEX_API_KEY"):
-        st.sidebar.info(
+        st.sidebar.warning(
             ui_text(
                 language,
-                "OPENALEX_API_KEY is not set; OpenAlex will use public access.",
-                "OPENALEX_API_KEY 未设置；OpenAlex 会使用公开访问。",
+                "OPENALEX_API_KEY is not set; current OpenAlex API access requires a free key.",
+                "OPENALEX_API_KEY 未设置；当前 OpenAlex API 需要免费 key。",
             )
         )
     if "semantic_scholar" in providers and not os.getenv("S2_API_KEY"):
@@ -314,6 +327,94 @@ def render_key_warnings(providers: list[str], llm_backend: str, language: str) -
         )
 
 
+def check_provider_connectivity(
+    providers: list[str],
+    timeout: float = 3.0,
+) -> list[dict[str, Any]]:
+    """Check whether selected metadata providers are reachable."""
+
+    results: list[dict[str, Any]] = []
+    for provider in providers:
+        try:
+            if provider == "openalex":
+                if not os.getenv("OPENALEX_API_KEY"):
+                    results.append(
+                        {
+                            "provider": provider,
+                            "reachable": False,
+                            "status_code": "",
+                            "message": "missing OPENALEX_API_KEY",
+                        }
+                    )
+                    continue
+                response = requests.get(
+                    PROVIDER_HEALTH_URLS[provider],
+                    params={"per-page": 1, "api_key": os.getenv("OPENALEX_API_KEY")},
+                    timeout=timeout,
+                )
+            elif provider == "semantic_scholar":
+                headers = {"x-api-key": os.getenv("S2_API_KEY")} if os.getenv("S2_API_KEY") else None
+                response = requests.get(
+                    PROVIDER_HEALTH_URLS[provider],
+                    params={"query": "test", "limit": 1, "fields": "title"},
+                    headers=headers,
+                    timeout=timeout,
+                )
+            else:
+                continue
+            reachable = response.status_code < 500
+            results.append(
+                {
+                    "provider": provider,
+                    "reachable": reachable,
+                    "status_code": response.status_code,
+                    "message": response.text[:180] if not reachable else "reachable",
+                }
+            )
+        except requests.RequestException as exc:
+            results.append(
+                {
+                    "provider": provider,
+                    "reachable": False,
+                    "status_code": "",
+                    "message": str(exc)[:180],
+                }
+            )
+    return results
+
+
+def render_connectivity_result(rows: list[dict[str, Any]], language: str) -> None:
+    """Render provider connectivity diagnostics."""
+
+    if not rows:
+        return
+    if all(not row["reachable"] for row in rows):
+        st.error(
+            ui_text(
+                language,
+                "Selected metadata providers are not reachable from this process.",
+                "当前进程无法连接选中的论文数据源。",
+            )
+        )
+    elif any(not row["reachable"] for row in rows):
+        st.warning(
+            ui_text(
+                language,
+                "At least one selected provider is not reachable.",
+                "至少有一个选中的数据源不可连接。",
+            )
+        )
+    else:
+        st.success(
+            ui_text(
+                language,
+                "Selected providers are reachable.",
+                "选中的数据源可以连接。",
+            )
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
 def render_sidebar() -> dict[str, Any]:
     """Render sidebar controls and return pipeline settings."""
 
@@ -327,18 +428,44 @@ def render_sidebar() -> dict[str, Any]:
         value=10,
         step=1,
     )
+    use_year_filter = st.sidebar.checkbox(
+        ui_text(language, "Apply year filter", "启用年份过滤"),
+        value=False,
+        help=ui_text(
+            language,
+            "Leave this off for broad background searches. Turn it on for recent-only searches.",
+            "调研背景文献时建议先关闭；只想看近期文献时再打开。",
+        ),
+    )
     from_year_value = st.sidebar.number_input(
         ui_text(language, "From year", "起始年份"),
         min_value=1900,
         max_value=2100,
         value=2020,
         step=1,
+        disabled=not use_year_filter,
         help=ui_text(
             language,
-            "Only retrieve papers published from this year onward when the provider supports year filtering.",
-            "只检索该年份及之后发表的论文；具体效果取决于数据源是否支持年份过滤。",
+            "Keep only papers published from this year onward. The pipeline enforces this locally after provider retrieval.",
+            "只保留该年份及之后发表的论文；pipeline 会在数据源返回后执行本地硬过滤。",
         ),
     )
+    if not use_year_filter:
+        st.sidebar.caption(
+            ui_text(
+                language,
+                "Year filtering is off. The year shown above will not be applied.",
+                "年份过滤未启用。上方显示的年份不会参与本次筛选。",
+            )
+        )
+    else:
+        st.sidebar.caption(
+            ui_text(
+                language,
+                "The pipeline also applies a local hard year filter after retrieval.",
+                "pipeline 会在检索后再执行一次本地硬年份过滤。",
+            )
+        )
     use_cache = st.sidebar.checkbox(ui_text(language, "Use cache", "使用缓存"), value=True)
     llm_backend = st.sidebar.selectbox("LLM backend", ["none", "deepseek"], index=0)
 
@@ -374,7 +501,11 @@ def render_sidebar() -> dict[str, Any]:
             "OPENALEX_API_KEY",
             type="password",
             key="openalex_api_key_input",
-            help=ui_text(language, "Optional for OpenAlex.", "OpenAlex 可选。"),
+            help=ui_text(
+                language,
+                "Required by the current OpenAlex API. Free keys have a daily budget.",
+                "当前 OpenAlex API 需要填写。免费 key 有每日额度。",
+            ),
         )
         st.text_input(
             "S2_API_KEY",
@@ -463,12 +594,17 @@ def render_sidebar() -> dict[str, Any]:
 
     providers = PROVIDER_OPTIONS[provider_label]
     render_key_warnings(providers, llm_backend, language)
+    with st.sidebar.expander(ui_text(language, "Provider Connectivity", "数据源连通性")):
+        if st.button(ui_text(language, "Check providers", "检查数据源")):
+            st.session_state.provider_connectivity = check_provider_connectivity(providers)
+        if st.session_state.get("provider_connectivity"):
+            render_connectivity_result(st.session_state.provider_connectivity, language)
 
     return {
         "language": language,
         "providers": providers,
         "max_per_query": int(max_per_query),
-        "from_year": int(from_year_value),
+        "from_year": int(from_year_value) if use_year_filter else None,
         "use_cache": bool(use_cache),
         "llm_backend": llm_backend,
         "planner_mode": planner_mode,
@@ -528,6 +664,7 @@ def ensure_state() -> None:
     st.session_state.setdefault("preferred_paper_types_text", "")
     st.session_state.setdefault("time_window_text", "")
     st.session_state.setdefault("success_definition_text", "")
+    st.session_state.setdefault("provider_connectivity", None)
 
 
 def query_preview_signature(question: str, settings: dict[str, Any]) -> dict[str, Any]:
@@ -709,6 +846,10 @@ def run_screening(
 
     output_dir = new_project_output_dir(question)
     language = settings["language"]
+    connectivity = check_provider_connectivity(settings["providers"])
+    st.session_state.provider_connectivity = connectivity
+    if any(not row["reachable"] for row in connectivity):
+        render_connectivity_result(connectivity, language)
     status_label = ui_text(
         language,
         "Running literature screening...",
@@ -748,7 +889,12 @@ def run_screening(
                 ranking_profile=settings["ranking_profile"],
                 progress_callback=progress_callback,
             )
-        except Exception:
+        except Exception as exc:
+            ScreeningRunLogger(output_dir).log_exception(
+                "fatal",
+                exc,
+                {"output_dir": str(output_dir)},
+            )
             status.update(
                 label=ui_text(
                     language,
@@ -1269,6 +1415,36 @@ def render_result(result: PipelineResult, language: str) -> None:
         "Weak support",
         result.evaluation_metrics.get("weak_support_count", 0),
     )
+    year_filter = result.evaluation_metrics.get("year_filter", {})
+    if year_filter:
+        if year_filter.get("enabled"):
+            st.caption(
+                ui_text(
+                    language,
+                    (
+                        f"Year filter: from {year_filter.get('from_year')}; "
+                        f"kept {year_filter.get('kept_count', 0)} / "
+                        f"{year_filter.get('input_count', 0)} retrieved records; "
+                        f"excluded {year_filter.get('excluded_before_year_count', 0)} older "
+                        f"and {year_filter.get('excluded_missing_year_count', 0)} missing-year records."
+                    ),
+                    (
+                        f"年份过滤：从 {year_filter.get('from_year')} 年开始；"
+                        f"保留 {year_filter.get('kept_count', 0)} / "
+                        f"{year_filter.get('input_count', 0)} 条检索记录；"
+                        f"排除旧年份 {year_filter.get('excluded_before_year_count', 0)} 条，"
+                        f"缺少年份 {year_filter.get('excluded_missing_year_count', 0)} 条。"
+                    ),
+                )
+            )
+        else:
+            st.caption(
+                ui_text(
+                    language,
+                    "Year filter was off for this run.",
+                    "本次运行没有启用年份过滤。",
+                )
+            )
 
     selected: RankedPaper | None = None
     if result.ranked_final:
@@ -1336,6 +1512,44 @@ def render_result(result: PipelineResult, language: str) -> None:
                     "没有检索到论文。可以尝试增加每个 query 的论文数、切换数据源，或检查 API/网络。",
                 )
             )
+            if (
+                year_filter.get("enabled")
+                and year_filter.get("input_count", 0) > 0
+                and year_filter.get("kept_count", 0) == 0
+            ):
+                st.warning(
+                    ui_text(
+                        language,
+                        "The providers returned records, but the local year filter removed all of them.",
+                        "数据源返回了记录，但本地年份过滤把它们全部排除了。",
+                    )
+                )
+            diagnostics = read_json_file(Path(result.output_dir) / "retrieval_diagnostics.json")
+            provider_errors = diagnostics.get("provider_errors", {})
+            error_rows = [
+                {
+                    "provider": provider,
+                    "query": row.get("query", ""),
+                    "error": row.get("error", ""),
+                    "status_code": row.get("status_code", ""),
+                    "error_message": row.get("error_message", ""),
+                }
+                for provider, rows in provider_errors.items()
+                for row in rows
+            ]
+            if error_rows:
+                st.error(
+                    ui_text(
+                        language,
+                        "Provider API errors were detected. This run failed to retrieve metadata for at least some queries.",
+                        "检测到数据源 API 错误。本次运行至少有部分 query 没有成功返回元数据。",
+                    )
+                )
+                st.dataframe(
+                    pd.DataFrame(error_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                )
         table = ranked_dataframe(result.ranked_final)
         st.dataframe(table, use_container_width=True, hide_index=True)
 
@@ -1369,6 +1583,8 @@ def render_result(result: PipelineResult, language: str) -> None:
         render_result_groups(result, language)
         st.subheader(ui_text(language, "PRISMA-like Screening Flow", "PRISMA-like 筛选流程"))
         st.json(result.evaluation_metrics.get("prisma_like_flow", {}))
+        st.subheader(ui_text(language, "Year Filter Audit", "年份过滤审计"))
+        st.json(result.evaluation_metrics.get("year_filter", {}))
 
     with tabs[5]:
         st.subheader(ui_text(language, "Recommended Reading Path", "推荐阅读路径"))
@@ -1392,6 +1608,7 @@ def render_result(result: PipelineResult, language: str) -> None:
         extra_artifacts = [
             ("aspect_coverage.csv", Path(result.output_dir) / "aspect_coverage.csv", "text/csv"),
             ("retrieval_diagnostics.json", Path(result.output_dir) / "retrieval_diagnostics.json", "application/json"),
+            ("run_events.jsonl", Path(result.output_dir) / "run_events.jsonl", "application/jsonl"),
             ("paper_cards.md", Path(result.output_dir) / "paper_cards.md", "text/markdown"),
             ("reading_path.md", Path(result.output_dir) / "reading_path.md", "text/markdown"),
         ]

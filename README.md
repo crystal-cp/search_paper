@@ -1,5 +1,7 @@
 # Human-in-the-loop Multi-agent LLM System for Scientific Literature Screening
 
+[中文说明](README.zh-CN.md)
+
 This repository is a lightweight, reproducible research prototype for evidence-grounded scientific literature screening. It is intentionally simple: the Streamlit UI is a thin wrapper around the core pipeline, with no PDF parsing, no vector database, and no mandatory LLM key.
 
 The MVP pipeline:
@@ -30,7 +32,7 @@ For the optional Streamlit UI:
 pip install -r requirements-ui.txt
 ```
 
-Optional API keys can be supplied through environment variables:
+API keys can be supplied through environment variables:
 
 ```bash
 cp .env.example .env
@@ -40,7 +42,10 @@ The package reads environment variables from the process environment. If you use
 `.env`, load it with your shell or preferred environment manager before running
 the CLI.
 
-The rule-based core pipeline works without `DEEPSEEK_API_KEY`.
+The rule-based core pipeline works without `DEEPSEEK_API_KEY`. The current
+OpenAlex API requires a free `OPENALEX_API_KEY`; free keys have a daily usage
+budget. Semantic Scholar can be queried without `S2_API_KEY`, but a key is
+recommended to reduce rate-limit failures.
 
 ## Optional DeepSeek LLM Enhancement
 
@@ -131,11 +136,18 @@ The UI also supports:
 - A collapsible run-status panel shows what the pipeline is doing during
   screening: retrieval by provider/query, deduplication, evidence extraction,
   grounding verification, ranking, evaluation, and artifact writing.
+- If no papers are retrieved, the UI now separates zero-result searches from
+  provider API errors such as HTTP failures or rate limits.
 - Runtime API key entry for `OPENALEX_API_KEY`, `S2_API_KEY`, and `DEEPSEEK_API_KEY`.
+  `OPENALEX_API_KEY` is required for current OpenAlex API access.
   Keys are applied to the current Streamlit process and are not written into project files.
 - Adjustable scoring weights for relevance, evidence, recency, quality, and diversity,
   with tooltip explanations for how each weight affects ranking.
-- Year filtering through the `From year` setting.
+- Optional year filtering through the `Apply year filter` and `From year`
+  settings. The UI leaves this off by default so broad background searches are
+  not accidentally restricted to recent papers only. When enabled, the core
+  pipeline enforces a local hard year filter after provider retrieval, so older
+  papers cannot enter deduplication, evidence extraction, or ranking.
 
 For an offline smoke run that avoids provider calls:
 
@@ -164,6 +176,7 @@ The pipeline writes:
 - `outputs/ranked_papers.csv`
 - `outputs/evaluation.json`
 - `outputs/agent_trace.json`
+- `outputs/run_events.jsonl`
 - `outputs/retrieval_diagnostics.json`
 - `outputs/result_groups.json`
 - `outputs/prisma_like_flow.json`
@@ -172,6 +185,16 @@ The pipeline writes:
 - `outputs/report.md`
 
 Raw cache files are stored under `data/cache/` and ignored by git.
+
+`run_events.jsonl` is written incrementally while the screening run is executing.
+It records stage transitions, provider errors, and fatal exceptions so failed
+runs can be diagnosed even when later artifacts were not produced.
+
+`retrieval_diagnostics.json` records the query plan, per-provider queries,
+per-query raw counts, provider errors, top titles per query, top score
+breakdowns, and year-filter audit information. When `from_year` is set, papers
+published before that year, or papers with missing year metadata, are filtered
+locally before deduplication and ranking.
 
 ## Query Planning, Sensemaking, And Scoring
 

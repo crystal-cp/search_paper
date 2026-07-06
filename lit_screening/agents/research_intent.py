@@ -11,12 +11,12 @@ from lit_screening.utils import tokenize
 
 
 INTENT_KEYWORDS = {
-    "systematic_review": {"systematic", "prisma", "meta-analysis", "screening"},
+    "systematic_review": {"systematic review", "prisma", "meta-analysis", "screening protocol"},
     "frontier": {"frontier", "recent", "latest", "emerging", "state-of-the-art", "trend"},
     "implementation": {"implement", "implementation", "code", "pipeline", "system", "workflow", "method"},
     "evidence_verification": {"evidence", "verify", "verification", "grounded", "claim"},
     "proposal": {"proposal", "novelty", "gap", "future", "research direction", "phd"},
-    "overview": {"overview", "introduction", "background", "significance", "review"},
+    "overview": {"overview", "introduction", "background", "significance", "importance", "review"},
 }
 
 INTENT_PAPER_TYPES = {
@@ -56,7 +56,7 @@ class ResearchIntentAgent:
         lowered = refined.lower()
         tokens = set(tokenize(lowered))
         intent = "overview"
-        best_score = -1
+        best_score = 0
         for candidate, keywords in INTENT_KEYWORDS.items():
             score = sum(1 for keyword in keywords if keyword in lowered or keyword in tokens)
             if score > best_score:

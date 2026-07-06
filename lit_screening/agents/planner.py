@@ -84,6 +84,17 @@ LLM_RELATED_TERMS = {
     "extraction",
 }
 
+GENERIC_TOPIC_MODIFIERS = {
+    "importance",
+    "significance",
+    "effect",
+    "effects",
+    "impact",
+    "role",
+    "overview",
+    "background",
+}
+
 
 def contains_cjk(text: str) -> bool:
     """Return True when text contains common Chinese/Japanese/Korean characters."""
@@ -166,6 +177,12 @@ def _apply_openalex_excludes(query: str, exclude_terms: list[str]) -> str:
     return f"{query} NOT {' NOT '.join(_quote_phrase(term) for term in exclude_terms)}"
 
 
+def _plain_terms_query(terms: list[str], limit: int = 3) -> str:
+    """Join terms without provider operators for broad recall-oriented search."""
+
+    return " ".join(" ".join(term.split()) for term in terms[:limit])
+
+
 def build_openalex_queries(plan: QueryPlan) -> list[str]:
     """Build OpenAlex-flavored queries from a structured query plan."""
 
@@ -177,6 +194,17 @@ def build_openalex_queries(plan: QueryPlan) -> list[str]:
     primary = " AND ".join(primary_terms) if primary_terms else plan.translated_question or plan.original_question
     natural_query = plan.translated_question or plan.original_question
     queries = []
+    broad_core_query = _plain_terms_query(core[:3] or must[:3])
+    single_core_query = _plain_terms_query(core[:1] or must[:1])
+    quoted_core_query = " ".join(_quote_phrase(term) for term in (core[:2] or must[:2]))
+    if natural_query:
+        queries.append(natural_query)
+    if single_core_query:
+        queries.append(single_core_query)
+    if broad_core_query:
+        queries.append(broad_core_query)
+    if quoted_core_query and quoted_core_query != broad_core_query:
+        queries.append(quoted_core_query)
     if openalex_mode in {"semantic", "keyword+semantic"} and natural_query:
         queries.append(natural_query)
     if openalex_mode in {"keyword", "keyword+semantic"}:
@@ -200,13 +228,23 @@ def build_semantic_scholar_queries(plan: QueryPlan) -> list[str]:
     core = plan.core_terms or plan.must_terms
     must = plan.must_terms or core
     optional = plan.optional_terms
+    natural_query = plan.translated_question or plan.original_question
     required = " ".join(_semantic_required(term) for term in must[:4])
     excludes = " ".join(_semantic_excluded(term) for term in plan.exclude_terms[:4])
     optional_or = f"({' OR '.join(_quote_phrase(term) for term in optional[:4])})" if optional else ""
     primary = " ".join(part for part in [required, optional_or, excludes] if part)
     if not primary:
-        primary = plan.translated_question or plan.original_question
-    queries = [primary]
+        primary = natural_query
+    queries = []
+    if natural_query:
+        queries.append(natural_query)
+    single_core_query = _plain_terms_query(core[:1] or must[:1])
+    if single_core_query:
+        queries.append(single_core_query)
+    broad_core_query = _plain_terms_query(core[:3] or must[:3])
+    if broad_core_query:
+        queries.append(broad_core_query)
+    queries.append(primary)
     if core:
         phrase = " ".join(_quote_phrase(term) for term in core[:2])
         queries.append(" ".join(part for part in [phrase, optional_or, excludes] if part))
@@ -254,6 +292,8 @@ def _extract_candidate_phrases(text: str) -> list[str]:
             chunk = words[index : index + size]
             if any(word in STOPWORDS for word in chunk):
                 continue
+            if any(word in GENERIC_TOPIC_MODIFIERS for word in chunk):
+                continue
             phrase = " ".join(chunk)
             if len(tokenize(phrase)) >= 2:
                 phrases.append(phrase)
@@ -266,6 +306,30 @@ def _is_term_redundant(term: str, existing_terms: list[str]) -> bool:
     if " " in term:
         return False
     return any(term in tokenize(existing) for existing in existing_terms if " " in existing)
+
+
+def _specific_inclusion_terms(
+    inclusion_criteria: list[str],
+    planning_question: str,
+    limit: int = 3,
+) -> list[str]:
+    """Return short inclusion criteria that are safe to use as required terms."""
+
+    planning_clean = " ".join(planning_question.lower().split())
+    planning_tokens = set(tokenize(planning_question))
+    selected: list[str] = []
+    for criterion in inclusion_criteria:
+        cleaned = " ".join(str(criterion).split())
+        lowered = cleaned.lower()
+        criterion_tokens = set(tokenize(cleaned))
+        if not cleaned or not criterion_tokens:
+            continue
+        if lowered == planning_clean or criterion_tokens == planning_tokens:
+            continue
+        if len(criterion_tokens) > 5:
+            continue
+        selected.append(cleaned)
+    return _unique(selected, limit)
 
 
 class PlannerAgent:
@@ -395,7 +459,16 @@ class PlannerAgent:
             must_count = 1
         must_terms = _unique(core_terms[:must_count], 5)
         if search_brief:
-            must_terms = _unique([*must_terms, *search_brief.inclusion_criteria[:3]], 8)
+            must_terms = _unique(
+                [
+                    *must_terms,
+                    *_specific_inclusion_terms(
+                        search_brief.inclusion_criteria,
+                        planning_question,
+                    ),
+                ],
+                8,
+            )
 
         topical_optional = [
             token

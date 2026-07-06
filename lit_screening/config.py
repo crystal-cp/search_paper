@@ -15,8 +15,8 @@ class PipelineConfig:
     output_dir: str = "outputs"
     cache_dir: str = "data/cache"
     use_cache: bool = True
-    request_timeout: float = 20.0
-    request_retries: int = 2
+    request_timeout: float = 8.0
+    request_retries: int = 1
     rate_limit_sleep: float = 1.0
     llm_backend: str = "none"
     deepseek_api_key_env: str = "DEEPSEEK_API_KEY"

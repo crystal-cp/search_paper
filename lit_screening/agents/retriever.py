@@ -67,7 +67,7 @@ class RetrieverAgent:
                 if progress_callback:
                     progress_callback(
                         "retrieval",
-                        f"Searching {provider} ({index}/{len(queries)})",
+                        f"Searching {provider} ({index}/{len(provider_queries)})",
                         {
                             "provider": provider,
                             "query": query,
@@ -75,20 +75,53 @@ class RetrieverAgent:
                             "total_queries": len(provider_queries),
                         },
                     )
-                if provider == "openalex":
-                    result = client.search(
-                        query,
-                        max_per_query,
-                        from_year,
-                        sort_mode=sort_mode,
+                try:
+                    if provider == "openalex":
+                        result = client.search(
+                            query,
+                            max_per_query,
+                            from_year,
+                            sort_mode=sort_mode,
+                        )
+                    else:
+                        result = client.search(query, max_per_query, from_year)
+                except Exception as exc:
+                    error_raw = {
+                        "error": exc.__class__.__name__,
+                        "error_message": str(exc)[:500],
+                        "provider": provider,
+                        "stage": "client_search",
+                    }
+                    raw_by_provider[provider].append(
+                        {"query": query, "response": error_raw}
                     )
-                else:
-                    result = client.search(query, max_per_query, from_year)
+                    if output_dir:
+                        write_json(
+                            Path(output_dir) / f"raw_{provider}_results.json",
+                            raw_by_provider[provider],
+                        )
+                    if progress_callback:
+                        progress_callback(
+                            "retrieval_error",
+                            f"{provider} failed while searching",
+                            {
+                                "provider": provider,
+                                "query": query,
+                                "error": exc.__class__.__name__,
+                                "message": str(exc)[:240],
+                            },
+                        )
+                    raise
                 if not isinstance(result, RetrievalResult):
                     result = RetrievalResult(raw=result[0], papers=result[1])
                 raw_by_provider[provider].append({"query": query, "response": result.raw})
                 all_papers.extend(result.papers)
                 retrieval_counts[provider] += len(result.papers)
+                if output_dir:
+                    write_json(
+                        Path(output_dir) / f"raw_{provider}_results.json",
+                        raw_by_provider[provider],
+                    )
                 if progress_callback:
                     progress_callback(
                         "retrieval",
@@ -100,6 +133,19 @@ class RetrieverAgent:
                             "provider_total": retrieval_counts[provider],
                         },
                     )
+                if should_stop_provider_after_error(result.raw):
+                    if progress_callback:
+                        progress_callback(
+                            "retrieval",
+                            f"Stopping {provider} after provider rate-limit or budget error",
+                            {
+                                "provider": provider,
+                                "error": result.raw.get("error", ""),
+                                "status_code": result.raw.get("status_code", ""),
+                                "message": result.raw.get("error_message", "")[:180],
+                            },
+                        )
+                    break
 
         if output_dir:
             out = Path(output_dir)
@@ -107,3 +153,15 @@ class RetrieverAgent:
                 write_json(out / f"raw_{provider}_results.json", raw_items)
 
         return all_papers, raw_by_provider, retrieval_counts
+
+
+def should_stop_provider_after_error(raw: dict[str, Any]) -> bool:
+    """Return True when more queries to this provider would likely waste quota."""
+
+    if raw.get("status_code") != 429:
+        return False
+    message = str(raw.get("error_message") or "").lower()
+    return any(
+        marker in message
+        for marker in ["insufficient budget", "rate limit", "too many requests"]
+    )

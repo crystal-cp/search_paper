@@ -17,7 +17,8 @@ Given a research question, the system should:
 ## Development rules
 
 - Keep the MVP simple and reliable.
-- Do not implement PDF parsing, vector databases, or web UI unless explicitly requested.
+- Do not implement PDF parsing or vector databases unless explicitly requested.
+- The Streamlit UI already exists; keep it as a thin wrapper around core pipeline functions.
 - Do not hard-code API keys.
 - Use environment variables:
   - OPENALEX_API_KEY
@@ -46,13 +47,24 @@ python -m lit_screening.pipeline run \
 
 outputs/
 - planned_queries.json
+- search_brief.json
+- question_refinement.json
 - raw_openalex_results.json
 - raw_semantic_scholar_results.json
 - merged_papers.csv
 - evidence_table.csv
+- aspect_coverage.csv
 - ranked_papers_before_feedback.csv
 - ranked_papers_after_feedback.csv, if feedback is provided
+- ranked_papers.csv
 - evaluation.json
+- agent_trace.json
+- run_events.jsonl
+- retrieval_diagnostics.json
+- result_groups.json
+- prisma_like_flow.json
+- paper_cards.md
+- reading_path.md
 - report.md
 
 ## Testing

@@ -106,6 +106,7 @@ class SemanticScholarClient:
                 raw = {
                     "data": [],
                     "error": last_error,
+                    **request_error_details(exc),
                     "provider": self.provider_name,
                 }
 
@@ -114,17 +115,18 @@ class SemanticScholarClient:
     def _normalize_many(self, raw: dict[str, Any]) -> list[Paper]:
         return [
             self._normalize_result(item, rank=index)
-            for index, item in enumerate(raw.get("data", []), start=1)
+            for index, item in enumerate(as_list(raw.get("data")), start=1)
+            if isinstance(item, dict)
         ]
 
     def _normalize_result(self, item: dict[str, Any], rank: int = 0) -> Paper:
-        external_ids = item.get("externalIds") or {}
+        external_ids = as_dict(item.get("externalIds"))
         doi = normalize_doi(external_ids.get("DOI"))
         semantic_id = item.get("paperId") or ""
         authors = [
-            author.get("name", "")
-            for author in item.get("authors", [])
-            if author.get("name")
+            as_dict(author).get("name", "")
+            for author in as_list(item.get("authors"))
+            if as_dict(author).get("name")
         ]
         title = item.get("title") or ""
         paper_id = stable_id(doi or semantic_id or title)
@@ -133,15 +135,15 @@ class SemanticScholarClient:
         for key, value in external_ids.items():
             if value:
                 provider_ids[key.lower()] = str(value)
-        open_access_pdf = item.get("openAccessPdf") or {}
-        tldr = item.get("tldr") or {}
+        open_access_pdf = as_dict(item.get("openAccessPdf"))
+        tldr = as_dict(item.get("tldr"))
         s2_fields = [
-            field.get("category", "")
-            for field in item.get("s2FieldsOfStudy", [])
-            if field.get("category")
+            as_dict(field).get("category", "")
+            for field in as_list(item.get("s2FieldsOfStudy"))
+            if as_dict(field).get("category")
         ]
         fields_of_study = [
-            *[str(value) for value in item.get("fieldsOfStudy", []) if value],
+            *[str(value) for value in as_list(item.get("fieldsOfStudy")) if value],
             *s2_fields,
         ]
 
@@ -161,7 +163,7 @@ class SemanticScholarClient:
             semantic_scholar_rank=rank,
             publication_date=item.get("publicationDate") or "",
             publication_types=[
-                str(value) for value in item.get("publicationTypes", []) if value
+                str(value) for value in as_list(item.get("publicationTypes")) if value
             ],
             fields_of_study=list(dict.fromkeys(fields_of_study)),
             influential_citation_count=safe_int(
@@ -170,6 +172,30 @@ class SemanticScholarClient:
             ),
             reference_count=safe_int(item.get("referenceCount"), default=0),
             open_access_pdf_url=open_access_pdf.get("url") or "",
-            tldr=tldr.get("text") if isinstance(tldr, dict) else "",
+            tldr=tldr.get("text") or "",
             raw=item,
         )
+
+
+def as_list(value: Any) -> list[Any]:
+    """Return a list for provider fields that may be null."""
+
+    return value if isinstance(value, list) else []
+
+
+def as_dict(value: Any) -> dict[str, Any]:
+    """Return a dict for provider fields that may be null."""
+
+    return value if isinstance(value, dict) else {}
+
+
+def request_error_details(exc: requests.RequestException) -> dict[str, Any]:
+    """Return safe request-error details without leaking request headers or keys."""
+
+    response = getattr(exc, "response", None)
+    if response is None:
+        return {"status_code": None, "error_message": str(exc)[:300]}
+    return {
+        "status_code": response.status_code,
+        "error_message": response.text[:300],
+    }

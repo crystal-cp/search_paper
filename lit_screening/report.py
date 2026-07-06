@@ -110,6 +110,7 @@ def generate_report(
                 "",
             ]
         )
+    year_filter = retrieval_statistics.get("year_filter", {})
     lines.extend(
         [
             "## Planned Queries",
@@ -126,6 +127,11 @@ def generate_report(
             f"- Merged paper count: {retrieval_statistics.get('merged_paper_count', 0)}",
             f"- Duplicate count: {retrieval_statistics.get('duplicate_count', 0)}",
             f"- Counts by provider: {retrieval_statistics.get('retrieval_counts_by_provider', {})}",
+            f"- Year filter enabled: {year_filter.get('enabled', False)}",
+            f"- From year: {year_filter.get('from_year')}",
+            f"- Records kept after year filter: {year_filter.get('kept_count', retrieval_statistics.get('raw_retrieved_paper_count', 0))}",
+            f"- Records excluded before from-year: {year_filter.get('excluded_before_year_count', 0)}",
+            f"- Records excluded because year is missing: {year_filter.get('excluded_missing_year_count', 0)}",
             "",
             "## PRISMA-like Screening Flow",
             "",

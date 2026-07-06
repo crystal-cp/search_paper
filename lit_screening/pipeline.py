@@ -35,6 +35,7 @@ from .paper_cards import generate_paper_cards
 from .reading_path import generate_reading_path
 from .report import generate_report
 from .result_groups import group_ranked_papers
+from .run_logging import ScreeningRunLogger
 from .scoring import sanitize_score_weights
 from .screening_flow import build_prisma_like_flow
 from .utils import ensure_dir, write_csv, write_json
@@ -366,6 +367,7 @@ def build_agent_trace(
     ranked_papers: list[RankedPaper],
     scoring_weights: dict[str, float],
     result_groups: dict[str, Any] | None = None,
+    year_filter_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an inspectable trace of agent decisions for demos and audits."""
 
@@ -390,6 +392,7 @@ def build_agent_trace(
         "retriever": {
             "retrieval_counts_by_provider": retrieval_counts,
             "raw_paper_count": raw_paper_count,
+            "year_filter": year_filter_stats or {},
         },
         "deduplicator": {
             "merged_paper_count": len(merged_papers),
@@ -497,6 +500,8 @@ def apply_feedback_to_pipeline_result(
     )
     if "llm" in result.evaluation_metrics:
         metrics["llm"] = result.evaluation_metrics["llm"]
+    if "year_filter" in result.evaluation_metrics:
+        metrics["year_filter"] = result.evaluation_metrics["year_filter"]
     metrics["scoring_weights"] = result.scoring_weights
     result_groups = group_ranked_papers(
         ranked_after_feedback,
@@ -813,31 +818,46 @@ def build_retrieval_diagnostics(
     merged_papers: list[Paper],
     duplicate_count: int,
     ranked_papers: list[RankedPaper],
+    year_filter_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build transparent retrieval and reranking diagnostics."""
 
     raw_count_per_query: dict[str, dict[str, int]] = {}
     top_titles_per_query: dict[str, dict[str, list[str]]] = {}
+    provider_errors: dict[str, list[dict[str, Any]]] = {}
     for provider, bundles in raw_by_provider.items():
         raw_count_per_query[provider] = {}
         top_titles_per_query[provider] = {}
+        provider_errors[provider] = []
         for bundle in bundles:
             query = str(bundle.get("query") or "")
-            items = _raw_items_from_response(bundle.get("response") or {})
+            response = bundle.get("response") or {}
+            items = _raw_items_from_response(response)
             raw_count_per_query[provider][query] = len(items)
             top_titles_per_query[provider][query] = [
                 title
                 for title in [_raw_title(item) for item in items[:5]]
                 if title
             ]
+            if response.get("error"):
+                provider_errors[provider].append(
+                    {
+                        "query": query,
+                        "error": response.get("error"),
+                        "status_code": response.get("status_code"),
+                        "error_message": response.get("error_message", ""),
+                    }
+                )
 
     return {
         "question": question,
         "query_plan": query_plan,
         "queries_per_provider": queries_by_provider,
         "raw_count_per_query": raw_count_per_query,
+        "provider_errors": provider_errors,
         "merged_count": len(merged_papers),
         "duplicate_count": duplicate_count,
+        "year_filter": year_filter_stats or {},
         "missing_abstract_count": sum(1 for paper in merged_papers if not paper.abstract),
         "top_titles_per_query": top_titles_per_query,
         "top_10_score_breakdown": [
@@ -857,6 +877,62 @@ def build_retrieval_diagnostics(
             }
             for item in ranked_papers[:10]
         ],
+    }
+
+
+def filter_papers_by_from_year(
+    papers: list[Paper],
+    from_year: int | None,
+) -> tuple[list[Paper], dict[str, Any]]:
+    """Apply a hard local publication-year filter after provider retrieval."""
+
+    if not from_year:
+        return papers, {
+            "from_year": None,
+            "enabled": False,
+            "input_count": len(papers),
+            "kept_count": len(papers),
+            "excluded_before_year_count": 0,
+            "excluded_missing_year_count": 0,
+        }
+    kept: list[Paper] = []
+    excluded_before = 0
+    excluded_missing = 0
+    examples: list[dict[str, Any]] = []
+    for paper in papers:
+        if paper.year is None:
+            excluded_missing += 1
+            if len(examples) < 10:
+                examples.append(
+                    {
+                        "paper_id": paper.paper_id,
+                        "title": paper.title,
+                        "year": None,
+                        "reason": "missing_year",
+                    }
+                )
+            continue
+        if paper.year < from_year:
+            excluded_before += 1
+            if len(examples) < 10:
+                examples.append(
+                    {
+                        "paper_id": paper.paper_id,
+                        "title": paper.title,
+                        "year": paper.year,
+                        "reason": "before_from_year",
+                    }
+                )
+            continue
+        kept.append(paper)
+    return kept, {
+        "from_year": from_year,
+        "enabled": True,
+        "input_count": len(papers),
+        "kept_count": len(kept),
+        "excluded_before_year_count": excluded_before,
+        "excluded_missing_year_count": excluded_missing,
+        "excluded_examples": examples,
     }
 
 
@@ -890,6 +966,30 @@ def run_pipeline(
 
     out = ensure_dir(output_dir)
     ensure_dir("data/cache")
+    run_logger = ScreeningRunLogger(out)
+    external_progress_callback = progress_callback
+
+    def log_progress(stage: str, message: str, details: dict[str, Any]) -> None:
+        run_logger.log(stage, message, details)
+        if external_progress_callback:
+            external_progress_callback(stage, message, details)
+
+    progress_callback = log_progress
+    progress_callback(
+        "start",
+        "Pipeline started",
+        {
+            "providers": providers,
+            "max_per_query": max_per_query,
+            "from_year": from_year,
+            "output_dir": str(out),
+            "llm_backend": llm_backend,
+            "planner_mode": planner_mode,
+            "extractor_mode": extractor_mode,
+            "verifier_mode": verifier_mode,
+            "use_cache": use_cache,
+        },
+    )
 
     config = PipelineConfig(
         providers=providers,
@@ -1033,14 +1133,24 @@ def run_pipeline(
         progress_callback=progress_callback,
         sort_mode=sort_preference,
     )
+    raw_paper_count_before_year_filter = len(raw_papers)
     if progress_callback:
         progress_callback(
             "retrieval",
             "Retrieval finished",
             {
-                "raw_paper_count": len(raw_papers),
+                "raw_paper_count": raw_paper_count_before_year_filter,
                 "retrieval_counts_by_provider": retrieval_counts,
             },
+        )
+    raw_papers, year_filter_stats = filter_papers_by_from_year(raw_papers, from_year)
+    if progress_callback:
+        progress_callback(
+            "retrieval",
+            "Local year filter applied"
+            if year_filter_stats.get("enabled")
+            else "Local year filter skipped",
+            year_filter_stats,
         )
 
     if progress_callback:
@@ -1192,7 +1302,7 @@ def run_pipeline(
     )
     prisma_like_flow = build_prisma_like_flow(
         retrieval_counts=retrieval_counts,
-        raw_paper_count=len(raw_papers),
+        raw_paper_count=raw_paper_count_before_year_filter,
         merged_papers=merged_papers,
         duplicate_count=duplicate_count,
         verification_results=verification_results,
@@ -1207,7 +1317,7 @@ def run_pipeline(
         )
     metrics = compute_evaluation(
         retrieval_counts=retrieval_counts,
-        original_paper_count=len(raw_papers),
+        original_paper_count=raw_paper_count_before_year_filter,
         merged_papers=merged_papers,
         evidence_records=evidence_records,
         verification_results=verification_results,
@@ -1216,6 +1326,7 @@ def run_pipeline(
         gold_labels_path=gold_labels_path,
     )
     metrics["duplicate_count"] = duplicate_count
+    metrics["year_filter"] = year_filter_stats
     metrics["scoring_weights"] = active_scoring_weights
     metrics["query_controls"] = {
         "strictness": strictness,
@@ -1257,7 +1368,7 @@ def run_pipeline(
         question_refinement=question_refinement,
         planner_metadata=planner_metadata,
         retrieval_counts=retrieval_counts,
-        raw_paper_count=len(raw_papers),
+        raw_paper_count=raw_paper_count_before_year_filter,
         merged_papers=merged_papers,
         duplicate_count=duplicate_count,
         evidence_records=evidence_records,
@@ -1266,6 +1377,7 @@ def run_pipeline(
         ranked_papers=ranked_final,
         scoring_weights=active_scoring_weights,
         result_groups=result_groups,
+        year_filter_stats=year_filter_stats,
     )
     write_json(out / "agent_trace.json", trace)
     write_json(out / "result_groups.json", result_groups)
@@ -1278,6 +1390,7 @@ def run_pipeline(
         merged_papers=merged_papers,
         duplicate_count=duplicate_count,
         ranked_papers=ranked_final,
+        year_filter_stats=year_filter_stats,
     )
     write_json(out / "retrieval_diagnostics.json", retrieval_diagnostics)
     generate_paper_cards(
@@ -1343,7 +1456,7 @@ def run_pipeline(
         question=question,
         planning_question=planning_question,
         translated_question=str(planner_metadata.get("translated_question") or ""),
-        raw_paper_count=len(raw_papers),
+        raw_paper_count=raw_paper_count_before_year_filter,
         merged_papers=merged_papers,
         evidence_records=evidence_records,
         verification_results=verification_results,
@@ -1455,25 +1568,33 @@ def main(argv: list[str] | None = None) -> int:
         scoring_weights = {
             key: value for key, value in weight_values.items() if value is not None
         } or None
-        result = run_pipeline(
-            question=args.question,
-            providers=args.providers,
-            max_per_query=args.max_per_query,
-            from_year=args.from_year,
-            feedback_path=args.feedback_path,
-            gold_labels_path=args.gold_labels_path,
-            output_dir=args.output_dir,
-            use_cache=not args.disable_cache,
-            llm_backend=args.llm_backend,
-            planner_mode=args.planner_mode,
-            extractor_mode=args.extractor_mode,
-            verifier_mode=args.verifier_mode,
-            scoring_weights=scoring_weights,
-            strictness=args.strictness,
-            openalex_mode=args.openalex_mode,
-            sort_preference=args.sort_preference,
-            ranking_profile=args.ranking_profile,
-        )
+        try:
+            result = run_pipeline(
+                question=args.question,
+                providers=args.providers,
+                max_per_query=args.max_per_query,
+                from_year=args.from_year,
+                feedback_path=args.feedback_path,
+                gold_labels_path=args.gold_labels_path,
+                output_dir=args.output_dir,
+                use_cache=not args.disable_cache,
+                llm_backend=args.llm_backend,
+                planner_mode=args.planner_mode,
+                extractor_mode=args.extractor_mode,
+                verifier_mode=args.verifier_mode,
+                scoring_weights=scoring_weights,
+                strictness=args.strictness,
+                openalex_mode=args.openalex_mode,
+                sort_preference=args.sort_preference,
+                ranking_profile=args.ranking_profile,
+            )
+        except Exception as exc:
+            ScreeningRunLogger(args.output_dir).log_exception(
+                "fatal",
+                exc,
+                {"output_dir": args.output_dir},
+            )
+            raise
         print(f"Report: {result.report_path}")
         print(f"Ranking: {result.ranked_papers_path}")
         print(f"Evaluation: {result.evaluation_path}")

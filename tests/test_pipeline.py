@@ -1,6 +1,8 @@
 import csv
 import json
 
+import pytest
+
 from lit_screening.agents.retriever import RetrieverAgent
 from lit_screening.models import Paper
 from lit_screening.pipeline import plan_screening_queries, run_pipeline
@@ -60,6 +62,56 @@ class RecordingFakeClient(SurfaceMagnetizationFakeClient):
         return super().search(query, max_results, from_year)
 
 
+class ExplodingClient:
+    provider_name = "fake"
+
+    def search(self, query, max_results, from_year=None):
+        raise TypeError("'NoneType' object is not iterable")
+
+
+class MixedYearFakeClient:
+    provider_name = "fake"
+
+    def search(self, query, max_results, from_year=None):
+        old_paper = Paper(
+            paper_id="old-paper",
+            title="An early surface magnetization study",
+            abstract="Surface magnetization was discussed in an early materials paper.",
+            authors=["A. Early"],
+            year=1988,
+            venue="Archive Journal",
+            doi="10.1234/old",
+            url="https://example.test/old",
+            source_provider="fake",
+            citation_count=20,
+        )
+        new_paper = Paper(
+            paper_id="new-paper",
+            title="Recent surface magnetization in antiferromagnetic materials",
+            abstract=(
+                "Recent work studies surface magnetization in antiferromagnetic "
+                "materials and boundary spin signals."
+            ),
+            authors=["A. Recent"],
+            year=2024,
+            venue="Demo Journal",
+            doi="10.1234/new",
+            url="https://example.test/new",
+            source_provider="fake",
+            citation_count=8,
+        )
+        return RetrievalResult(
+            raw={
+                "query": query,
+                "data": [
+                    {"title": old_paper.title, "year": old_paper.year},
+                    {"title": new_paper.title, "year": new_paper.year},
+                ],
+            },
+            papers=[old_paper, new_paper],
+        )
+
+
 def test_pipeline_with_fake_retrievers_and_no_internet(tmp_path):
     feedback_path = tmp_path / "feedback.csv"
     with feedback_path.open("w", newline="", encoding="utf-8") as handle:
@@ -97,6 +149,7 @@ def test_pipeline_with_fake_retrievers_and_no_internet(tmp_path):
     assert (output_dir / "ranked_papers.csv").exists()
     assert (output_dir / "evaluation.json").exists()
     assert (output_dir / "agent_trace.json").exists()
+    assert (output_dir / "run_events.jsonl").exists()
     assert (output_dir / "search_brief.json").exists()
     assert (output_dir / "question_refinement.json").exists()
     assert (output_dir / "result_groups.json").exists()
@@ -113,6 +166,38 @@ def test_pipeline_with_fake_retrievers_and_no_internet(tmp_path):
     assert "research_intent" in result.agent_trace
     assert "aspect_coverage" in result.agent_trace
     assert result.agent_trace["planner"]["queries"]
+    events = (output_dir / "run_events.jsonl").read_text()
+    assert "Pipeline started" in events
+    assert "Literature screening complete" in events
+
+
+def test_pipeline_applies_hard_local_from_year_filter(tmp_path):
+    retriever = RetrieverAgent(clients={"fake": MixedYearFakeClient()})
+
+    result = run_pipeline(
+        question="surface magnetization",
+        providers=["fake"],
+        max_per_query=2,
+        from_year=2020,
+        output_dir=str(tmp_path / "outputs"),
+        retriever_agent=retriever,
+        planned_queries_override=["surface magnetization"],
+    )
+
+    output_dir = tmp_path / "outputs"
+    diagnostics = json.loads((output_dir / "retrieval_diagnostics.json").read_text())
+    evaluation = json.loads((output_dir / "evaluation.json").read_text())
+    merged_csv = (output_dir / "merged_papers.csv").read_text()
+
+    assert result.raw_paper_count == 2
+    assert result.merged_paper_count == 1
+    assert all((paper.year or 0) >= 2020 for paper in result.merged_papers)
+    assert result.ranked_final[0].paper.paper_id == "new-paper"
+    assert "old-paper" not in merged_csv
+    assert diagnostics["year_filter"]["enabled"] is True
+    assert diagnostics["year_filter"]["excluded_before_year_count"] == 1
+    assert diagnostics["year_filter"]["kept_count"] == 1
+    assert evaluation["year_filter"]["excluded_before_year_count"] == 1
 
 
 def test_pipeline_uses_english_planning_question_for_chinese_input(tmp_path):
@@ -221,7 +306,25 @@ def test_retrieval_diagnostics_json_is_produced(tmp_path):
     assert diagnostics["question"] == "surface magnetization"
     assert diagnostics["merged_count"] == 1
     assert diagnostics["raw_count_per_query"]["fake"]
+    assert "provider_errors" in diagnostics
     assert diagnostics["top_10_score_breakdown"]
+
+
+def test_retriever_writes_raw_error_when_provider_raises(tmp_path):
+    retriever = RetrieverAgent(clients={"fake": ExplodingClient()})
+
+    with pytest.raises(TypeError):
+        retriever.retrieve(
+            queries={"fake": ["surface magnetization"]},
+            providers=["fake"],
+            max_per_query=1,
+            from_year=None,
+            output_dir=tmp_path,
+        )
+
+    raw = json.loads((tmp_path / "raw_fake_results.json").read_text())
+    assert raw[0]["response"]["error"] == "TypeError"
+    assert "NoneType" in raw[0]["response"]["error_message"]
 
 
 def test_fake_pipeline_produces_sensemaking_outputs(tmp_path):

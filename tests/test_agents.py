@@ -4,6 +4,7 @@ from lit_screening.agents.planner import (
     build_openalex_queries,
     build_semantic_scholar_queries,
 )
+from lit_screening.agents.research_intent import ResearchIntentAgent
 from lit_screening.agents.verifier import VerifierAgent
 from lit_screening.models import EvidenceRecord, Paper, QueryPlan
 
@@ -64,6 +65,23 @@ def test_structured_planner_does_not_inject_llm_terms_for_materials_question():
     assert "llm" not in joined
     assert "multi-agent" not in joined
     assert "human feedback" not in joined
+
+
+def test_research_intent_defaults_plain_science_question_to_overview():
+    brief = ResearchIntentAgent().analyze("surface magnetization")
+
+    assert brief.search_intent == "overview"
+    assert "systematic review" not in brief.inclusion_criteria
+    assert "screening criteria" not in brief.inclusion_criteria
+
+
+def test_planner_does_not_use_full_question_as_must_term():
+    question = "the significance of surface magnetization"
+    plan = PlannerAgent().plan_structured(question)
+
+    assert question not in plan.must_terms
+    assert "systematic review" not in plan.must_terms
+    assert "surface magnetization" in plan.openalex_queries
 
 
 def test_structured_planner_includes_llm_terms_for_llm_agent_question():

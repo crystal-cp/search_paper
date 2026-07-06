@@ -60,6 +60,18 @@ class OpenAlexClient:
             if cached is not None:
                 return RetrievalResult(raw=cached, papers=self._normalize_many(cached))
 
+        if not self.api_key:
+            return RetrievalResult(
+                raw={
+                    "results": [],
+                    "error": "missing_api_key",
+                    "status_code": None,
+                    "error_message": "OPENALEX_API_KEY is required by the current OpenAlex API.",
+                    "provider": self.provider_name,
+                },
+                papers=[],
+            )
+
         params: dict[str, Any] = {
             "search": query,
             "per-page": max_results,
@@ -101,42 +113,49 @@ class OpenAlexClient:
                 raw = {
                     "results": [],
                     "error": last_error,
+                    **request_error_details(exc),
                     "provider": self.provider_name,
                 }
 
         return RetrievalResult(raw=raw, papers=self._normalize_many(raw))
 
     def _normalize_many(self, raw: dict[str, Any]) -> list[Paper]:
-        return [self._normalize_result(item) for item in raw.get("results", [])]
+        return [
+            self._normalize_result(item)
+            for item in as_list(raw.get("results"))
+            if isinstance(item, dict)
+        ]
 
     def _normalize_result(self, item: dict[str, Any]) -> Paper:
         title = item.get("title") or item.get("display_name") or ""
         doi = normalize_doi(item.get("doi"))
         openalex_id = item.get("id") or ""
         abstract = reconstruct_abstract(item.get("abstract_inverted_index"))
-        authors = [
-            authorship.get("author", {}).get("display_name", "")
-            for authorship in item.get("authorships", [])
-            if authorship.get("author", {}).get("display_name")
-        ]
-        primary_location = item.get("primary_location") or {}
-        source = primary_location.get("source") or {}
-        venue = source.get("display_name") or item.get("host_venue", {}).get("display_name", "")
+        authors = []
+        for authorship in as_list(item.get("authorships")):
+            author = as_dict(as_dict(authorship).get("author"))
+            display_name = author.get("display_name", "")
+            if display_name:
+                authors.append(display_name)
+        primary_location = as_dict(item.get("primary_location"))
+        source = as_dict(primary_location.get("source"))
+        host_venue = as_dict(item.get("host_venue"))
+        venue = source.get("display_name") or host_venue.get("display_name", "")
         url = item.get("doi") or item.get("landing_page_url") or openalex_id
         paper_id = stable_id(doi or openalex_id or title)
         relevance_score = safe_float(item.get("relevance_score"))
         concepts = [
-            concept.get("display_name", "")
-            for concept in item.get("concepts", [])
-            if concept.get("display_name")
+            as_dict(concept).get("display_name", "")
+            for concept in as_list(item.get("concepts"))
+            if as_dict(concept).get("display_name")
         ]
         topics = [
-            topic.get("display_name", "")
-            for topic in item.get("topics", [])
-            if topic.get("display_name")
+            as_dict(topic).get("display_name", "")
+            for topic in as_list(item.get("topics"))
+            if as_dict(topic).get("display_name")
         ]
-        open_access = item.get("open_access") or {}
-        best_location = item.get("best_oa_location") or {}
+        open_access = as_dict(item.get("open_access"))
+        best_location = as_dict(item.get("best_oa_location"))
         open_access_pdf_url = (
             best_location.get("pdf_url")
             or primary_location.get("pdf_url")
@@ -201,3 +220,27 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def as_list(value: Any) -> list[Any]:
+    """Return a list for provider fields that may be null."""
+
+    return value if isinstance(value, list) else []
+
+
+def as_dict(value: Any) -> dict[str, Any]:
+    """Return a dict for provider fields that may be null."""
+
+    return value if isinstance(value, dict) else {}
+
+
+def request_error_details(exc: requests.RequestException) -> dict[str, Any]:
+    """Return safe request-error details without leaking request headers or keys."""
+
+    response = getattr(exc, "response", None)
+    if response is None:
+        return {"status_code": None, "error_message": str(exc)[:300]}
+    return {
+        "status_code": response.status_code,
+        "error_message": response.text[:300],
+    }
