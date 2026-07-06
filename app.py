@@ -15,7 +15,7 @@ import pandas as pd
 import streamlit as st
 
 from lit_screening.agents.human_feedback import HumanFeedbackAgent
-from lit_screening.models import FeedbackRecord, PipelineResult, RankedPaper
+from lit_screening.models import FeedbackRecord, PipelineResult, QueryPlan, RankedPaper
 from lit_screening.pipeline import (
     apply_feedback_to_pipeline_result,
     plan_screening_queries,
@@ -168,6 +168,10 @@ def save_project_manifest(
         "max_per_query": settings["max_per_query"],
         "from_year": settings["from_year"],
         "llm_backend": settings["llm_backend"],
+        "strictness": settings.get("strictness", "balanced"),
+        "openalex_mode": settings.get("openalex_mode", "keyword+semantic"),
+        "sort_preference": settings.get("sort_preference", "relevance"),
+        "ranking_profile": settings.get("ranking_profile", "balanced"),
         "scoring_weights": result.scoring_weights,
         "merged_paper_count": result.merged_paper_count,
         "duplicate_count": result.duplicate_count,
@@ -305,6 +309,33 @@ def render_sidebar() -> dict[str, Any]:
     use_cache = st.sidebar.checkbox(ui_text(language, "Use cache", "使用缓存"), value=True)
     llm_backend = st.sidebar.selectbox("LLM backend", ["none", "deepseek"], index=0)
 
+    with st.sidebar.expander(ui_text(language, "Search Mode", "检索模式"), expanded=True):
+        strictness = st.selectbox(
+            ui_text(language, "Strictness", "检索严格度"),
+            ["strict", "balanced", "broad"],
+            index=1,
+            help=ui_text(
+                language,
+                "Strict uses fewer required terms, broad allows more alternatives.",
+                "strict 更聚焦，broad 会放宽主题替代词。",
+            ),
+        )
+        openalex_mode = st.selectbox(
+            "OpenAlex mode",
+            ["keyword", "semantic", "keyword+semantic"],
+            index=2,
+        )
+        sort_preference = st.selectbox(
+            ui_text(language, "Sort preference", "排序偏好"),
+            ["relevance", "recent", "cited"],
+            index=0,
+        )
+        ranking_profile = st.selectbox(
+            ui_text(language, "Ranking profile", "排序配置"),
+            ["relevance_first", "balanced", "high_quality_review"],
+            index=1,
+        )
+
     with st.sidebar.expander(ui_text(language, "API Keys", "API 设置")):
         st.text_input(
             "OPENALEX_API_KEY",
@@ -411,6 +442,10 @@ def render_sidebar() -> dict[str, Any]:
         "extractor_mode": extractor_mode,
         "verifier_mode": verifier_mode,
         "scoring_weights": weights,
+        "strictness": strictness,
+        "openalex_mode": openalex_mode,
+        "sort_preference": sort_preference,
+        "ranking_profile": ranking_profile,
     }
 
 
@@ -445,6 +480,12 @@ def ensure_state() -> None:
     st.session_state.setdefault("query_preview", None)
     st.session_state.setdefault("query_preview_signature", None)
     st.session_state.setdefault("query_editor_text", "")
+    st.session_state.setdefault("core_terms_text", "")
+    st.session_state.setdefault("must_terms_text", "")
+    st.session_state.setdefault("optional_terms_text", "")
+    st.session_state.setdefault("exclude_terms_text", "")
+    st.session_state.setdefault("openalex_queries_text", "")
+    st.session_state.setdefault("semantic_scholar_queries_text", "")
 
 
 def query_preview_signature(question: str, settings: dict[str, Any]) -> dict[str, Any]:
@@ -454,6 +495,10 @@ def query_preview_signature(question: str, settings: dict[str, Any]) -> dict[str
         "question": question,
         "llm_backend": settings["llm_backend"],
         "planner_mode": settings["planner_mode"],
+        "strictness": settings["strictness"],
+        "openalex_mode": settings["openalex_mode"],
+        "sort_preference": settings["sort_preference"],
+        "ranking_profile": settings["ranking_profile"],
     }
 
 
@@ -465,10 +510,23 @@ def generate_query_preview(question: str, settings: dict[str, Any]) -> None:
             question=question,
             llm_backend=settings["llm_backend"],
             planner_mode=settings["planner_mode"],
+            strictness=settings["strictness"],
+            openalex_mode=settings["openalex_mode"],
+            sort_preference=settings["sort_preference"],
+            ranking_profile=settings["ranking_profile"],
         )
     st.session_state.query_preview = plan
     st.session_state.query_preview_signature = query_preview_signature(question, settings)
     st.session_state.query_editor_text = "\n".join(plan["queries"])
+    query_plan = plan["query_plan"]
+    st.session_state.core_terms_text = "\n".join(query_plan.core_terms)
+    st.session_state.must_terms_text = "\n".join(query_plan.must_terms)
+    st.session_state.optional_terms_text = "\n".join(query_plan.optional_terms)
+    st.session_state.exclude_terms_text = "\n".join(query_plan.exclude_terms)
+    st.session_state.openalex_queries_text = "\n".join(query_plan.openalex_queries)
+    st.session_state.semantic_scholar_queries_text = "\n".join(
+        query_plan.semantic_scholar_queries
+    )
     st.session_state.pipeline_result = None
     st.session_state.saved_project = None
 
@@ -484,10 +542,58 @@ def parse_query_editor_text(text: str) -> list[str]:
     return queries
 
 
+def preview_query_plan(preview: dict[str, Any]) -> QueryPlan:
+    """Return a QueryPlan object from a preview payload."""
+
+    value = preview.get("query_plan")
+    if isinstance(value, QueryPlan):
+        return value
+    value = value or {}
+    return QueryPlan(
+        original_question=value.get("original_question", preview.get("question", "")),
+        detected_language=value.get("detected_language", "en"),
+        translated_question=value.get("translated_question", ""),
+        core_terms=list(value.get("core_terms", [])),
+        must_terms=list(value.get("must_terms", [])),
+        optional_terms=list(value.get("optional_terms", [])),
+        exclude_terms=list(value.get("exclude_terms", [])),
+        openalex_queries=list(value.get("openalex_queries", [])),
+        semantic_scholar_queries=list(value.get("semantic_scholar_queries", [])),
+        filters=dict(value.get("filters", {})),
+    )
+
+
+def edited_query_plan(preview: dict[str, Any], settings: dict[str, Any]) -> QueryPlan:
+    """Build a QueryPlan from the current editable UI fields."""
+
+    base = preview_query_plan(preview)
+    return QueryPlan(
+        original_question=base.original_question,
+        detected_language=base.detected_language,
+        translated_question=base.translated_question,
+        core_terms=parse_query_editor_text(st.session_state.core_terms_text),
+        must_terms=parse_query_editor_text(st.session_state.must_terms_text),
+        optional_terms=parse_query_editor_text(st.session_state.optional_terms_text),
+        exclude_terms=parse_query_editor_text(st.session_state.exclude_terms_text),
+        openalex_queries=parse_query_editor_text(st.session_state.openalex_queries_text),
+        semantic_scholar_queries=parse_query_editor_text(
+            st.session_state.semantic_scholar_queries_text
+        ),
+        filters={
+            **base.filters,
+            "strictness": settings["strictness"],
+            "openalex_mode": settings["openalex_mode"],
+            "sort_preference": settings["sort_preference"],
+            "ranking_profile": settings["ranking_profile"],
+        },
+    )
+
+
 def run_screening(
     question: str,
     settings: dict[str, Any],
     planned_queries: list[str] | None = None,
+    query_plan: QueryPlan | None = None,
     planner_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Run the core pipeline and store the result in session state."""
@@ -524,7 +630,12 @@ def run_screening(
                 verifier_mode=settings["verifier_mode"],
                 scoring_weights=settings["scoring_weights"],
                 planned_queries_override=planned_queries,
+                query_plan_override=query_plan,
                 planner_metadata_override=planner_metadata,
+                strictness=settings["strictness"],
+                openalex_mode=settings["openalex_mode"],
+                sort_preference=settings["sort_preference"],
+                ranking_profile=settings["ranking_profile"],
                 progress_callback=progress_callback,
             )
         except Exception:
@@ -617,6 +728,19 @@ def apply_feedback_records(result: PipelineResult, records: dict[str, FeedbackRe
                 "max_per_query": st.session_state.active_manifest.get("max_per_query", 0),
                 "from_year": st.session_state.active_manifest.get("from_year", 0),
                 "llm_backend": st.session_state.active_manifest.get("llm_backend", "none"),
+                "strictness": st.session_state.active_manifest.get("strictness", "balanced"),
+                "openalex_mode": st.session_state.active_manifest.get(
+                    "openalex_mode",
+                    "keyword+semantic",
+                ),
+                "sort_preference": st.session_state.active_manifest.get(
+                    "sort_preference",
+                    "relevance",
+                ),
+                "ranking_profile": st.session_state.active_manifest.get(
+                    "ranking_profile",
+                    "balanced",
+                ),
                 "scoring_weights": result.scoring_weights,
             },
         )
@@ -780,28 +904,54 @@ def render_query_preview_editor(
             )
         )
 
-    st.subheader("Planned Queries")
+    st.subheader("Step 3: Review Query Plan")
     render_question_preprocessing(
         preview.get("question", question),
         preview.get("planner_metadata", {}),
         language,
     )
-    st.text_area(
-        ui_text(language, "Edit queries before retrieval", "检索前编辑 queries"),
-        key="query_editor_text",
-        height=170,
-        help=ui_text(
-            language,
-            "One query per line. Retrieval will use exactly this edited list.",
-            "每行一个 query。正式检索会直接使用这里编辑后的列表。",
-        ),
+    term_cols = st.columns(4)
+    with term_cols[0]:
+        st.text_area("core_terms", key="core_terms_text", height=140)
+    with term_cols[1]:
+        st.text_area("must_terms", key="must_terms_text", height=140)
+    with term_cols[2]:
+        st.text_area("optional_terms", key="optional_terms_text", height=140)
+    with term_cols[3]:
+        st.text_area("exclude_terms", key="exclude_terms_text", height=140)
+
+    query_cols = st.columns(2)
+    with query_cols[0]:
+        st.text_area(
+            "OpenAlex queries",
+            key="openalex_queries_text",
+            height=180,
+            help=ui_text(
+                language,
+                "One OpenAlex query per line. Multi-word core terms should usually stay quoted.",
+                "每行一条 OpenAlex query。多词核心术语通常建议保留引号。",
+            ),
+        )
+    with query_cols[1]:
+        st.text_area(
+            "Semantic Scholar queries",
+            key="semantic_scholar_queries_text",
+            height=180,
+            help=ui_text(
+                language,
+                "One Semantic Scholar query per line. Required terms can use + and excluded terms can use -.",
+                "每行一条 Semantic Scholar query。必选词可以用 +，排除词可以用 -。",
+            ),
+        )
+    openalex_count = len(parse_query_editor_text(st.session_state.openalex_queries_text))
+    semantic_count = len(
+        parse_query_editor_text(st.session_state.semantic_scholar_queries_text)
     )
-    query_count = len(parse_query_editor_text(st.session_state.query_editor_text))
     st.caption(
         ui_text(
             language,
-            f"{query_count} queries ready. No provider API calls have been made at this preview step.",
-            f"当前有 {query_count} 条 queries。预览阶段还没有请求文献 API。",
+            f"{openalex_count} OpenAlex queries and {semantic_count} Semantic Scholar queries ready. No provider API calls have been made at this preview step.",
+            f"当前有 {openalex_count} 条 OpenAlex queries、{semantic_count} 条 Semantic Scholar queries。预览阶段还没有请求文献 API。",
         )
     )
 
@@ -971,7 +1121,7 @@ def main() -> None:
     cleaned_question = question.strip()
     action_cols = st.columns(2)
     with action_cols[0]:
-        if st.button(ui_text(language, "Generate / Preview Queries", "生成 / 预览 Queries"), type="primary"):
+        if st.button(ui_text(language, "Step 2: Generate Query Plan", "第 2 步：生成 Query Plan"), type="primary"):
             if not cleaned_question:
                 st.error(ui_text(language, "Please enter a research question.", "请先输入研究问题。"))
             else:
@@ -985,18 +1135,25 @@ def main() -> None:
         st.session_state.query_preview_signature
         == query_preview_signature(cleaned_question, settings)
     )
-    edited_queries = parse_query_editor_text(st.session_state.query_editor_text)
+    openalex_queries = parse_query_editor_text(st.session_state.openalex_queries_text)
+    semantic_queries = parse_query_editor_text(st.session_state.semantic_scholar_queries_text)
+    selected_query_count = 0
+    if "openalex" in settings["providers"]:
+        selected_query_count += len(openalex_queries)
+    if "semantic_scholar" in settings["providers"]:
+        selected_query_count += len(semantic_queries)
     with action_cols[1]:
         if st.button(
-            ui_text(language, "Run Search With Current Queries", "用当前 Queries 开始检索"),
-            disabled=not preview_ready or not preview_is_current or not edited_queries,
+            ui_text(language, "Step 4: Run Retrieval", "第 4 步：开始检索"),
+            disabled=not preview_ready or not preview_is_current or selected_query_count == 0,
         ):
             try:
                 preview = st.session_state.query_preview or {}
+                current_query_plan = edited_query_plan(preview, settings)
                 run_screening(
                     cleaned_question,
                     settings,
-                    planned_queries=edited_queries,
+                    query_plan=current_query_plan,
                     planner_metadata=preview.get("planner_metadata", {}),
                 )
             except Exception as exc:

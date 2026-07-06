@@ -61,6 +61,15 @@ def merge_papers(left: Paper, right: Paper) -> Paper:
             for provider in provider.split(";")
         }
     )
+    publication_types = list(
+        dict.fromkeys([*base.publication_types, *other.publication_types])
+    )
+    fields_of_study = list(dict.fromkeys([*base.fields_of_study, *other.fields_of_study]))
+    semantic_ranks = [
+        rank
+        for rank in [base.semantic_scholar_rank, other.semantic_scholar_rank]
+        if rank
+    ]
     return replace(
         base,
         abstract=base.abstract or other.abstract,
@@ -72,6 +81,22 @@ def merge_papers(left: Paper, right: Paper) -> Paper:
         source_provider=";".join(providers),
         provider_ids=provider_ids,
         citation_count=max(base.citation_count, other.citation_count),
+        api_relevance_score=max(base.api_relevance_score, other.api_relevance_score),
+        openalex_relevance_score=max(
+            base.openalex_relevance_score,
+            other.openalex_relevance_score,
+        ),
+        semantic_scholar_rank=min(semantic_ranks) if semantic_ranks else 0,
+        publication_date=base.publication_date or other.publication_date,
+        publication_types=publication_types,
+        fields_of_study=fields_of_study,
+        influential_citation_count=max(
+            base.influential_citation_count,
+            other.influential_citation_count,
+        ),
+        reference_count=max(base.reference_count, other.reference_count),
+        open_access_pdf_url=base.open_access_pdf_url or other.open_access_pdf_url,
+        tldr=base.tldr or other.tldr,
     )
 
 

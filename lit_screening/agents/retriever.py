@@ -44,12 +44,13 @@ class RetrieverAgent:
 
     def retrieve(
         self,
-        queries: list[str],
+        queries: list[str] | dict[str, list[str]],
         providers: list[str],
         max_per_query: int,
         from_year: int | None,
         output_dir: str | Path | None = None,
         progress_callback: Callable[[str, str, dict[str, Any]], None] | None = None,
+        sort_mode: str = "relevance",
     ) -> tuple[list[Paper], dict[str, list[dict]], dict[str, int]]:
         """Retrieve papers and optionally save raw provider result bundles."""
 
@@ -61,7 +62,8 @@ class RetrieverAgent:
             if provider not in self.clients:
                 raise ValueError(f"Unknown provider: {provider}")
             client = self.clients[provider]
-            for index, query in enumerate(queries, start=1):
+            provider_queries = queries.get(provider, []) if isinstance(queries, dict) else queries
+            for index, query in enumerate(provider_queries, start=1):
                 if progress_callback:
                     progress_callback(
                         "retrieval",
@@ -70,10 +72,18 @@ class RetrieverAgent:
                             "provider": provider,
                             "query": query,
                             "current_query": index,
-                            "total_queries": len(queries),
+                            "total_queries": len(provider_queries),
                         },
                     )
-                result = client.search(query, max_per_query, from_year)
+                if provider == "openalex":
+                    result = client.search(
+                        query,
+                        max_per_query,
+                        from_year,
+                        sort_mode=sort_mode,
+                    )
+                else:
+                    result = client.search(query, max_per_query, from_year)
                 if not isinstance(result, RetrievalResult):
                     result = RetrievalResult(raw=result[0], papers=result[1])
                 raw_by_provider[provider].append({"query": query, "response": result.raw})

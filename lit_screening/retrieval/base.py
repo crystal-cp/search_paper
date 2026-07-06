@@ -26,5 +26,6 @@ class RetrievalClient(Protocol):
         query: str,
         max_results: int,
         from_year: int | None = None,
+        sort_mode: str = "relevance",
     ) -> RetrievalResult:
         """Search one provider and return normalized papers."""

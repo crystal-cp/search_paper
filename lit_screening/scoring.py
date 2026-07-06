@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import math
 
-from .models import EvidenceRecord, Paper, ScoreBreakdown, VerificationResult
+from .models import EvidenceRecord, Paper, QueryPlan, ScoreBreakdown, VerificationResult
+from .reranking import compute_hybrid_relevance_features
 from .utils import clamp, current_year, keyword_overlap_score
 
 
@@ -15,12 +16,32 @@ DEFAULT_SCORE_WEIGHTS = {
     "quality": 0.15,
     "diversity": 0.05,
 }
+RANKING_PROFILES = {
+    "balanced": DEFAULT_SCORE_WEIGHTS,
+    "relevance_first": {
+        "relevance": 0.55,
+        "evidence": 0.25,
+        "recency": 0.08,
+        "quality": 0.08,
+        "diversity": 0.04,
+    },
+    "high_quality_review": {
+        "relevance": 0.30,
+        "evidence": 0.20,
+        "recency": 0.10,
+        "quality": 0.35,
+        "diversity": 0.05,
+    },
+}
 
 
-def sanitize_score_weights(weights: dict[str, float] | None = None) -> dict[str, float]:
+def sanitize_score_weights(
+    weights: dict[str, float] | None = None,
+    ranking_profile: str = "balanced",
+) -> dict[str, float]:
     """Return complete non-negative scoring weights with defaults filled in."""
 
-    merged = dict(DEFAULT_SCORE_WEIGHTS)
+    merged = dict(RANKING_PROFILES.get(ranking_profile, DEFAULT_SCORE_WEIGHTS))
     if weights:
         for key in merged:
             if key in weights:
@@ -28,19 +49,35 @@ def sanitize_score_weights(weights: dict[str, float] | None = None) -> dict[str,
     return merged
 
 
-def score_relevance(paper: Paper, evidence: EvidenceRecord, question: str) -> float:
+def score_relevance(
+    paper: Paper,
+    evidence: EvidenceRecord,
+    question: str,
+    query_plan: QueryPlan | None = None,
+) -> float:
     """Estimate topical relevance from title, abstract, and extracted evidence."""
 
+    if query_plan is not None:
+        features = compute_hybrid_relevance_features(paper, evidence, query_plan)
+        paper.raw.setdefault("hybrid_reranking", features)
+        return features["hybrid_relevance_score"]
     text = " ".join([paper.title, paper.abstract, evidence.claim, evidence.evidence_sentence])
     return keyword_overlap_score(text, question)
 
 
-def score_evidence(verification: VerificationResult) -> float:
-    """Score evidence quality from verification support and confidence."""
+def score_evidence(
+    verification: VerificationResult,
+    evidence: EvidenceRecord | None = None,
+    question: str = "",
+) -> float:
+    """Score evidence from grounding confidence and question relevance."""
 
-    if not verification.supported:
-        return 0.0
-    return clamp(verification.confidence)
+    evidence_text = ""
+    if evidence is not None:
+        evidence_text = " ".join([evidence.claim, evidence.evidence_sentence])
+    evidence_question_relevance = keyword_overlap_score(evidence_text, question)
+    groundedness = clamp(verification.confidence) if verification.supported else 0.0
+    return clamp(0.60 * groundedness + 0.40 * evidence_question_relevance)
 
 
 def score_recency(year: int | None, now_year: int | None = None) -> float:
@@ -78,10 +115,11 @@ def compute_final_score(
     diversity_score: float,
     human_feedback_adjustment: float = 0.0,
     weights: dict[str, float] | None = None,
+    ranking_profile: str = "balanced",
 ) -> ScoreBreakdown:
     """Compute the requested weighted score formula."""
 
-    score_weights = sanitize_score_weights(weights)
+    score_weights = sanitize_score_weights(weights, ranking_profile=ranking_profile)
     relevance = clamp(relevance_score)
     evidence = clamp(evidence_score)
     recency = clamp(recency_score)
@@ -114,15 +152,18 @@ def score_paper(
     diversity_score: float = 0.5,
     human_feedback_adjustment: float = 0.0,
     weights: dict[str, float] | None = None,
+    query_plan: QueryPlan | None = None,
+    ranking_profile: str = "balanced",
 ) -> ScoreBreakdown:
     """Compute all ranking sub-scores for one paper."""
 
     return compute_final_score(
-        relevance_score=score_relevance(paper, evidence, question),
-        evidence_score=score_evidence(verification),
+        relevance_score=score_relevance(paper, evidence, question, query_plan=query_plan),
+        evidence_score=score_evidence(verification, evidence, question),
         recency_score=score_recency(paper.year),
         quality_score=score_quality(paper.citation_count, paper.venue),
         diversity_score=diversity_score,
         human_feedback_adjustment=human_feedback_adjustment,
         weights=weights,
+        ranking_profile=ranking_profile,
     )

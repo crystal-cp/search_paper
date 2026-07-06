@@ -7,6 +7,22 @@ from typing import Any
 
 
 @dataclass
+class QueryPlan:
+    """Structured, provider-aware search plan for a research question."""
+
+    original_question: str = ""
+    detected_language: str = "en"
+    translated_question: str = ""
+    core_terms: list[str] = field(default_factory=list)
+    must_terms: list[str] = field(default_factory=list)
+    optional_terms: list[str] = field(default_factory=list)
+    exclude_terms: list[str] = field(default_factory=list)
+    openalex_queries: list[str] = field(default_factory=list)
+    semantic_scholar_queries: list[str] = field(default_factory=list)
+    filters: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class Paper:
     """Normalized metadata for one scholarly paper."""
 
@@ -21,6 +37,16 @@ class Paper:
     source_provider: str = ""
     provider_ids: dict[str, str] = field(default_factory=dict)
     citation_count: int = 0
+    api_relevance_score: float = 0.0
+    openalex_relevance_score: float = 0.0
+    semantic_scholar_rank: int = 0
+    publication_date: str = ""
+    publication_types: list[str] = field(default_factory=list)
+    fields_of_study: list[str] = field(default_factory=list)
+    influential_citation_count: int = 0
+    reference_count: int = 0
+    open_access_pdf_url: str = ""
+    tldr: str = ""
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
@@ -120,3 +146,4 @@ class PipelineResult:
     scoring_weights: dict[str, float] = field(default_factory=dict)
     planning_question: str = ""
     translated_question: str = ""
+    query_plan: QueryPlan | None = None

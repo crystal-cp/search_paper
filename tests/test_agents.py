@@ -1,7 +1,11 @@
 from lit_screening.agents.extractor import ExtractorAgent
-from lit_screening.agents.planner import PlannerAgent
+from lit_screening.agents.planner import (
+    PlannerAgent,
+    build_openalex_queries,
+    build_semantic_scholar_queries,
+)
 from lit_screening.agents.verifier import VerifierAgent
-from lit_screening.models import EvidenceRecord, Paper
+from lit_screening.models import EvidenceRecord, Paper, QueryPlan
 
 
 def test_extractor_does_not_hallucinate_when_abstract_is_missing():
@@ -42,6 +46,63 @@ def test_planner_does_not_inject_unrelated_llm_terms():
     assert "llm" not in joined
     assert "human-in-the-loop" not in joined
     assert "multi-agent" not in joined
+
+
+def test_structured_planner_does_not_inject_llm_terms_for_materials_question():
+    plan = PlannerAgent().plan_structured("the significance of surface magnetization")
+    joined = " ".join(
+        [
+            *plan.core_terms,
+            *plan.must_terms,
+            *plan.optional_terms,
+            *plan.openalex_queries,
+            *plan.semantic_scholar_queries,
+        ]
+    ).lower()
+
+    assert "surface magnetization" in joined
+    assert "llm" not in joined
+    assert "multi-agent" not in joined
+    assert "human feedback" not in joined
+
+
+def test_structured_planner_includes_llm_terms_for_llm_agent_question():
+    plan = PlannerAgent().plan_structured(
+        "How can human feedback improve multi-agent LLM literature screening?"
+    )
+    joined = " ".join([*plan.core_terms, *plan.openalex_queries]).lower()
+
+    assert "human feedback" in joined
+    assert "llm" in joined
+    assert "literature screening" in joined
+
+
+def test_openalex_query_builder_quotes_multi_word_core_terms():
+    plan = QueryPlan(
+        original_question="surface magnetization",
+        core_terms=["surface magnetization"],
+        must_terms=["surface magnetization"],
+        optional_terms=["review"],
+    )
+
+    queries = build_openalex_queries(plan)
+
+    assert any('"surface magnetization"' in query for query in queries)
+
+
+def test_semantic_scholar_query_builder_uses_required_and_excluded_terms():
+    plan = QueryPlan(
+        original_question="surface magnetization",
+        core_terms=["surface magnetization"],
+        must_terms=["surface magnetization"],
+        optional_terms=["review"],
+        exclude_terms=["device noise"],
+    )
+
+    queries = build_semantic_scholar_queries(plan)
+
+    assert any('+"surface magnetization"' in query for query in queries)
+    assert any('-"device noise"' in query for query in queries)
 
 
 def test_planner_translates_common_chinese_terms_without_llm():

@@ -22,6 +22,7 @@ from .models import (
     FeedbackRecord,
     Paper,
     PipelineResult,
+    QueryPlan,
     RankedPaper,
     VerificationResult,
 )
@@ -314,6 +315,7 @@ def build_agent_trace(
     question: str,
     planning_question: str,
     queries: list[str],
+    query_plan: QueryPlan | None,
     planner_metadata: dict[str, Any],
     retrieval_counts: dict[str, int],
     raw_paper_count: int,
@@ -332,6 +334,7 @@ def build_agent_trace(
         "planning_question": planning_question,
         "planner": {
             "queries": queries,
+            "query_plan": query_plan,
             "metadata": planner_metadata,
             "decision": "Generated scholarly queries from the user's actual topic.",
         },
@@ -468,20 +471,71 @@ def apply_feedback_to_pipeline_result(
 
 def _query_plan_payload(
     question: str,
-    queries: list[str],
+    query_plan: QueryPlan,
     planner_metadata: dict[str, Any],
 ) -> dict[str, Any]:
     """Build the serializable query-plan payload used by CLI and UI."""
 
-    planning_question = str(planner_metadata.get("planning_question") or question)
+    planning_question = query_plan.translated_question or query_plan.original_question or question
+    queries = _combined_queries(query_plan)
     return {
         "question": question,
         "planning_question": planning_question,
-        "translated_question": planner_metadata.get("translated_question", ""),
+        "translated_question": query_plan.translated_question,
         "queries": queries,
+        "queries_by_provider": {
+            "openalex": query_plan.openalex_queries,
+            "semantic_scholar": query_plan.semantic_scholar_queries,
+        },
+        "query_plan": query_plan,
         "planner_metadata": planner_metadata,
         "llm": planner_metadata,
     }
+
+
+def _combined_queries(query_plan: QueryPlan) -> list[str]:
+    """Flatten provider-specific queries into a backward-compatible query list."""
+
+    return _unique_strings(
+        [
+            query_plan.translated_question or query_plan.original_question,
+            *query_plan.openalex_queries,
+            *query_plan.semantic_scholar_queries,
+        ]
+    )
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    """Return unique non-empty strings while preserving order."""
+
+    unique: list[str] = []
+    for value in values:
+        cleaned = " ".join(str(value).split())
+        if cleaned and cleaned not in unique:
+            unique.append(cleaned)
+    return unique
+
+
+def _coerce_query_plan(value: QueryPlan | dict[str, Any] | None) -> QueryPlan | None:
+    """Convert UI/API query-plan payloads back into a QueryPlan dataclass."""
+
+    if value is None:
+        return None
+    if isinstance(value, QueryPlan):
+        return value
+    data = value.get("query_plan", value)
+    return QueryPlan(
+        original_question=data.get("original_question", ""),
+        detected_language=data.get("detected_language", "en"),
+        translated_question=data.get("translated_question", ""),
+        core_terms=list(data.get("core_terms", [])),
+        must_terms=list(data.get("must_terms", [])),
+        optional_terms=list(data.get("optional_terms", [])),
+        exclude_terms=list(data.get("exclude_terms", [])),
+        openalex_queries=list(data.get("openalex_queries", [])),
+        semantic_scholar_queries=list(data.get("semantic_scholar_queries", [])),
+        filters=dict(data.get("filters", {})),
+    )
 
 
 def _manual_planner_metadata(
@@ -516,18 +570,32 @@ def _make_query_plan(
     question: str,
     planner_mode: str,
     active_llm_client: GenericLLMClient | None,
+    strictness: str = "balanced",
+    openalex_mode: str = "keyword+semantic",
+    sort_preference: str = "relevance",
+    ranking_profile: str = "balanced",
 ) -> dict[str, Any]:
     """Run the planner and return a structured query plan."""
 
     planner = PlannerAgent(mode=planner_mode, llm_client=active_llm_client)
-    queries = planner.plan(question)
-    return _query_plan_payload(question, queries, planner.last_llm_metadata)
+    query_plan = planner.plan_structured(
+        question,
+        strictness=strictness,
+        openalex_mode=openalex_mode,
+        sort_preference=sort_preference,
+        ranking_profile=ranking_profile,
+    )
+    return _query_plan_payload(question, query_plan, planner.last_llm_metadata)
 
 
 def plan_screening_queries(
     question: str,
     llm_backend: str = "none",
     planner_mode: str = "rule",
+    strictness: str = "balanced",
+    openalex_mode: str = "keyword+semantic",
+    sort_preference: str = "relevance",
+    ranking_profile: str = "balanced",
     llm_client: GenericLLMClient | None = None,
 ) -> dict[str, Any]:
     """Plan English scholarly queries without running retrieval.
@@ -538,7 +606,106 @@ def plan_screening_queries(
 
     config = PipelineConfig(llm_backend=llm_backend)
     active_llm_client = build_llm_client(config, llm_backend, llm_client)
-    return _make_query_plan(question, planner_mode, active_llm_client)
+    return _make_query_plan(
+        question,
+        planner_mode,
+        active_llm_client,
+        strictness=strictness,
+        openalex_mode=openalex_mode,
+        sort_preference=sort_preference,
+        ranking_profile=ranking_profile,
+    )
+
+
+def _queries_by_provider(
+    providers: list[str],
+    query_plan: QueryPlan,
+    combined_queries: list[str],
+) -> dict[str, list[str]]:
+    """Return provider-specific queries with a fallback for custom test providers."""
+
+    query_map = {
+        "openalex": query_plan.openalex_queries,
+        "semantic_scholar": query_plan.semantic_scholar_queries,
+    }
+    fallback_queries = combined_queries
+    if query_plan.filters.get("query_source") == "user_confirmed":
+        fallback_queries = query_plan.openalex_queries or query_plan.semantic_scholar_queries
+    return {
+        provider: query_map.get(provider) or fallback_queries
+        for provider in providers
+    }
+
+
+def _raw_items_from_response(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return provider result items from a raw response."""
+
+    items = response.get("results")
+    if isinstance(items, list):
+        return [item for item in items if isinstance(item, dict)]
+    items = response.get("data")
+    if isinstance(items, list):
+        return [item for item in items if isinstance(item, dict)]
+    return []
+
+
+def _raw_title(item: dict[str, Any]) -> str:
+    return str(item.get("title") or item.get("display_name") or "")
+
+
+def build_retrieval_diagnostics(
+    question: str,
+    query_plan: QueryPlan,
+    queries_by_provider: dict[str, list[str]],
+    raw_by_provider: dict[str, list[dict]],
+    merged_papers: list[Paper],
+    duplicate_count: int,
+    ranked_papers: list[RankedPaper],
+) -> dict[str, Any]:
+    """Build transparent retrieval and reranking diagnostics."""
+
+    raw_count_per_query: dict[str, dict[str, int]] = {}
+    top_titles_per_query: dict[str, dict[str, list[str]]] = {}
+    for provider, bundles in raw_by_provider.items():
+        raw_count_per_query[provider] = {}
+        top_titles_per_query[provider] = {}
+        for bundle in bundles:
+            query = str(bundle.get("query") or "")
+            items = _raw_items_from_response(bundle.get("response") or {})
+            raw_count_per_query[provider][query] = len(items)
+            top_titles_per_query[provider][query] = [
+                title
+                for title in [_raw_title(item) for item in items[:5]]
+                if title
+            ]
+
+    return {
+        "question": question,
+        "query_plan": query_plan,
+        "queries_per_provider": queries_by_provider,
+        "raw_count_per_query": raw_count_per_query,
+        "merged_count": len(merged_papers),
+        "duplicate_count": duplicate_count,
+        "missing_abstract_count": sum(1 for paper in merged_papers if not paper.abstract),
+        "top_titles_per_query": top_titles_per_query,
+        "top_10_score_breakdown": [
+            {
+                "rank": item.rank,
+                "paper_id": item.paper.paper_id,
+                "title": item.paper.title,
+                "final_score": item.scores.final_score,
+                "relevance_score": item.scores.relevance_score,
+                "evidence_score": item.scores.evidence_score,
+                "recency_score": item.scores.recency_score,
+                "quality_score": item.scores.quality_score,
+                "diversity_score": item.scores.diversity_score,
+                "api_relevance_score": item.paper.api_relevance_score,
+                "hybrid_reranking": item.paper.raw.get("hybrid_reranking", {}),
+                "support_level": item.verification.support_level,
+            }
+            for item in ranked_papers[:10]
+        ],
+    }
 
 
 def run_pipeline(
@@ -556,7 +723,12 @@ def run_pipeline(
     verifier_mode: str = "rule",
     scoring_weights: dict[str, float] | None = None,
     planned_queries_override: list[str] | None = None,
+    query_plan_override: QueryPlan | dict[str, Any] | None = None,
     planner_metadata_override: dict[str, Any] | None = None,
+    strictness: str = "balanced",
+    openalex_mode: str = "keyword+semantic",
+    sort_preference: str = "relevance",
+    ranking_profile: str = "balanced",
     llm_client: GenericLLMClient | None = None,
     retriever_agent: RetrieverAgent | None = None,
     progress_callback: Callable[[str, str, dict[str, Any]], None] | None = None,
@@ -576,7 +748,10 @@ def run_pipeline(
     )
 
     active_llm_client = build_llm_client(config, llm_backend, llm_client)
-    active_scoring_weights = sanitize_score_weights(scoring_weights)
+    active_scoring_weights = sanitize_score_weights(
+        scoring_weights,
+        ranking_profile=ranking_profile,
+    )
 
     if progress_callback:
         progress_callback(
@@ -585,28 +760,70 @@ def run_pipeline(
             {
                 "planner_mode": planner_mode,
                 "llm_backend": llm_backend,
-                "query_override": planned_queries_override is not None,
+                "query_override": planned_queries_override is not None
+                or query_plan_override is not None,
             },
         )
-    if planned_queries_override is None:
-        query_plan = _make_query_plan(question, planner_mode, active_llm_client)
+    if planned_queries_override is None and query_plan_override is None:
+        query_plan_payload = _make_query_plan(
+            question,
+            planner_mode,
+            active_llm_client,
+            strictness=strictness,
+            openalex_mode=openalex_mode,
+            sort_preference=sort_preference,
+            ranking_profile=ranking_profile,
+        )
     else:
-        cleaned_queries = [
-            " ".join(query.split())
-            for query in planned_queries_override
-            if isinstance(query, str) and " ".join(query.split())
-        ]
         planner_metadata = _manual_planner_metadata(
             question,
             planner_mode,
             planner_metadata_override,
         )
-        query_plan = _query_plan_payload(question, cleaned_queries, planner_metadata)
+        structured_override = _coerce_query_plan(query_plan_override)
+        if structured_override is None:
+            cleaned_queries = [
+                " ".join(query.split())
+                for query in planned_queries_override or []
+                if isinstance(query, str) and " ".join(query.split())
+            ]
+            structured_override = QueryPlan(
+                original_question=question,
+                detected_language="zh"
+                if planner_metadata.get("question_language") == "zh"
+                else "en",
+                translated_question=str(planner_metadata.get("translated_question") or ""),
+                openalex_queries=cleaned_queries,
+                semantic_scholar_queries=cleaned_queries,
+                filters={
+                    "strictness": strictness,
+                    "openalex_mode": openalex_mode,
+                    "sort_preference": sort_preference,
+                    "ranking_profile": ranking_profile,
+                    "query_source": "user_confirmed",
+                },
+            )
+        else:
+            structured_override.filters = {
+                **structured_override.filters,
+                "strictness": strictness,
+                "openalex_mode": openalex_mode,
+                "sort_preference": sort_preference,
+                "ranking_profile": ranking_profile,
+                "query_source": "user_confirmed",
+            }
+        query_plan_payload = _query_plan_payload(
+            question,
+            structured_override,
+            planner_metadata,
+        )
 
-    queries = query_plan["queries"]
-    planner_metadata = query_plan["planner_metadata"]
-    planning_question = str(query_plan.get("planning_question") or question)
-    write_json(out / "planned_queries.json", query_plan)
+    query_plan = query_plan_payload["query_plan"]
+    queries = query_plan_payload["queries"]
+    planner_metadata = query_plan_payload["planner_metadata"]
+    planning_question = str(query_plan_payload.get("planning_question") or question)
+    queries_by_provider = _queries_by_provider(providers, query_plan, queries)
+    write_json(out / "planned_queries.json", query_plan_payload)
     if progress_callback:
         progress_callback(
             "planning",
@@ -615,6 +832,10 @@ def run_pipeline(
                 "query_count": len(queries),
                 "planning_question": planning_question,
                 "translation_mode": planner_metadata.get("translation_mode", "none"),
+                "queries_by_provider": {
+                    provider: len(provider_queries)
+                    for provider, provider_queries in queries_by_provider.items()
+                },
             },
         )
 
@@ -625,19 +846,20 @@ def run_pipeline(
             "Starting literature metadata retrieval",
             {
                 "providers": providers,
-                "query_count": len(queries),
+                "query_count": sum(len(items) for items in queries_by_provider.values()),
                 "max_per_query": max_per_query,
                 "from_year": from_year,
                 "use_cache": use_cache,
             },
         )
-    raw_papers, _raw_by_provider, retrieval_counts = retriever.retrieve(
-        queries=queries,
+    raw_papers, raw_by_provider, retrieval_counts = retriever.retrieve(
+        queries=queries_by_provider,
         providers=providers,
         max_per_query=max_per_query,
         from_year=from_year,
         output_dir=out,
         progress_callback=progress_callback,
+        sort_mode=sort_preference,
     )
     if progress_callback:
         progress_callback(
@@ -725,6 +947,8 @@ def run_pipeline(
         verification_results,
         planning_question,
         scoring_weights=active_scoring_weights,
+        query_plan=query_plan,
+        ranking_profile=ranking_profile,
     )
     if progress_callback:
         progress_callback(
@@ -777,6 +1001,12 @@ def run_pipeline(
     )
     metrics["duplicate_count"] = duplicate_count
     metrics["scoring_weights"] = active_scoring_weights
+    metrics["query_controls"] = {
+        "strictness": strictness,
+        "openalex_mode": openalex_mode,
+        "sort_preference": sort_preference,
+        "ranking_profile": ranking_profile,
+    }
     metrics["llm"] = _llm_metrics(
         llm_backend=llm_backend,
         active_llm_backend=active_llm_client.provider_name if active_llm_client else "none",
@@ -798,6 +1028,7 @@ def run_pipeline(
         question=question,
         planning_question=planning_question,
         queries=queries,
+        query_plan=query_plan,
         planner_metadata=planner_metadata,
         retrieval_counts=retrieval_counts,
         raw_paper_count=len(raw_papers),
@@ -809,6 +1040,16 @@ def run_pipeline(
         scoring_weights=active_scoring_weights,
     )
     write_json(out / "agent_trace.json", trace)
+    retrieval_diagnostics = build_retrieval_diagnostics(
+        question=question,
+        query_plan=query_plan,
+        queries_by_provider=queries_by_provider,
+        raw_by_provider=raw_by_provider,
+        merged_papers=merged_papers,
+        duplicate_count=duplicate_count,
+        ranked_papers=ranked_final,
+    )
+    write_json(out / "retrieval_diagnostics.json", retrieval_diagnostics)
 
     write_pipeline_csvs(
         out,
@@ -863,6 +1104,7 @@ def run_pipeline(
         evaluation_metrics=metrics,
         agent_trace=trace,
         scoring_weights=active_scoring_weights,
+        query_plan=query_plan,
     )
 
 
@@ -909,11 +1151,32 @@ def build_parser() -> argparse.ArgumentParser:
         default="rule",
         help="Use rule-based or LLM-enhanced evidence verification.",
     )
-    run.add_argument("--weight-relevance", type=float, default=0.40)
-    run.add_argument("--weight-evidence", type=float, default=0.25)
-    run.add_argument("--weight-recency", type=float, default=0.15)
-    run.add_argument("--weight-quality", type=float, default=0.15)
-    run.add_argument("--weight-diversity", type=float, default=0.05)
+    run.add_argument(
+        "--strictness",
+        choices=["strict", "balanced", "broad"],
+        default="balanced",
+        help="How narrowly the planner should constrain search terms.",
+    )
+    run.add_argument(
+        "--openalex-mode",
+        choices=["keyword", "semantic", "keyword+semantic"],
+        default="keyword+semantic",
+    )
+    run.add_argument(
+        "--sort-preference",
+        choices=["relevance", "recent", "cited"],
+        default="relevance",
+    )
+    run.add_argument(
+        "--ranking-profile",
+        choices=["relevance_first", "balanced", "high_quality_review"],
+        default="balanced",
+    )
+    run.add_argument("--weight-relevance", type=float, default=None)
+    run.add_argument("--weight-evidence", type=float, default=None)
+    run.add_argument("--weight-recency", type=float, default=None)
+    run.add_argument("--weight-quality", type=float, default=None)
+    run.add_argument("--weight-diversity", type=float, default=None)
     run.add_argument(
         "--disable-cache",
         action="store_true",
@@ -929,6 +1192,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "run":
+        weight_values = {
+            "relevance": args.weight_relevance,
+            "evidence": args.weight_evidence,
+            "recency": args.weight_recency,
+            "quality": args.weight_quality,
+            "diversity": args.weight_diversity,
+        }
+        scoring_weights = {
+            key: value for key, value in weight_values.items() if value is not None
+        } or None
         result = run_pipeline(
             question=args.question,
             providers=args.providers,
@@ -942,13 +1215,11 @@ def main(argv: list[str] | None = None) -> int:
             planner_mode=args.planner_mode,
             extractor_mode=args.extractor_mode,
             verifier_mode=args.verifier_mode,
-            scoring_weights={
-                "relevance": args.weight_relevance,
-                "evidence": args.weight_evidence,
-                "recency": args.weight_recency,
-                "quality": args.weight_quality,
-                "diversity": args.weight_diversity,
-            },
+            scoring_weights=scoring_weights,
+            strictness=args.strictness,
+            openalex_mode=args.openalex_mode,
+            sort_preference=args.sort_preference,
+            ranking_profile=args.ranking_profile,
         )
         print(f"Report: {result.report_path}")
         print(f"Ranking: {result.ranked_papers_path}")

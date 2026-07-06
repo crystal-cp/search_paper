@@ -42,6 +42,7 @@ class OpenAlexClient:
         query: str,
         max_results: int,
         from_year: int | None = None,
+        sort_mode: str = "relevance",
     ) -> RetrievalResult:
         """Search OpenAlex and normalize results into Paper objects."""
 
@@ -50,7 +51,11 @@ class OpenAlexClient:
 
         if self.use_cache:
             cached = load_cached_response(
-                self.cache_dir, self.provider_name, query, max_results, from_year
+                self.cache_dir,
+                f"{self.provider_name}_{sort_mode}",
+                query,
+                max_results,
+                from_year,
             )
             if cached is not None:
                 return RetrievalResult(raw=cached, papers=self._normalize_many(cached))
@@ -61,6 +66,10 @@ class OpenAlexClient:
         }
         if from_year:
             params["filter"] = f"from_publication_date:{from_year}-01-01"
+        if sort_mode in {"recent", "recent_then_relevant"}:
+            params["sort"] = "publication_date:desc"
+        elif sort_mode == "cited":
+            params["sort"] = "cited_by_count:desc"
         if self.api_key:
             params["api_key"] = self.api_key
 
@@ -77,7 +86,7 @@ class OpenAlexClient:
                 if self.use_cache:
                     save_cached_response(
                         self.cache_dir,
-                        self.provider_name,
+                        f"{self.provider_name}_{sort_mode}",
                         query,
                         max_results,
                         from_year,
@@ -115,6 +124,30 @@ class OpenAlexClient:
         venue = source.get("display_name") or item.get("host_venue", {}).get("display_name", "")
         url = item.get("doi") or item.get("landing_page_url") or openalex_id
         paper_id = stable_id(doi or openalex_id or title)
+        relevance_score = safe_float(item.get("relevance_score"))
+        concepts = [
+            concept.get("display_name", "")
+            for concept in item.get("concepts", [])
+            if concept.get("display_name")
+        ]
+        topics = [
+            topic.get("display_name", "")
+            for topic in item.get("topics", [])
+            if topic.get("display_name")
+        ]
+        open_access = item.get("open_access") or {}
+        best_location = item.get("best_oa_location") or {}
+        open_access_pdf_url = (
+            best_location.get("pdf_url")
+            or primary_location.get("pdf_url")
+            or open_access.get("oa_url")
+            or ""
+        )
+        publication_types = [
+            str(value)
+            for value in [item.get("type"), item.get("type_crossref")]
+            if value
+        ]
 
         return Paper(
             paper_id=paper_id,
@@ -128,6 +161,13 @@ class OpenAlexClient:
             source_provider=self.provider_name,
             provider_ids={"openalex": openalex_id} if openalex_id else {},
             citation_count=safe_int(item.get("cited_by_count"), default=0),
+            api_relevance_score=relevance_score,
+            openalex_relevance_score=relevance_score,
+            publication_date=item.get("publication_date") or "",
+            publication_types=publication_types,
+            fields_of_study=list(dict.fromkeys([*concepts, *topics])),
+            reference_count=safe_int(item.get("referenced_works_count"), default=0),
+            open_access_pdf_url=open_access_pdf_url,
             raw=item,
         )
 
@@ -150,3 +190,14 @@ def reconstruct_abstract(abstract_inverted_index: dict[str, list[int]] | None) -
         for position in positions:
             words[position] = word
     return " ".join(word for word in words if word)
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    """Convert a value to float without raising."""
+
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default

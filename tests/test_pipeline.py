@@ -96,9 +96,10 @@ def test_pipeline_with_fake_retrievers_and_no_internet(tmp_path):
     assert (output_dir / "ranked_papers.csv").exists()
     assert (output_dir / "evaluation.json").exists()
     assert (output_dir / "agent_trace.json").exists()
+    assert (output_dir / "retrieval_diagnostics.json").exists()
     assert (output_dir / "report.md").exists()
     assert result.merged_paper_count == 1
-    assert result.duplicate_count == 5
+    assert result.duplicate_count == result.raw_paper_count - result.merged_paper_count
     assert result.agent_trace["planner"]["queries"]
 
 
@@ -163,7 +164,7 @@ def test_pipeline_uses_user_confirmed_query_override(tmp_path):
     )
 
     assert client.seen_queries == ["surface magnetization antiferromagnetic boundary"]
-    assert result.planned_queries == ["surface magnetization antiferromagnetic boundary"]
+    assert "surface magnetization antiferromagnetic boundary" in result.planned_queries
     assert result.agent_trace["planner"]["metadata"]["query_source"] == "user_confirmed"
 
 
@@ -188,3 +189,24 @@ def test_pipeline_emits_progress_events(tmp_path):
     assert "verification" in stages
     assert stages[-1] == "complete"
     assert any(event[2].get("provider") == "fake" for event in events)
+
+
+def test_retrieval_diagnostics_json_is_produced(tmp_path):
+    retriever = RetrieverAgent(clients={"fake": SurfaceMagnetizationFakeClient()})
+
+    run_pipeline(
+        question="surface magnetization",
+        providers=["fake"],
+        max_per_query=1,
+        output_dir=str(tmp_path / "outputs"),
+        retriever_agent=retriever,
+    )
+
+    diagnostics = json.loads(
+        (tmp_path / "outputs" / "retrieval_diagnostics.json").read_text()
+    )
+
+    assert diagnostics["question"] == "surface magnetization"
+    assert diagnostics["merged_count"] == 1
+    assert diagnostics["raw_count_per_query"]["fake"]
+    assert diagnostics["top_10_score_breakdown"]

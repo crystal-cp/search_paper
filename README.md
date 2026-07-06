@@ -4,12 +4,12 @@ This repository is a lightweight, reproducible research prototype for evidence-g
 
 The MVP pipeline:
 
-1. plans academic search queries from a research question,
-2. retrieves metadata from OpenAlex and Semantic Scholar,
+1. builds a structured, provider-aware query plan from a research question,
+2. retrieves metadata from OpenAlex and Semantic Scholar using provider-specific queries,
 3. normalizes and deduplicates papers,
 4. extracts claim-level evidence from abstracts,
 5. verifies whether evidence is grounded in the abstract with strict span validation,
-6. ranks papers with a transparent scoring formula,
+6. reranks papers with hybrid TF-IDF/API/field relevance plus transparent scoring,
 7. optionally applies human feedback,
 8. writes CSV, JSON, Markdown outputs, and an agent decision trace.
 
@@ -81,6 +81,10 @@ python -m lit_screening.pipeline run \
   --providers openalex semantic_scholar \
   --max-per-query 10 \
   --from-year 2020 \
+  --strictness balanced \
+  --openalex-mode keyword+semantic \
+  --sort-preference relevance \
+  --ranking-profile balanced \
   --weight-relevance 0.40 \
   --weight-evidence 0.25 \
   --weight-recency 0.15 \
@@ -109,10 +113,13 @@ The UI also supports:
 - Chinese research questions are converted into an English planning question for
   retrieval, evidence extraction, and ranking. The Queries tab shows the original
   question, translated/planning question, and translation mode.
-- A two-step query checkpoint: first click `Generate / Preview Queries`, inspect
-  or edit the English queries, then click `Run Search With Current Queries`.
+- A structured query checkpoint: click `Step 2: Generate Query Plan`, inspect
+  or edit `core_terms`, `must_terms`, `optional_terms`, `exclude_terms`, OpenAlex
+  queries, and Semantic Scholar queries, then click `Step 4: Run Retrieval`.
   The preview step does not call literature provider APIs, which helps avoid
   spending requests on a search direction that does not match the user's intent.
+- Search mode controls for strictness, OpenAlex mode, sort preference, and ranking
+  profile (`relevance_first`, `balanced`, `high_quality_review`).
 - A collapsible run-status panel shows what the pipeline is doing during
   screening: retrieval by provider/query, deduplication, evidence extraction,
   grounding verification, ranking, evaluation, and artifact writing.
@@ -146,11 +153,40 @@ The pipeline writes:
 - `outputs/ranked_papers.csv`
 - `outputs/evaluation.json`
 - `outputs/agent_trace.json`
+- `outputs/retrieval_diagnostics.json`
 - `outputs/report.md`
 
 Raw cache files are stored under `data/cache/` and ignored by git.
 
-## Scoring
+## Query Planning And Scoring
+
+The planner writes a structured `QueryPlan` into `planned_queries.json`, including
+topic terms, provider-specific queries, and search controls. OpenAlex queries use
+quoted multi-word core terms plus boolean-style `AND` / `OR` / `NOT` where useful.
+Semantic Scholar queries use quoted phrases, `+required` terms, `-excluded` terms,
+and OR alternatives.
+
+Hybrid relevance combines TF-IDF similarities with provider metadata:
+
+```text
+hybrid_relevance_score =
+0.30 * title_similarity
++ 0.25 * abstract_similarity
++ 0.15 * evidence_similarity
++ 0.10 * api_relevance_score
++ 0.10 * must_term_coverage
++ 0.10 * field_match_score
+```
+
+Evidence score combines grounding and relevance:
+
+```text
+evidence_score =
+0.60 * verifier_confidence
++ 0.40 * evidence_question_relevance
+```
+
+The final ranking score remains transparent and profile-driven:
 
 ```text
 final_score =
@@ -163,6 +199,8 @@ final_score =
 ```
 
 Base scores are clamped to `[0, 1]`. Human feedback is an explicit additive adjustment.
+Ranking profiles can change the base weights before any user-provided weight
+overrides are applied.
 
 ## Evidence Validation
 

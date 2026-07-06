@@ -6,7 +6,8 @@ import re
 from typing import Any
 
 from lit_screening.llm_client import GenericLLMClient
-from lit_screening.utils import tokenize
+from lit_screening.models import QueryPlan
+from lit_screening.utils import STOPWORDS, tokenize
 
 
 CHINESE_TOPIC_GLOSSARY = [
@@ -48,6 +49,40 @@ CHINESE_TOPIC_GLOSSARY = [
     ("大模型", "large language model"),
     ("多智能体", "multi-agent"),
 ]
+
+KNOWN_MULTI_WORD_TERMS = [
+    "surface magnetization",
+    "surface magnetic moment",
+    "antiferromagnetic materials",
+    "first-principles",
+    "density functional theory",
+    "large language model",
+    "language model",
+    "llm agents",
+    "multi-agent",
+    "human feedback",
+    "human-in-the-loop",
+    "literature screening",
+    "evidence verification",
+    "claim extraction",
+    "scientific literature",
+    "systematic review",
+]
+
+LLM_RELATED_TERMS = {
+    "llm",
+    "agent",
+    "agents",
+    "multi-agent",
+    "language",
+    "model",
+    "human",
+    "feedback",
+    "screening",
+    "verification",
+    "claim",
+    "extraction",
+}
 
 
 def contains_cjk(text: str) -> bool:
@@ -93,6 +128,146 @@ def fallback_translate_chinese_question(question: str) -> str:
     return "scientific research topic"
 
 
+def _unique(items: list[str], limit: int | None = None) -> list[str]:
+    """Return normalized unique strings while preserving order."""
+
+    values: list[str] = []
+    for item in items:
+        cleaned = " ".join(str(item).split()).strip()
+        if cleaned and cleaned not in values:
+            values.append(cleaned)
+    return values[:limit] if limit else values
+
+
+def _quote_phrase(term: str) -> str:
+    """Quote multi-word terms for provider query strings."""
+
+    cleaned = " ".join(term.split())
+    if " " in cleaned and not (cleaned.startswith('"') and cleaned.endswith('"')):
+        return f'"{cleaned}"'
+    return cleaned
+
+
+def _semantic_required(term: str) -> str:
+    """Format a required Semantic Scholar term."""
+
+    return f"+{_quote_phrase(term)}"
+
+
+def _semantic_excluded(term: str) -> str:
+    """Format an excluded Semantic Scholar term."""
+
+    return f"-{_quote_phrase(term)}"
+
+
+def _apply_openalex_excludes(query: str, exclude_terms: list[str]) -> str:
+    if not exclude_terms:
+        return query
+    return f"{query} NOT {' NOT '.join(_quote_phrase(term) for term in exclude_terms)}"
+
+
+def build_openalex_queries(plan: QueryPlan) -> list[str]:
+    """Build OpenAlex-flavored queries from a structured query plan."""
+
+    core = plan.core_terms or plan.must_terms
+    must = plan.must_terms or core
+    optional = plan.optional_terms
+    openalex_mode = plan.filters.get("openalex_mode", "keyword+semantic")
+    primary_terms = [_quote_phrase(term) for term in (core[:3] or must[:3])]
+    primary = " AND ".join(primary_terms) if primary_terms else plan.translated_question or plan.original_question
+    natural_query = plan.translated_question or plan.original_question
+    queries = []
+    if openalex_mode in {"semantic", "keyword+semantic"} and natural_query:
+        queries.append(natural_query)
+    if openalex_mode in {"keyword", "keyword+semantic"}:
+        queries.append(primary)
+    if must and must != core and openalex_mode in {"keyword", "keyword+semantic"}:
+        queries.append(" AND ".join(_quote_phrase(term) for term in must[:4]))
+    if optional:
+        queries.append(f"{primary} AND ({' OR '.join(_quote_phrase(term) for term in optional[:4])})")
+    if core:
+        focused = " ".join(_quote_phrase(term) for term in core[:2])
+        queries.append(f"{focused} review")
+        queries.append(f"{focused} mechanism")
+    if plan.filters.get("strictness") == "broad" and optional:
+        queries.append(" OR ".join(_quote_phrase(term) for term in [*core[:2], *optional[:3]]))
+    return _unique([_apply_openalex_excludes(query, plan.exclude_terms) for query in queries], 6)
+
+
+def build_semantic_scholar_queries(plan: QueryPlan) -> list[str]:
+    """Build Semantic Scholar-flavored queries from a structured query plan."""
+
+    core = plan.core_terms or plan.must_terms
+    must = plan.must_terms or core
+    optional = plan.optional_terms
+    required = " ".join(_semantic_required(term) for term in must[:4])
+    excludes = " ".join(_semantic_excluded(term) for term in plan.exclude_terms[:4])
+    optional_or = f"({' OR '.join(_quote_phrase(term) for term in optional[:4])})" if optional else ""
+    primary = " ".join(part for part in [required, optional_or, excludes] if part)
+    if not primary:
+        primary = plan.translated_question or plan.original_question
+    queries = [primary]
+    if core:
+        phrase = " ".join(_quote_phrase(term) for term in core[:2])
+        queries.append(" ".join(part for part in [phrase, optional_or, excludes] if part))
+        queries.append(" ".join(part for part in [phrase, "review", excludes] if part))
+    if optional:
+        queries.append(
+            " ".join(
+                part
+                for part in [
+                    required,
+                    f"({' OR '.join(_quote_phrase(term) for term in optional[:5])})",
+                    excludes,
+                ]
+                if part
+            )
+        )
+    return _unique(queries, 6)
+
+
+def _extract_exclude_terms(text: str) -> list[str]:
+    """Extract simple user-stated exclusion terms."""
+
+    excludes: list[str] = []
+    patterns = [
+        r"\bwithout\s+([a-zA-Z0-9][a-zA-Z0-9\- ]{1,40})",
+        r"\bexcluding\s+([a-zA-Z0-9][a-zA-Z0-9\- ]{1,40})",
+        r"\bnot\s+([a-zA-Z0-9][a-zA-Z0-9\- ]{1,30})",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text.lower()):
+            phrase = match.group(1).strip(" .,;:")
+            if phrase:
+                excludes.append(phrase)
+    return _unique(excludes, 4)
+
+
+def _extract_candidate_phrases(text: str) -> list[str]:
+    """Extract topic-like multi-word terms from an English question."""
+
+    lowered = text.lower()
+    phrases = [term for term in KNOWN_MULTI_WORD_TERMS if term in lowered]
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9\-]+", lowered)
+    for size in (3, 2):
+        for index in range(0, max(0, len(words) - size + 1)):
+            chunk = words[index : index + size]
+            if any(word in STOPWORDS for word in chunk):
+                continue
+            phrase = " ".join(chunk)
+            if len(tokenize(phrase)) >= 2:
+                phrases.append(phrase)
+    return _unique(phrases, 8)
+
+
+def _is_term_redundant(term: str, existing_terms: list[str]) -> bool:
+    """Return True when a single term is already covered by a phrase."""
+
+    if " " in term:
+        return False
+    return any(term in tokenize(existing) for existing in existing_terms if " " in existing)
+
+
 class PlannerAgent:
     """Create a compact set of academic search queries from a question."""
 
@@ -122,17 +297,50 @@ class PlannerAgent:
     def plan(self, question: str) -> list[str]:
         """Return 4 to 6 English search queries for the research question."""
 
+        plan = self.plan_structured(question)
+        return _unique(
+            [
+                plan.translated_question or plan.original_question,
+                *plan.openalex_queries,
+                *plan.semantic_scholar_queries,
+            ],
+            6,
+        )
+
+    def plan_structured(
+        self,
+        question: str,
+        strictness: str = "balanced",
+        openalex_mode: str = "keyword+semantic",
+        sort_preference: str = "relevance",
+        ranking_profile: str = "balanced",
+    ) -> QueryPlan:
+        """Return a structured, provider-aware query plan."""
+
         if self.mode == "llm" and self.llm_client and self.llm_client.is_available:
-            return self._plan_with_llm(question)
+            return self._plan_structured_with_llm(
+                question,
+                strictness=strictness,
+                openalex_mode=openalex_mode,
+                sort_preference=sort_preference,
+                ranking_profile=ranking_profile,
+            )
         preprocessing = self._preprocess_question_rule(question)
-        self.last_llm_metadata = {
-            "planner_mode": self.mode,
-            "llm_used": False,
-            "invalid_llm_output": False,
-            "llm_error_type": "llm_unavailable" if self.mode == "llm" else "",
-            **preprocessing,
-        }
-        return self._plan_rule(preprocessing["planning_question"])
+        plan = self._plan_structured_rule(
+            question=question,
+            preprocessing=preprocessing,
+            strictness=strictness,
+            openalex_mode=openalex_mode,
+            sort_preference=sort_preference,
+            ranking_profile=ranking_profile,
+        )
+        self.last_llm_metadata = self._metadata(
+            preprocessing,
+            llm_used=False,
+            invalid_llm_output=False,
+            llm_error_type="llm_unavailable" if self.mode == "llm" else "",
+        )
+        return plan
 
     def _plan_rule(self, question: str) -> list[str]:
         """Rule-based query planning fallback."""
@@ -154,6 +362,70 @@ class PlannerAgent:
             if query and query not in unique:
                 unique.append(query)
         return unique[:6]
+
+    def _plan_structured_rule(
+        self,
+        question: str,
+        preprocessing: dict[str, Any],
+        strictness: str,
+        openalex_mode: str,
+        sort_preference: str,
+        ranking_profile: str,
+    ) -> QueryPlan:
+        """Build a topic-aware structured plan without requiring an LLM."""
+
+        planning_question = preprocessing["planning_question"]
+        detected_language = "zh" if preprocessing["question_language"] == "zh" else "en"
+        tokens = tokenize(planning_question)
+        candidate_phrases = _extract_candidate_phrases(planning_question)
+        core_terms = list(candidate_phrases)
+        for token in tokens:
+            if not _is_term_redundant(token, core_terms):
+                core_terms.append(token)
+        core_terms = _unique(core_terms, 8)
+        if not core_terms and planning_question:
+            core_terms = [planning_question]
+
+        must_count = 4 if strictness == "strict" else 3
+        if strictness == "broad":
+            must_count = 1
+        must_terms = _unique(core_terms[:must_count], 5)
+
+        topical_optional = [
+            token
+            for token in tokens
+            if token not in set(tokenize(" ".join(core_terms[:must_count])))
+        ]
+        generic_optional = ["review", "recent advances", "mechanism", "applications"]
+        if ranking_profile == "high_quality_review":
+            generic_optional = ["review", "systematic review", "survey", "meta-analysis"]
+        optional_terms = _unique([*topical_optional, *generic_optional], 8)
+
+        if not (set(tokens) & LLM_RELATED_TERMS):
+            optional_terms = [
+                term
+                for term in optional_terms
+                if not (set(tokenize(term)) & LLM_RELATED_TERMS)
+            ]
+
+        plan = QueryPlan(
+            original_question=preprocessing["original_question"],
+            detected_language=detected_language,
+            translated_question=preprocessing["translated_question"],
+            core_terms=core_terms,
+            must_terms=must_terms,
+            optional_terms=optional_terms,
+            exclude_terms=_extract_exclude_terms(planning_question),
+            filters={
+                "strictness": strictness,
+                "openalex_mode": openalex_mode,
+                "sort_preference": sort_preference,
+                "ranking_profile": ranking_profile,
+            },
+        )
+        plan.openalex_queries = build_openalex_queries(plan)
+        plan.semantic_scholar_queries = build_semantic_scholar_queries(plan)
+        return plan
 
     def _preprocess_question_rule(self, question: str) -> dict[str, Any]:
         """Detect Chinese input and produce an English planning question."""
@@ -208,10 +480,37 @@ class PlannerAgent:
     def _plan_with_llm(self, question: str) -> list[str]:
         """Use an LLM to suggest queries, falling back safely."""
 
+        plan = self._plan_structured_with_llm(
+            question,
+            strictness="balanced",
+            openalex_mode="keyword+semantic",
+            sort_preference="relevance",
+            ranking_profile="balanced",
+        )
+        return _unique(
+            [
+                plan.translated_question or plan.original_question,
+                *plan.openalex_queries,
+                *plan.semantic_scholar_queries,
+            ],
+            6,
+        )
+
+    def _plan_structured_with_llm(
+        self,
+        question: str,
+        strictness: str,
+        openalex_mode: str,
+        sort_preference: str,
+        ranking_profile: str,
+    ) -> QueryPlan:
+        """Use an LLM to enrich structured query planning, falling back safely."""
+
         preprocessing = self._preprocess_question_rule(question)
         system_prompt = (
             "You plan scholarly search queries for a literature-screening pipeline. "
-            "Return JSON only with keys 'translated_question' and 'queries'. "
+            "Return JSON only with keys 'translated_question', 'core_terms', "
+            "'must_terms', 'optional_terms', 'exclude_terms', and 'queries'. "
             "'translated_question' must be a concise English research question. "
             "If the input is already English, copy it with light cleanup. "
             "'queries' must be a list of 4 to 6 concise English academic search "
@@ -236,7 +535,14 @@ class PlannerAgent:
                     "translation_warning": "",
                 }
 
-        rule_queries = self._plan_rule(preprocessing["planning_question"])
+        rule_plan = self._plan_structured_rule(
+            question=question,
+            preprocessing=preprocessing,
+            strictness=strictness,
+            openalex_mode=openalex_mode,
+            sort_preference=sort_preference,
+            ranking_profile=ranking_profile,
+        )
         queries = result.data.get("queries")
 
         if result.invalid_llm_output or not isinstance(queries, list):
@@ -246,10 +552,21 @@ class PlannerAgent:
                 invalid_llm_output=True,
                 llm_error_type=result.error_type or "missing_queries",
             )
-            return rule_queries
+            return rule_plan
+
+        def _list_from_result(key: str, fallback: list[str]) -> list[str]:
+            value = result.data.get(key)
+            if not isinstance(value, list):
+                return fallback
+            return _unique([item for item in value if isinstance(item, str)], 8) or fallback
+
+        core_terms = _list_from_result("core_terms", rule_plan.core_terms)
+        must_terms = _list_from_result("must_terms", rule_plan.must_terms)
+        optional_terms = _list_from_result("optional_terms", rule_plan.optional_terms)
+        exclude_terms = _list_from_result("exclude_terms", rule_plan.exclude_terms)
 
         unique: list[str] = []
-        for query in [preprocessing["planning_question"], *queries, *rule_queries]:
+        for query in [preprocessing["planning_question"], *queries]:
             if not isinstance(query, str):
                 continue
             cleaned = " ".join(query.split())
@@ -263,7 +580,28 @@ class PlannerAgent:
                 invalid_llm_output=True,
                 llm_error_type="too_few_queries",
             )
-            return rule_queries
+            return rule_plan
+
+        plan = QueryPlan(
+            original_question=preprocessing["original_question"],
+            detected_language="zh" if preprocessing["question_language"] == "zh" else "en",
+            translated_question=preprocessing["translated_question"],
+            core_terms=core_terms,
+            must_terms=must_terms,
+            optional_terms=optional_terms,
+            exclude_terms=exclude_terms,
+            filters={
+                "strictness": strictness,
+                "openalex_mode": openalex_mode,
+                "sort_preference": sort_preference,
+                "ranking_profile": ranking_profile,
+            },
+        )
+        plan.openalex_queries = _unique([*unique, *build_openalex_queries(plan)], 6)
+        plan.semantic_scholar_queries = _unique(
+            [*unique, *build_semantic_scholar_queries(plan)],
+            6,
+        )
 
         self.last_llm_metadata = self._metadata(
             preprocessing,
@@ -271,4 +609,4 @@ class PlannerAgent:
             invalid_llm_output=False,
             llm_error_type="",
         )
-        return unique[:6]
+        return plan

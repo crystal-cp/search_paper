@@ -15,6 +15,13 @@ from lit_screening.retrieval.base import RetrievalResult
 from lit_screening.utils import safe_int, stable_id
 
 
+DEFAULT_SEMANTIC_SCHOLAR_FIELDS = (
+    "title,abstract,authors,year,publicationDate,publicationTypes,venue,"
+    "citationCount,influentialCitationCount,referenceCount,externalIds,url,"
+    "openAccessPdf,fieldsOfStudy,s2FieldsOfStudy,tldr"
+)
+
+
 class SemanticScholarClient:
     """Small Semantic Scholar search client with optional API-key header."""
 
@@ -29,6 +36,7 @@ class SemanticScholarClient:
         timeout: float = 20.0,
         retries: int = 2,
         sleep_seconds: float = 1.0,
+        fields: str | None = None,
     ) -> None:
         self.api_key = api_key if api_key is not None else os.getenv("S2_API_KEY")
         self.cache_dir = cache_dir
@@ -36,6 +44,7 @@ class SemanticScholarClient:
         self.timeout = timeout
         self.retries = retries
         self.sleep_seconds = sleep_seconds
+        self.fields = fields or DEFAULT_SEMANTIC_SCHOLAR_FIELDS
 
     def search(
         self,
@@ -58,7 +67,7 @@ class SemanticScholarClient:
         params: dict[str, Any] = {
             "query": query,
             "limit": max_results,
-            "fields": "title,abstract,authors,year,venue,citationCount,externalIds,url",
+            "fields": self.fields,
         }
         if from_year:
             params["year"] = f"{from_year}-"
@@ -103,9 +112,12 @@ class SemanticScholarClient:
         return RetrievalResult(raw=raw, papers=self._normalize_many(raw))
 
     def _normalize_many(self, raw: dict[str, Any]) -> list[Paper]:
-        return [self._normalize_result(item) for item in raw.get("data", [])]
+        return [
+            self._normalize_result(item, rank=index)
+            for index, item in enumerate(raw.get("data", []), start=1)
+        ]
 
-    def _normalize_result(self, item: dict[str, Any]) -> Paper:
+    def _normalize_result(self, item: dict[str, Any], rank: int = 0) -> Paper:
         external_ids = item.get("externalIds") or {}
         doi = normalize_doi(external_ids.get("DOI"))
         semantic_id = item.get("paperId") or ""
@@ -121,6 +133,17 @@ class SemanticScholarClient:
         for key, value in external_ids.items():
             if value:
                 provider_ids[key.lower()] = str(value)
+        open_access_pdf = item.get("openAccessPdf") or {}
+        tldr = item.get("tldr") or {}
+        s2_fields = [
+            field.get("category", "")
+            for field in item.get("s2FieldsOfStudy", [])
+            if field.get("category")
+        ]
+        fields_of_study = [
+            *[str(value) for value in item.get("fieldsOfStudy", []) if value],
+            *s2_fields,
+        ]
 
         return Paper(
             paper_id=paper_id,
@@ -134,5 +157,19 @@ class SemanticScholarClient:
             source_provider=self.provider_name,
             provider_ids=provider_ids,
             citation_count=safe_int(item.get("citationCount"), default=0),
+            api_relevance_score=1.0 / rank if rank else 0.0,
+            semantic_scholar_rank=rank,
+            publication_date=item.get("publicationDate") or "",
+            publication_types=[
+                str(value) for value in item.get("publicationTypes", []) if value
+            ],
+            fields_of_study=list(dict.fromkeys(fields_of_study)),
+            influential_citation_count=safe_int(
+                item.get("influentialCitationCount"),
+                default=0,
+            ),
+            reference_count=safe_int(item.get("referenceCount"), default=0),
+            open_access_pdf_url=open_access_pdf.get("url") or "",
+            tldr=tldr.get("text") if isinstance(tldr, dict) else "",
             raw=item,
         )

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from lit_screening.dedup import normalize_title
-from lit_screening.models import EvidenceRecord, Paper, RankedPaper, VerificationResult
+from lit_screening.models import EvidenceRecord, Paper, QueryPlan, RankedPaper, VerificationResult
 from lit_screening.scoring import score_paper
 
 
@@ -19,6 +19,8 @@ class RankerAgent:
         verification_results: list[VerificationResult],
         question: str,
         scoring_weights: dict[str, float] | None = None,
+        query_plan: QueryPlan | None = None,
+        ranking_profile: str = "balanced",
     ) -> list[RankedPaper]:
         """Return papers sorted by final score."""
 
@@ -36,6 +38,8 @@ class RankerAgent:
                 question,
                 diversity_score=0.5,
                 weights=scoring_weights,
+                query_plan=query_plan,
+                ranking_profile=ranking_profile,
             )
             preliminary.append(RankedPaper(0, paper, evidence, verification, scores))
 
@@ -55,6 +59,8 @@ class RankerAgent:
                 question,
                 diversity_score=diversity,
                 weights=scoring_weights,
+                query_plan=query_plan,
+                ranking_profile=ranking_profile,
             )
             reranked.append(replace(item, scores=scores))
 
