@@ -5,18 +5,19 @@ from __future__ import annotations
 from typing import Any
 
 from lit_screening.llm_client import GenericLLMClient
+from lit_screening.utils import tokenize
 
 
 class PlannerAgent:
     """Create a compact set of academic search queries from a question."""
 
     expansion_terms = [
-        "systematic review",
-        "literature screening",
-        "evidence verification",
-        "claim extraction",
-        "human feedback",
-        "LLM agents",
+        "review",
+        "recent advances",
+        "mechanism",
+        "experimental study",
+        "theoretical study",
+        "applications",
     ]
 
     def __init__(
@@ -50,13 +51,16 @@ class PlannerAgent:
         """Rule-based query planning fallback."""
 
         base = " ".join(question.split())
+        terms = tokenize(base)
+        core = " ".join(terms[:8]) if terms else base
+        compact = " ".join(terms[:5]) if terms else base
         queries = [
             base,
-            f"{base} systematic review literature screening",
-            "human-in-the-loop LLM agents scientific literature screening",
-            "LLM agents evidence verification claim extraction scholarly abstracts",
-            "human feedback relevance ranking evidence verification literature review",
-            "multi-agent LLM systems claim extraction systematic review",
+            f"{core} review",
+            f"{core} recent advances",
+            f"{compact} mechanism",
+            f"{compact} experimental theoretical study",
+            f"{compact} applications significance",
         ]
         unique: list[str] = []
         for query in queries:
@@ -70,9 +74,9 @@ class PlannerAgent:
         system_prompt = (
             "You plan scholarly search queries for a literature-screening pipeline. "
             "Return JSON only with key 'queries', a list of 4 to 6 concise academic "
-            "queries. Include the original question and terms such as systematic "
-            "review, literature screening, evidence verification, claim extraction, "
-            "human feedback, and LLM agents."
+            "queries. Stay inside the user's scientific topic. Do not introduce AI, "
+            "LLM, human-feedback, or literature-screening terms unless they are "
+            "already part of the research question."
         )
         user_prompt = f"Research question:\n{question}"
         result = self.llm_client.chat_json(system_prompt, user_prompt)

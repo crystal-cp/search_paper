@@ -60,6 +60,7 @@ class HumanFeedbackAgent:
         self,
         ranked_papers: list[RankedPaper],
         feedback_records: dict[str, FeedbackRecord],
+        scoring_weights: dict[str, float] | None = None,
     ) -> list[RankedPaper]:
         """Apply human feedback and return a newly sorted ranking."""
 
@@ -77,6 +78,7 @@ class HumanFeedbackAgent:
                 item.scores.quality_score,
                 item.scores.diversity_score,
                 feedback.adjustment,
+                weights=scoring_weights,
             )
             adjusted.append(replace(item, scores=scores, feedback=feedback))
 

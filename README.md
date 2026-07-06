@@ -8,10 +8,10 @@ The MVP pipeline:
 2. retrieves metadata from OpenAlex and Semantic Scholar,
 3. normalizes and deduplicates papers,
 4. extracts claim-level evidence from abstracts,
-5. verifies whether evidence is grounded in the abstract,
+5. verifies whether evidence is grounded in the abstract with strict span validation,
 6. ranks papers with a transparent scoring formula,
 7. optionally applies human feedback,
-8. writes CSV, JSON, and Markdown outputs.
+8. writes CSV, JSON, Markdown outputs, and an agent decision trace.
 
 ## Setup
 
@@ -89,6 +89,18 @@ streamlit run app.py
 
 The UI calls the same core pipeline functions as the CLI. Feedback changes are
 applied to the in-memory ranking and do not rerun provider API calls.
+Each UI run is saved as a screening project under `outputs/projects/`, with
+run history, feedback CSV import/export, and an inspectable agent trace.
+
+The UI also supports:
+
+- English / 中文 interface mode. Core workflow labels such as `Planned Queries`,
+  `Ranked Papers`, `Evidence`, and `Trace` remain in English for research-demo clarity.
+- Runtime API key entry for `OPENALEX_API_KEY`, `S2_API_KEY`, and `DEEPSEEK_API_KEY`.
+  Keys are applied to the current Streamlit process and are not written into project files.
+- Adjustable scoring weights for relevance, evidence, recency, quality, and diversity,
+  with tooltip explanations for how each weight affects ranking.
+- Year filtering through the `From year` setting.
 
 For an offline smoke run that avoids provider calls:
 
@@ -113,6 +125,7 @@ The pipeline writes:
 - `outputs/ranked_papers_after_feedback.csv`, when feedback is provided
 - `outputs/ranked_papers.csv`
 - `outputs/evaluation.json`
+- `outputs/agent_trace.json`
 - `outputs/report.md`
 
 Raw cache files are stored under `data/cache/` and ignored by git.
@@ -130,6 +143,18 @@ final_score =
 ```
 
 Base scores are clamped to `[0, 1]`. Human feedback is an explicit additive adjustment.
+
+## Evidence Validation
+
+The verifier treats evidence as strict only when the evidence sentence can be
+matched back to the abstract by either:
+
+- exact span match, or
+- high-confidence fuzzy span match.
+
+Keyword overlap alone is no longer counted as strict support. It is marked as
+`weak_support`. Evidence that cannot be matched is marked as `unverified`; LLM
+evidence that cannot be matched is marked as `llm_invalid_evidence`.
 
 ## Test
 

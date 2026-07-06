@@ -26,6 +26,7 @@ from .models import (
     VerificationResult,
 )
 from .report import generate_report
+from .scoring import sanitize_score_weights
 from .utils import ensure_dir, write_csv, write_json
 
 
@@ -52,6 +53,10 @@ EVIDENCE_FIELDS = [
     "supported",
     "confidence",
     "error_type",
+    "support_level",
+    "span_match_type",
+    "span_match_confidence",
+    "matched_text",
     "rationale",
     "extraction_mode",
     "evidence_llm_used",
@@ -83,6 +88,9 @@ RANKED_FIELDS = [
     "supported",
     "confidence",
     "error_type",
+    "support_level",
+    "span_match_type",
+    "span_match_confidence",
     "claim",
     "evidence_sentence",
     "feedback_label",
@@ -131,6 +139,10 @@ def evidence_to_row(
         "supported": verification.supported,
         "confidence": f"{verification.confidence:.4f}",
         "error_type": verification.error_type,
+        "support_level": verification.support_level,
+        "span_match_type": verification.span_match_type,
+        "span_match_confidence": f"{verification.span_match_confidence:.4f}",
+        "matched_text": verification.matched_text,
         "rationale": verification.rationale,
         "extraction_mode": evidence.extraction_mode,
         "evidence_llm_used": evidence.llm_used,
@@ -167,6 +179,9 @@ def ranked_to_row(item: RankedPaper) -> dict[str, Any]:
         "supported": item.verification.supported,
         "confidence": f"{item.verification.confidence:.4f}",
         "error_type": item.verification.error_type,
+        "support_level": item.verification.support_level,
+        "span_match_type": item.verification.span_match_type,
+        "span_match_confidence": f"{item.verification.span_match_confidence:.4f}",
         "claim": item.evidence.claim,
         "evidence_sentence": item.evidence.evidence_sentence,
         "feedback_label": feedback.label if feedback else "",
@@ -281,6 +296,81 @@ def _llm_metrics(
     }
 
 
+def build_agent_trace(
+    question: str,
+    queries: list[str],
+    planner_metadata: dict[str, Any],
+    retrieval_counts: dict[str, int],
+    raw_paper_count: int,
+    merged_papers: list[Paper],
+    duplicate_count: int,
+    evidence_records: list[EvidenceRecord],
+    verification_results: list[VerificationResult],
+    ranked_papers: list[RankedPaper],
+    scoring_weights: dict[str, float],
+) -> dict[str, Any]:
+    """Build an inspectable trace of agent decisions for demos and audits."""
+
+    verification_by_id = {result.paper_id: result for result in verification_results}
+    return {
+        "question": question,
+        "planner": {
+            "queries": queries,
+            "metadata": planner_metadata,
+            "decision": "Generated scholarly queries from the user's actual topic.",
+        },
+        "retriever": {
+            "retrieval_counts_by_provider": retrieval_counts,
+            "raw_paper_count": raw_paper_count,
+        },
+        "deduplicator": {
+            "merged_paper_count": len(merged_papers),
+            "duplicate_count": duplicate_count,
+            "decision": "Deduplicated by normalized DOI first, then normalized title.",
+        },
+        "extractor": [
+            {
+                "paper_id": record.paper_id,
+                "title": record.title,
+                "mode": record.extraction_mode,
+                "keyword_overlap": record.keyword_overlap,
+                "evidence_sentence": record.evidence_sentence,
+                "limitation": record.limitation,
+                "llm_used": record.llm_used,
+                "invalid_llm_output": record.invalid_llm_output,
+                "llm_error_type": record.llm_error_type,
+            }
+            for record in evidence_records
+        ],
+        "verifier": [
+            {
+                "paper_id": result.paper_id,
+                "supported": result.supported,
+                "support_level": result.support_level,
+                "span_match_type": result.span_match_type,
+                "span_match_confidence": result.span_match_confidence,
+                "error_type": result.error_type,
+                "rationale": result.rationale,
+                "matched_text": result.matched_text,
+            }
+            for result in verification_results
+        ],
+        "ranker": [
+            {
+                "rank": item.rank,
+                "paper_id": item.paper.paper_id,
+                "title": item.paper.title,
+                "final_score": item.scores.final_score,
+                "support_level": verification_by_id[item.paper.paper_id].support_level
+                if item.paper.paper_id in verification_by_id
+                else "",
+            }
+            for item in ranked_papers[:50]
+        ],
+        "scoring_weights": scoring_weights,
+    }
+
+
 def apply_feedback_to_pipeline_result(
     result: PipelineResult,
     feedback_records: dict[str, FeedbackRecord],
@@ -292,6 +382,7 @@ def apply_feedback_to_pipeline_result(
     ranked_after_feedback = feedback_agent.apply(
         result.ranked_before_feedback,
         feedback_records,
+        scoring_weights=result.scoring_weights,
     )
     metrics = compute_evaluation(
         retrieval_counts=result.retrieval_counts,
@@ -306,9 +397,21 @@ def apply_feedback_to_pipeline_result(
     metrics["duplicate_count"] = result.duplicate_count
     if "llm" in result.evaluation_metrics:
         metrics["llm"] = result.evaluation_metrics["llm"]
+    metrics["scoring_weights"] = result.scoring_weights
+    trace = dict(result.agent_trace)
+    trace["feedback"] = [
+        {
+            "paper_id": record.paper_id,
+            "label": record.label,
+            "adjustment": record.adjustment,
+            "note": record.note,
+        }
+        for record in feedback_records.values()
+    ]
 
     output_dir = Path(result.output_dir)
     save_evaluation(output_dir / "evaluation.json", metrics)
+    write_json(output_dir / "agent_trace.json", trace)
     write_pipeline_csvs(
         output_dir,
         result.merged_papers,
@@ -334,6 +437,7 @@ def apply_feedback_to_pipeline_result(
         ranked_after_feedback=ranked_after_feedback,
         ranked_final=ranked_after_feedback,
         evaluation_metrics=metrics,
+        agent_trace=trace,
     )
 
 
@@ -350,6 +454,7 @@ def run_pipeline(
     planner_mode: str = "rule",
     extractor_mode: str = "rule",
     verifier_mode: str = "rule",
+    scoring_weights: dict[str, float] | None = None,
     llm_client: GenericLLMClient | None = None,
     retriever_agent: RetrieverAgent | None = None,
 ) -> PipelineResult:
@@ -368,6 +473,7 @@ def run_pipeline(
     )
 
     active_llm_client = build_llm_client(config, llm_backend, llm_client)
+    active_scoring_weights = sanitize_score_weights(scoring_weights)
 
     planner = PlannerAgent(mode=planner_mode, llm_client=active_llm_client)
     queries = planner.plan(question)
@@ -403,6 +509,7 @@ def run_pipeline(
         evidence_records,
         verification_results,
         question,
+        scoring_weights=active_scoring_weights,
     )
 
     feedback_agent = HumanFeedbackAgent()
@@ -411,7 +518,11 @@ def run_pipeline(
     feedback_applied = False
     if feedback_path:
         feedback_records = feedback_agent.read_feedback(feedback_path)
-        ranked_after_feedback = feedback_agent.apply(ranked_before_feedback, feedback_records)
+        ranked_after_feedback = feedback_agent.apply(
+            ranked_before_feedback,
+            feedback_records,
+            scoring_weights=active_scoring_weights,
+        )
         ranked_final = ranked_after_feedback
         feedback_applied = bool(feedback_records)
 
@@ -426,6 +537,7 @@ def run_pipeline(
         gold_labels_path=gold_labels_path,
     )
     metrics["duplicate_count"] = duplicate_count
+    metrics["scoring_weights"] = active_scoring_weights
     metrics["llm"] = _llm_metrics(
         llm_backend=llm_backend,
         active_llm_backend=active_llm_client.provider_name if active_llm_client else "none",
@@ -437,6 +549,20 @@ def run_pipeline(
         verification_results=verification_results,
     )
     save_evaluation(out / "evaluation.json", metrics)
+    trace = build_agent_trace(
+        question=question,
+        queries=queries,
+        planner_metadata=planner.last_llm_metadata,
+        retrieval_counts=retrieval_counts,
+        raw_paper_count=len(raw_papers),
+        merged_papers=merged_papers,
+        duplicate_count=duplicate_count,
+        evidence_records=evidence_records,
+        verification_results=verification_results,
+        ranked_papers=ranked_final,
+        scoring_weights=active_scoring_weights,
+    )
+    write_json(out / "agent_trace.json", trace)
 
     write_pipeline_csvs(
         out,
@@ -477,6 +603,8 @@ def run_pipeline(
         ranked_after_feedback=ranked_after_feedback,
         ranked_final=ranked_final,
         evaluation_metrics=metrics,
+        agent_trace=trace,
+        scoring_weights=active_scoring_weights,
     )
 
 

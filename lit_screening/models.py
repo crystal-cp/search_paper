@@ -50,6 +50,10 @@ class VerificationResult:
     confidence: float
     error_type: str
     rationale: str
+    support_level: str = "unverified"
+    span_match_type: str = "none"
+    span_match_confidence: float = 0.0
+    matched_text: str = ""
     verification_mode: str = "rule"
     llm_used: bool = False
     invalid_llm_output: bool = False
@@ -112,3 +116,5 @@ class PipelineResult:
     ranked_after_feedback: list[RankedPaper] | None = None
     ranked_final: list[RankedPaper] = field(default_factory=list)
     evaluation_metrics: dict[str, Any] = field(default_factory=dict)
+    agent_trace: dict[str, Any] = field(default_factory=dict)
+    scoring_weights: dict[str, float] = field(default_factory=dict)

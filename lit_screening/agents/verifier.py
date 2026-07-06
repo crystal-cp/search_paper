@@ -7,6 +7,7 @@ from dataclasses import replace
 
 from lit_screening.llm_client import GenericLLMClient
 from lit_screening.models import EvidenceRecord, Paper, VerificationResult
+from lit_screening.span_validation import validate_evidence_span
 from lit_screening.utils import clamp, keyword_overlap_score, tokenize
 
 
@@ -41,6 +42,7 @@ class VerifierAgent:
                 confidence=0.0,
                 error_type="missing_abstract",
                 rationale="The paper has no abstract, so the claim cannot be grounded.",
+                support_level="missing_abstract",
             )
         if not evidence.evidence_sentence:
             return VerificationResult(
@@ -49,17 +51,25 @@ class VerifierAgent:
                 confidence=0.0,
                 error_type="missing_evidence",
                 rationale="No evidence sentence was extracted.",
+                support_level="missing_evidence",
             )
 
-        abstract = " ".join(paper.abstract.lower().split())
-        sentence = " ".join(evidence.evidence_sentence.lower().split())
-        if sentence and sentence in abstract:
+        span = validate_evidence_span(evidence.evidence_sentence, paper.abstract)
+        if span.is_valid:
             return VerificationResult(
                 paper_id=paper.paper_id,
                 supported=True,
-                confidence=1.0,
+                confidence=span.confidence,
                 error_type="",
-                rationale="The evidence sentence appears verbatim in the abstract.",
+                rationale=(
+                    "The evidence sentence is grounded by an exact abstract span."
+                    if span.match_type == "exact"
+                    else "The evidence sentence is grounded by a high-confidence fuzzy abstract span."
+                ),
+                support_level="strict_support",
+                span_match_type=span.match_type,
+                span_match_confidence=span.confidence,
+                matched_text=span.matched_text,
             )
 
         sentence_terms = set(tokenize(evidence.evidence_sentence))
@@ -68,21 +78,37 @@ class VerifierAgent:
             overlap = 0.0
         else:
             overlap = len(sentence_terms & abstract_terms) / len(sentence_terms)
-        if overlap >= 0.65:
+        if overlap >= 0.65 and not evidence.llm_used:
             return VerificationResult(
                 paper_id=paper.paper_id,
-                supported=True,
+                supported=False,
                 confidence=clamp(0.5 + 0.5 * overlap),
-                error_type="",
-                rationale="The evidence sentence has high keyword overlap with the abstract.",
+                error_type="weak_support",
+                rationale=(
+                    "The evidence sentence overlaps with the abstract, but no exact or "
+                    "high-confidence fuzzy span was found, so it is not strict supported evidence."
+                ),
+                support_level="weak_support",
+                span_match_type=span.match_type,
+                span_match_confidence=span.confidence,
+                matched_text=span.matched_text,
             )
 
+        error_type = "llm_invalid_evidence" if evidence.llm_used else "unverified"
         return VerificationResult(
             paper_id=paper.paper_id,
             supported=False,
             confidence=keyword_overlap_score(evidence.evidence_sentence, paper.abstract),
-            error_type="low_overlap",
-            rationale="The evidence sentence is not sufficiently grounded in the abstract.",
+            error_type=error_type,
+            rationale=(
+                "LLM-produced evidence could not be matched to an abstract span."
+                if evidence.llm_used
+                else "The evidence sentence could not be matched to an abstract span."
+            ),
+            support_level=error_type,
+            span_match_type=span.match_type,
+            span_match_confidence=span.confidence,
+            matched_text=span.matched_text,
         )
 
     def _verify_with_llm(
@@ -120,6 +146,19 @@ class VerifierAgent:
                 llm_error_type=result.error_type,
             )
 
+        span = validate_evidence_span(evidence.evidence_sentence, paper.abstract)
+        if not span.is_valid:
+            return replace(
+                fallback,
+                error_type="llm_invalid_evidence" if evidence.llm_used else "unverified",
+                support_level="llm_invalid_evidence" if evidence.llm_used else "unverified",
+                supported=False,
+                llm_used=True,
+                span_match_type=span.match_type,
+                span_match_confidence=span.confidence,
+                matched_text=span.matched_text,
+            )
+
         supported_value = result.data.get("supported")
         if isinstance(supported_value, bool):
             supported = supported_value
@@ -145,12 +184,34 @@ class VerifierAgent:
 
         error_type = str(result.data.get("error_type") or "").strip()
         rationale = str(result.data.get("rationale") or "").strip()
+        if supported:
+            return VerificationResult(
+                paper_id=paper.paper_id,
+                supported=True,
+                confidence=confidence,
+                error_type="",
+                rationale=rationale or "LLM verification result.",
+                support_level="strict_support",
+                span_match_type=span.match_type,
+                span_match_confidence=span.confidence,
+                matched_text=span.matched_text,
+                verification_mode="llm",
+                llm_used=True,
+                invalid_llm_output=False,
+                llm_error_type="",
+            )
+
+        downgraded_error = error_type or "unsupported_claim"
         return VerificationResult(
             paper_id=paper.paper_id,
-            supported=supported,
+            supported=False,
             confidence=confidence,
-            error_type=error_type if not supported else "",
+            error_type=downgraded_error,
             rationale=rationale or "LLM verification result.",
+            support_level=downgraded_error,
+            span_match_type=span.match_type,
+            span_match_confidence=span.confidence,
+            matched_text=span.matched_text,
             verification_mode="llm",
             llm_used=True,
             invalid_llm_output=False,

@@ -16,6 +16,25 @@ def test_scoring_formula():
     assert scores.final_score == 0.40 * 0.8 + 0.25 * 0.6 + 0.15 * 0.4 + 0.15 * 0.2 + 0.05 * 1.0 + 0.1
 
 
+def test_scoring_formula_accepts_custom_weights():
+    scores = compute_final_score(
+        relevance_score=1.0,
+        evidence_score=0.0,
+        recency_score=0.0,
+        quality_score=0.0,
+        diversity_score=0.0,
+        weights={
+            "relevance": 0.8,
+            "evidence": 0.1,
+            "recency": 0.05,
+            "quality": 0.03,
+            "diversity": 0.02,
+        },
+    )
+
+    assert scores.final_score == 0.8
+
+
 def test_feedback_adjustment():
     paper = Paper(paper_id="p1", title="Relevant paper")
     evidence = EvidenceRecord(

@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import csv
+import io
+import json
 import os
+import re
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -22,6 +28,111 @@ PROVIDER_OPTIONS = {
     "OpenAlex": ["openalex"],
     "Semantic Scholar": ["semantic_scholar"],
 }
+PROJECTS_DIR = Path("outputs/projects")
+HISTORY_PATH = PROJECTS_DIR / "history.json"
+DEFAULT_UI_WEIGHTS = {
+    "relevance": 0.40,
+    "evidence": 0.25,
+    "recency": 0.15,
+    "quality": 0.15,
+    "diversity": 0.05,
+}
+WEIGHT_HELP = {
+    "relevance": {
+        "en": "How strongly the paper title, abstract, claim, and evidence overlap with the research question.",
+        "zh": "论文标题、摘要、claim 和 evidence 与研究问题越相关，这项分数越高。",
+    },
+    "evidence": {
+        "en": "How much verified evidence matters. Only strict abstract span matches receive full evidence credit.",
+        "zh": "可信 evidence 的重要性。只有能在 abstract 中严格匹配的 evidence 才会拿到高分。",
+    },
+    "recency": {
+        "en": "How much recent publication year matters in ranking.",
+        "zh": "年份越近的论文是否应该被排得更靠前。",
+    },
+    "quality": {
+        "en": "How much citation count and venue metadata matter as a rough quality signal.",
+        "zh": "引用数和期刊/会议元数据作为粗略质量信号的权重。",
+    },
+    "diversity": {
+        "en": "How much the ranker should avoid over-concentrating on the same venue.",
+        "zh": "避免结果过度集中在同一 venue 的权重。",
+    },
+}
+
+
+def ui_text(language: str, english: str, chinese: str) -> str:
+    """Return UI text in the selected interface language."""
+
+    return chinese if language == "中文" else english
+
+
+def slugify(text: str, max_length: int = 48) -> str:
+    """Create a filesystem-friendly project slug."""
+
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower()).strip("-")
+    return (slug or "screening-project")[:max_length]
+
+
+def load_history() -> list[dict[str, Any]]:
+    """Load saved screening project history."""
+
+    if not HISTORY_PATH.exists():
+        return []
+    try:
+        return json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+
+
+def save_history(history: list[dict[str, Any]]) -> None:
+    """Persist saved screening project history."""
+
+    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    HISTORY_PATH.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def new_project_output_dir(question: str) -> Path:
+    """Create a unique output directory for a screening project."""
+
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return PROJECTS_DIR / f"{run_id}-{slugify(question)}"
+
+
+def save_project_manifest(
+    result: PipelineResult,
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    """Save one run as a reusable screening project manifest."""
+
+    manifest = {
+        "run_id": Path(result.output_dir).name,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "question": result.question,
+        "output_dir": result.output_dir,
+        "providers": settings["providers"],
+        "max_per_query": settings["max_per_query"],
+        "from_year": settings["from_year"],
+        "llm_backend": settings["llm_backend"],
+        "scoring_weights": result.scoring_weights,
+        "merged_paper_count": result.merged_paper_count,
+        "duplicate_count": result.duplicate_count,
+        "ranked_papers_path": result.ranked_papers_path,
+        "report_path": result.report_path,
+        "evaluation_path": result.evaluation_path,
+        "agent_trace_path": str(Path(result.output_dir) / "agent_trace.json"),
+    }
+    output_dir = Path(result.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "project_manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    history = [item for item in load_history() if item.get("run_id") != manifest["run_id"]]
+    history.insert(0, manifest)
+    save_history(history[:50])
+    return manifest
 
 
 def ranked_dataframe(ranked_papers: list[RankedPaper]) -> pd.DataFrame:
@@ -37,7 +148,8 @@ def ranked_dataframe(ranked_papers: list[RankedPaper]) -> pd.DataFrame:
         "year",
         "venue",
         "source_provider",
-        "supported",
+        "support_level",
+        "span_match_type",
         "confidence",
         "paper_id",
     ]
@@ -53,46 +165,117 @@ def file_bytes(path: str | Path) -> bytes | None:
     return candidate.read_bytes()
 
 
-def render_key_warnings(providers: list[str], llm_backend: str) -> None:
+def read_json_file(path: str | Path) -> dict[str, Any]:
+    """Read JSON from disk with a safe fallback."""
+
+    candidate = Path(path)
+    if not candidate.exists():
+        return {}
+    try:
+        return json.loads(candidate.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def set_runtime_api_keys() -> None:
+    """Apply user-entered API keys to the current Streamlit process only."""
+
+    key_map = {
+        "OPENALEX_API_KEY": st.session_state.get("openalex_api_key_input", ""),
+        "S2_API_KEY": st.session_state.get("s2_api_key_input", ""),
+        "DEEPSEEK_API_KEY": st.session_state.get("deepseek_api_key_input", ""),
+    }
+    for env_name, value in key_map.items():
+        if value:
+            os.environ[env_name] = value
+
+
+def render_key_warnings(providers: list[str], llm_backend: str, language: str) -> None:
     """Show missing-key status without exposing key values."""
 
     if "openalex" in providers and not os.getenv("OPENALEX_API_KEY"):
-        st.sidebar.info("OPENALEX_API_KEY is not set; OpenAlex will use public access.")
+        st.sidebar.info(
+            ui_text(
+                language,
+                "OPENALEX_API_KEY is not set; OpenAlex will use public access.",
+                "OPENALEX_API_KEY 未设置；OpenAlex 会使用公开访问。",
+            )
+        )
     if "semantic_scholar" in providers and not os.getenv("S2_API_KEY"):
-        st.sidebar.warning("S2_API_KEY is not set; Semantic Scholar may be rate-limited.")
+        st.sidebar.warning(
+            ui_text(
+                language,
+                "S2_API_KEY is not set; Semantic Scholar may be rate-limited.",
+                "S2_API_KEY 未设置；Semantic Scholar 可能更容易限流。",
+            )
+        )
     if llm_backend == "deepseek" and not os.getenv("DEEPSEEK_API_KEY"):
-        st.sidebar.warning("DEEPSEEK_API_KEY is not set; LLM modes will fall back to rules.")
+        st.sidebar.warning(
+            ui_text(
+                language,
+                "DEEPSEEK_API_KEY is not set; LLM modes will fall back to rules.",
+                "DEEPSEEK_API_KEY 未设置；LLM 模式会退回规则模式。",
+            )
+        )
 
 
-def render_sidebar() -> dict:
+def render_sidebar() -> dict[str, Any]:
     """Render sidebar controls and return pipeline settings."""
 
-    st.sidebar.header("Screening Settings")
-    provider_label = st.sidebar.radio(
-        "Providers",
-        list(PROVIDER_OPTIONS),
-        horizontal=False,
-    )
+    language = st.sidebar.radio("Language / 界面语言", ["English", "中文"], horizontal=True)
+    st.sidebar.header(ui_text(language, "Screening Settings", "筛选设置"))
+    provider_label = st.sidebar.radio(ui_text(language, "Providers", "数据源"), list(PROVIDER_OPTIONS))
     max_per_query = st.sidebar.number_input(
-        "Max papers per query",
+        ui_text(language, "Max papers per query", "每个 query 最大论文数"),
         min_value=0,
         max_value=100,
         value=10,
         step=1,
     )
     from_year_value = st.sidebar.number_input(
-        "From year",
+        ui_text(language, "From year", "起始年份"),
         min_value=1900,
         max_value=2100,
         value=2020,
         step=1,
+        help=ui_text(
+            language,
+            "Only retrieve papers published from this year onward when the provider supports year filtering.",
+            "只检索该年份及之后发表的论文；具体效果取决于数据源是否支持年份过滤。",
+        ),
     )
-    use_cache = st.sidebar.checkbox("Use cache", value=True)
+    use_cache = st.sidebar.checkbox(ui_text(language, "Use cache", "使用缓存"), value=True)
     llm_backend = st.sidebar.selectbox("LLM backend", ["none", "deepseek"], index=0)
+
+    with st.sidebar.expander(ui_text(language, "API Keys", "API 设置")):
+        st.text_input(
+            "OPENALEX_API_KEY",
+            type="password",
+            key="openalex_api_key_input",
+            help=ui_text(language, "Optional for OpenAlex.", "OpenAlex 可选。"),
+        )
+        st.text_input(
+            "S2_API_KEY",
+            type="password",
+            key="s2_api_key_input",
+            help=ui_text(language, "Recommended for Semantic Scholar rate limits.", "建议填写，可降低 Semantic Scholar 限流风险。"),
+        )
+        st.text_input(
+            "DEEPSEEK_API_KEY",
+            type="password",
+            key="deepseek_api_key_input",
+            help=ui_text(language, "Required only when using DeepSeek LLM modes.", "仅在使用 DeepSeek LLM 模式时需要。"),
+        )
+        set_runtime_api_keys()
+        st.caption(ui_text(language, "Keys are applied to this Streamlit process and are not saved to project files.", "Key 只写入当前 Streamlit 进程，不保存到项目文件。"))
 
     with st.sidebar.expander("LLM Agent Modes"):
         default_mode = "rule" if llm_backend == "none" else "llm"
-        planner_mode = st.selectbox("Planner", ["rule", "llm"], index=["rule", "llm"].index(default_mode))
+        planner_mode = st.selectbox(
+            "Planner",
+            ["rule", "llm"],
+            index=["rule", "llm"].index(default_mode),
+        )
         extractor_mode = st.selectbox(
             "Extractor",
             ["rule", "llm"],
@@ -104,17 +287,63 @@ def render_sidebar() -> dict:
             index=["rule", "llm"].index(default_mode),
         )
 
-    with st.sidebar.expander("Scoring Weights"):
-        st.slider("Relevance", 0.0, 1.0, 0.40, 0.05, disabled=True)
-        st.slider("Evidence", 0.0, 1.0, 0.25, 0.05, disabled=True)
-        st.slider("Recency", 0.0, 1.0, 0.15, 0.05, disabled=True)
-        st.slider("Quality", 0.0, 1.0, 0.15, 0.05, disabled=True)
-        st.slider("Diversity", 0.0, 1.0, 0.05, 0.05, disabled=True)
+    with st.sidebar.expander(ui_text(language, "Scoring Weights", "评分权重")):
+        weights = {
+            "relevance": st.slider(
+                "Relevance",
+                0.0,
+                1.0,
+                DEFAULT_UI_WEIGHTS["relevance"],
+                0.01,
+                help=WEIGHT_HELP["relevance"]["zh" if language == "中文" else "en"],
+            ),
+            "evidence": st.slider(
+                "Evidence",
+                0.0,
+                1.0,
+                DEFAULT_UI_WEIGHTS["evidence"],
+                0.01,
+                help=WEIGHT_HELP["evidence"]["zh" if language == "中文" else "en"],
+            ),
+            "recency": st.slider(
+                "Recency",
+                0.0,
+                1.0,
+                DEFAULT_UI_WEIGHTS["recency"],
+                0.01,
+                help=WEIGHT_HELP["recency"]["zh" if language == "中文" else "en"],
+            ),
+            "quality": st.slider(
+                "Quality",
+                0.0,
+                1.0,
+                DEFAULT_UI_WEIGHTS["quality"],
+                0.01,
+                help=WEIGHT_HELP["quality"]["zh" if language == "中文" else "en"],
+            ),
+            "diversity": st.slider(
+                "Diversity",
+                0.0,
+                1.0,
+                DEFAULT_UI_WEIGHTS["diversity"],
+                0.01,
+                help=WEIGHT_HELP["diversity"]["zh" if language == "中文" else "en"],
+            ),
+        }
+        weight_sum = sum(weights.values())
+        st.caption(
+            ui_text(
+                language,
+                f"Current weight sum: {weight_sum:.2f}. Scores use these values directly.",
+                f"当前权重总和：{weight_sum:.2f}。系统会直接使用这些权重计算 final_score。",
+            )
+        )
 
     providers = PROVIDER_OPTIONS[provider_label]
-    render_key_warnings(providers, llm_backend)
+    render_key_warnings(providers, llm_backend, language)
 
     return {
+        "language": language,
         "providers": providers,
         "max_per_query": int(max_per_query),
         "from_year": int(from_year_value),
@@ -123,7 +352,29 @@ def render_sidebar() -> dict:
         "planner_mode": planner_mode,
         "extractor_mode": extractor_mode,
         "verifier_mode": verifier_mode,
+        "scoring_weights": weights,
     }
+
+
+def render_history_sidebar(language: str) -> None:
+    """Render saved screening project history."""
+
+    st.sidebar.header(ui_text(language, "Run History", "运行历史"))
+    history = load_history()
+    if not history:
+        st.sidebar.caption(ui_text(language, "No saved projects yet.", "还没有保存的项目。"))
+        return
+
+    labels = [
+        f"{item.get('created_at', '')} | {item.get('question', '')[:42]}"
+        for item in history
+    ]
+    selected_label = st.sidebar.selectbox(ui_text(language, "Saved projects", "已保存项目"), labels)
+    selected_index = labels.index(selected_label)
+    selected = history[selected_index]
+    if st.sidebar.button(ui_text(language, "Open Saved Project", "打开保存项目")):
+        st.session_state.saved_project = selected
+        st.session_state.pipeline_result = None
 
 
 def ensure_state() -> None:
@@ -131,29 +382,138 @@ def ensure_state() -> None:
 
     st.session_state.setdefault("pipeline_result", None)
     st.session_state.setdefault("feedback_records", {})
+    st.session_state.setdefault("active_manifest", None)
+    st.session_state.setdefault("saved_project", None)
 
 
-def run_screening(question: str, settings: dict) -> None:
+def run_screening(question: str, settings: dict[str, Any]) -> None:
     """Run the core pipeline and store the result in session state."""
 
+    output_dir = new_project_output_dir(question)
     with st.spinner("Running literature screening..."):
         result = run_pipeline(
             question=question,
             providers=settings["providers"],
             max_per_query=settings["max_per_query"],
             from_year=settings["from_year"],
-            output_dir="outputs/streamlit",
+            output_dir=str(output_dir),
             use_cache=settings["use_cache"],
             llm_backend=settings["llm_backend"],
             planner_mode=settings["planner_mode"],
             extractor_mode=settings["extractor_mode"],
             verifier_mode=settings["verifier_mode"],
+            scoring_weights=settings["scoring_weights"],
         )
     st.session_state.pipeline_result = result
     st.session_state.feedback_records = {}
+    st.session_state.active_manifest = save_project_manifest(result, settings)
+    st.session_state.saved_project = None
 
 
-def render_feedback(selected: RankedPaper, result: PipelineResult) -> None:
+def feedback_records_to_csv(records: dict[str, FeedbackRecord]) -> str:
+    """Serialize feedback records as CSV text."""
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["paper_id", "label", "adjustment", "note"])
+    writer.writeheader()
+    for record in records.values():
+        writer.writerow(
+            {
+                "paper_id": record.paper_id,
+                "label": record.label,
+                "adjustment": record.adjustment,
+                "note": record.note,
+            }
+        )
+    return buffer.getvalue()
+
+
+def parse_feedback_csv(uploaded_file: Any) -> dict[str, FeedbackRecord]:
+    """Parse uploaded feedback CSV into feedback records."""
+
+    if uploaded_file is None:
+        return {}
+    text = uploaded_file.getvalue().decode("utf-8")
+    reader = csv.DictReader(io.StringIO(text))
+    feedback_agent = HumanFeedbackAgent()
+    records: dict[str, FeedbackRecord] = {}
+    for row in reader:
+        paper_id = (row.get("paper_id") or "").strip()
+        if not paper_id:
+            continue
+        label = (row.get("label") or "uncertain").strip().lower()
+        if label not in {"include", "exclude", "uncertain"}:
+            label = "uncertain"
+        adjustment_text = (row.get("adjustment") or "").strip()
+        adjustment = (
+            float(adjustment_text)
+            if adjustment_text
+            else feedback_agent.default_adjustment(label)
+        )
+        records[paper_id] = FeedbackRecord(
+            paper_id=paper_id,
+            label=label,
+            adjustment=adjustment,
+            note=row.get("note") or "",
+        )
+    return records
+
+
+def apply_feedback_records(result: PipelineResult, records: dict[str, FeedbackRecord]) -> None:
+    """Apply feedback records to the active project."""
+
+    st.session_state.feedback_records = records
+    updated = apply_feedback_to_pipeline_result(result, records)
+    st.session_state.pipeline_result = updated
+    if st.session_state.active_manifest:
+        st.session_state.active_manifest = save_project_manifest(
+            updated,
+            {
+                "providers": st.session_state.active_manifest.get("providers", []),
+                "max_per_query": st.session_state.active_manifest.get("max_per_query", 0),
+                "from_year": st.session_state.active_manifest.get("from_year", 0),
+                "llm_backend": st.session_state.active_manifest.get("llm_backend", "none"),
+                "scoring_weights": result.scoring_weights,
+            },
+        )
+
+
+def render_feedback_tools(result: PipelineResult, language: str) -> None:
+    """Render CSV import/export feedback controls."""
+
+    st.subheader("Feedback CSV")
+    uploaded = st.file_uploader(
+        ui_text(language, "Import feedback CSV", "导入 feedback CSV"),
+        type=["csv"],
+        help=ui_text(
+            language,
+            "Expected columns: paper_id,label,adjustment,note",
+            "需要列：paper_id,label,adjustment,note",
+        ),
+    )
+    columns = st.columns(2)
+    with columns[0]:
+        if st.button(ui_text(language, "Apply Imported Feedback", "应用导入的反馈")):
+            records = parse_feedback_csv(uploaded)
+            apply_feedback_records(result, records)
+            st.success(
+                ui_text(
+                    language,
+                    f"Imported {len(records)} feedback records without rerunning retrieval.",
+                    f"已导入 {len(records)} 条反馈，未重新请求 API。",
+                )
+            )
+    with columns[1]:
+        csv_text = feedback_records_to_csv(st.session_state.feedback_records)
+        st.download_button(
+            ui_text(language, "Export feedback CSV", "导出 feedback CSV"),
+            data=csv_text,
+            file_name="feedback.csv",
+            mime="text/csv",
+        )
+
+
+def render_manual_feedback(selected: RankedPaper, result: PipelineResult, language: str) -> None:
     """Render feedback controls and rerank through core pipeline helpers."""
 
     feedback_agent = HumanFeedbackAgent()
@@ -161,20 +521,20 @@ def render_feedback(selected: RankedPaper, result: PipelineResult) -> None:
     labels = ["include", "exclude", "uncertain"]
     default_label = existing.label if existing else "uncertain"
     label = st.radio(
-        "Feedback label",
+        ui_text(language, "Feedback label", "反馈标签"),
         labels,
         index=labels.index(default_label),
         horizontal=True,
         key=f"feedback_label_{selected.paper.paper_id}",
     )
     note = st.text_area(
-        "Feedback note",
+        ui_text(language, "Feedback note", "反馈备注"),
         value=existing.note if existing else "",
         key=f"feedback_note_{selected.paper.paper_id}",
         height=90,
     )
 
-    if st.button("Apply Feedback And Rerank", type="primary"):
+    if st.button(ui_text(language, "Apply Feedback And Rerank", "应用反馈并重新排序"), type="primary"):
         feedback_record = FeedbackRecord(
             paper_id=selected.paper.paper_id,
             label=label,
@@ -183,67 +543,30 @@ def render_feedback(selected: RankedPaper, result: PipelineResult) -> None:
         )
         updated_feedback = dict(st.session_state.feedback_records)
         updated_feedback[selected.paper.paper_id] = feedback_record
-        st.session_state.feedback_records = updated_feedback
-        st.session_state.pipeline_result = apply_feedback_to_pipeline_result(
-            result,
-            updated_feedback,
-        )
-        st.success("Feedback applied without rerunning retrieval.")
+        apply_feedback_records(result, updated_feedback)
+        st.success(ui_text(language, "Feedback applied without rerunning retrieval.", "反馈已应用，未重新请求 API。"))
 
 
-def render_result(result: PipelineResult) -> None:
-    """Render planned queries, ranked papers, evidence, metrics, and downloads."""
+def render_planned_queries(queries: list[str]) -> None:
+    """Render planned queries as a clean table instead of raw JSON."""
 
-    st.subheader("Planned Queries")
-    st.write(result.planned_queries)
+    st.dataframe(
+        pd.DataFrame({"query": queries}),
+        use_container_width=True,
+        hide_index=True,
+    )
 
-    if result.merged_paper_count == 0:
-        st.warning("No papers were retrieved. Try increasing max papers per query, changing providers, or checking API/network access.")
 
-    st.subheader("Ranked Papers")
-    table = ranked_dataframe(result.ranked_final)
-    if table.empty:
-        st.dataframe(table, use_container_width=True)
-    else:
-        st.dataframe(table, use_container_width=True, hide_index=True)
+def render_downloads(ranked_path: str, report_path: str, language: str) -> None:
+    """Render artifact download buttons."""
 
-    if result.ranked_final:
-        options = {
-            f"{item.rank}. {item.paper.title[:100]}": item
-            for item in result.ranked_final
-        }
-        selected_label = st.selectbox("Selected paper", list(options))
-        selected = options[selected_label]
-
-        st.subheader("Evidence Chain")
-        evidence_table = pd.DataFrame(
-            [
-                {
-                    "paper_id": selected.paper.paper_id,
-                    "claim": selected.evidence.claim,
-                    "evidence_sentence": selected.evidence.evidence_sentence,
-                    "supported": selected.verification.supported,
-                    "confidence": selected.verification.confidence,
-                    "error_type": selected.verification.error_type,
-                    "rationale": selected.verification.rationale,
-                }
-            ]
-        )
-        st.dataframe(evidence_table, use_container_width=True, hide_index=True)
-
-        render_feedback(selected, result)
-
-    st.subheader("Evaluation Metrics")
-    metrics = result.evaluation_metrics
-    st.json(metrics)
-
-    ranked_bytes = file_bytes(result.ranked_papers_path)
-    report_bytes = file_bytes(result.report_path)
+    ranked_bytes = file_bytes(ranked_path)
+    report_bytes = file_bytes(report_path)
     download_cols = st.columns(2)
     with download_cols[0]:
         if ranked_bytes is not None:
             st.download_button(
-                "Download ranked_papers.csv",
+                ui_text(language, "Download ranked_papers.csv", "下载 ranked_papers.csv"),
                 data=ranked_bytes,
                 file_name="ranked_papers.csv",
                 mime="text/csv",
@@ -251,42 +574,159 @@ def render_result(result: PipelineResult) -> None:
     with download_cols[1]:
         if report_bytes is not None:
             st.download_button(
-                "Download report.md",
+                ui_text(language, "Download report.md", "下载 report.md"),
                 data=report_bytes,
                 file_name="report.md",
                 mime="text/markdown",
             )
 
 
+def render_result(result: PipelineResult, language: str) -> None:
+    """Render active project results."""
+
+    st.caption(ui_text(language, f"Project folder: `{result.output_dir}`", f"项目目录：`{result.output_dir}`"))
+    metric_columns = st.columns(4)
+    metric_columns[0].metric("Merged papers", result.merged_paper_count)
+    metric_columns[1].metric("Duplicates", result.duplicate_count)
+    metric_columns[2].metric(
+        "Strict evidence",
+        result.evaluation_metrics.get("strict_supported_count", 0),
+    )
+    metric_columns[3].metric(
+        "Weak support",
+        result.evaluation_metrics.get("weak_support_count", 0),
+    )
+
+    tabs = st.tabs(["Queries", "Ranked Papers", "Evidence", "Feedback", "Trace", "Metrics"])
+    with tabs[0]:
+        render_planned_queries(result.planned_queries)
+
+    with tabs[1]:
+        if result.merged_paper_count == 0:
+            st.warning(
+                ui_text(
+                    language,
+                    "No papers were retrieved. Try increasing max papers per query, changing providers, or checking API/network access.",
+                    "没有检索到论文。可以尝试增加每个 query 的论文数、切换数据源，或检查 API/网络。",
+                )
+            )
+        table = ranked_dataframe(result.ranked_final)
+        st.dataframe(table, use_container_width=True, hide_index=True)
+        render_downloads(result.ranked_papers_path, result.report_path, language)
+
+    selected: RankedPaper | None = None
+    if result.ranked_final:
+        options = {
+            f"{item.rank}. {item.paper.title[:100]}": item
+            for item in result.ranked_final
+        }
+        selected_label = st.selectbox(ui_text(language, "Selected paper", "选择论文"), list(options))
+        selected = options[selected_label]
+
+    with tabs[2]:
+        if selected is None:
+            st.info(ui_text(language, "Run a screening project and select a paper to inspect evidence.", "先运行一个筛选项目，并选择一篇论文查看 evidence。"))
+        else:
+            evidence_table = pd.DataFrame(
+                [
+                    {
+                        "paper_id": selected.paper.paper_id,
+                        "claim": selected.evidence.claim,
+                        "evidence_sentence": selected.evidence.evidence_sentence,
+                        "support_level": selected.verification.support_level,
+                        "span_match_type": selected.verification.span_match_type,
+                        "span_match_confidence": selected.verification.span_match_confidence,
+                        "matched_text": selected.verification.matched_text,
+                        "rationale": selected.verification.rationale,
+                    }
+                ]
+            )
+            st.dataframe(evidence_table, use_container_width=True, hide_index=True)
+
+    with tabs[3]:
+        render_feedback_tools(result, language)
+        if selected is not None:
+            render_manual_feedback(selected, result, language)
+
+    with tabs[4]:
+        st.json(result.agent_trace)
+
+    with tabs[5]:
+        st.json(result.evaluation_metrics)
+
+
+def render_saved_project(manifest: dict[str, Any], language: str) -> None:
+    """Render a saved project summary from disk artifacts."""
+
+    st.subheader(ui_text(language, "Saved Project", "已保存项目"))
+    st.caption(ui_text(language, f"Project folder: `{manifest.get('output_dir', '')}`", f"项目目录：`{manifest.get('output_dir', '')}`"))
+    st.write(manifest.get("question", ""))
+
+    output_dir = Path(manifest.get("output_dir", ""))
+    planned = read_json_file(output_dir / "planned_queries.json")
+    ranked_path = output_dir / "ranked_papers.csv"
+    evaluation = read_json_file(output_dir / "evaluation.json")
+    trace = read_json_file(output_dir / "agent_trace.json")
+
+    tabs = st.tabs(["Queries", "Ranked Papers", "Trace", "Metrics", "Downloads"])
+    with tabs[0]:
+        render_planned_queries(planned.get("queries", []))
+    with tabs[1]:
+        if ranked_path.exists():
+            st.dataframe(pd.read_csv(ranked_path), use_container_width=True)
+        else:
+            st.warning(ui_text(language, "Saved ranked_papers.csv is missing.", "保存的 ranked_papers.csv 不存在。"))
+    with tabs[2]:
+        st.json(trace)
+    with tabs[3]:
+        st.json(evaluation)
+    with tabs[4]:
+        render_downloads(str(ranked_path), str(output_dir / "report.md"), language)
+
+
 def main() -> None:
     """Streamlit app entrypoint."""
 
-    st.set_page_config(page_title="Literature Screening", layout="wide")
+    st.set_page_config(page_title="Literature Screening Project", layout="wide")
     ensure_state()
     settings = render_sidebar()
+    language = settings["language"]
+    render_history_sidebar(language)
 
-    st.title("Scientific Literature Screening")
+    st.title(ui_text(language, "Literature Screening Project Workspace", "文献筛选项目工作台"))
+    st.caption(
+        ui_text(
+            language,
+            "Evidence-grounded search, extraction, verification, ranking, and feedback.",
+            "基于 evidence 的检索、抽取、验证、排序与人工反馈。",
+        )
+    )
     question = st.text_area(
-        "Research question",
-        value=(
-            "How can human-in-the-loop multi-agent LLM systems improve "
-            "scientific literature screening and evidence verification?"
+        ui_text(language, "Research question", "研究问题"),
+        value="",
+        placeholder=ui_text(
+            language,
+            "Example: the significance of surface magnetization",
+            "例如：the significance of surface magnetization",
         ),
-        height=130,
+        height=110,
     )
 
-    if st.button("Run Screening", type="primary"):
+    if st.button(ui_text(language, "Run Screening", "开始筛选"), type="primary"):
         if not question.strip():
-            st.error("Please enter a research question.")
+            st.error(ui_text(language, "Please enter a research question.", "请先输入研究问题。"))
         else:
             try:
                 run_screening(question.strip(), settings)
             except Exception as exc:
-                st.error(f"Screening failed: {exc}")
+                st.error(ui_text(language, f"Screening failed: {exc}", f"筛选失败：{exc}"))
 
     result = st.session_state.pipeline_result
+    saved_project = st.session_state.saved_project
     if result:
-        render_result(result)
+        render_result(result, language)
+    elif saved_project:
+        render_saved_project(saved_project, language)
 
 
 if __name__ == "__main__":

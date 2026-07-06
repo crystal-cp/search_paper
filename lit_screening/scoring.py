@@ -8,6 +8,26 @@ from .models import EvidenceRecord, Paper, ScoreBreakdown, VerificationResult
 from .utils import clamp, current_year, keyword_overlap_score
 
 
+DEFAULT_SCORE_WEIGHTS = {
+    "relevance": 0.40,
+    "evidence": 0.25,
+    "recency": 0.15,
+    "quality": 0.15,
+    "diversity": 0.05,
+}
+
+
+def sanitize_score_weights(weights: dict[str, float] | None = None) -> dict[str, float]:
+    """Return complete non-negative scoring weights with defaults filled in."""
+
+    merged = dict(DEFAULT_SCORE_WEIGHTS)
+    if weights:
+        for key in merged:
+            if key in weights:
+                merged[key] = max(0.0, float(weights[key]))
+    return merged
+
+
 def score_relevance(paper: Paper, evidence: EvidenceRecord, question: str) -> float:
     """Estimate topical relevance from title, abstract, and extracted evidence."""
 
@@ -57,20 +77,22 @@ def compute_final_score(
     quality_score: float,
     diversity_score: float,
     human_feedback_adjustment: float = 0.0,
+    weights: dict[str, float] | None = None,
 ) -> ScoreBreakdown:
     """Compute the requested weighted score formula."""
 
+    score_weights = sanitize_score_weights(weights)
     relevance = clamp(relevance_score)
     evidence = clamp(evidence_score)
     recency = clamp(recency_score)
     quality = clamp(quality_score)
     diversity = clamp(diversity_score)
     final = (
-        0.40 * relevance
-        + 0.25 * evidence
-        + 0.15 * recency
-        + 0.15 * quality
-        + 0.05 * diversity
+        score_weights["relevance"] * relevance
+        + score_weights["evidence"] * evidence
+        + score_weights["recency"] * recency
+        + score_weights["quality"] * quality
+        + score_weights["diversity"] * diversity
         + human_feedback_adjustment
     )
     return ScoreBreakdown(
@@ -91,6 +113,7 @@ def score_paper(
     question: str,
     diversity_score: float = 0.5,
     human_feedback_adjustment: float = 0.0,
+    weights: dict[str, float] | None = None,
 ) -> ScoreBreakdown:
     """Compute all ranking sub-scores for one paper."""
 
@@ -101,4 +124,5 @@ def score_paper(
         quality_score=score_quality(paper.citation_count, paper.venue),
         diversity_score=diversity_score,
         human_feedback_adjustment=human_feedback_adjustment,
+        weights=weights,
     )

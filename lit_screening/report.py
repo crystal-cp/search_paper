@@ -66,9 +66,24 @@ def generate_report(
             f"- Verifier mode: {retrieval_statistics.get('llm', {}).get('verifier_mode', 'rule')}",
             f"- Invalid LLM output count: {retrieval_statistics.get('llm', {}).get('invalid_llm_output_count', 0)}",
             "",
+            "## Evidence Validation",
+            "",
+            f"- Strict supported count: {retrieval_statistics.get('strict_supported_count', 0)}",
+            f"- Weak support count: {retrieval_statistics.get('weak_support_count', 0)}",
+            f"- Unverified count: {retrieval_statistics.get('unverified_count', 0)}",
+            f"- LLM invalid evidence count: {retrieval_statistics.get('llm_invalid_evidence_count', 0)}",
+            "",
             "## Scoring Formula",
             "",
             f"`{SCORING_FORMULA}`",
+            "",
+            "Current weights:",
+            "",
+            f"- Relevance: {evaluation_metrics.get('scoring_weights', {}).get('relevance', 0.40)}",
+            f"- Evidence: {evaluation_metrics.get('scoring_weights', {}).get('evidence', 0.25)}",
+            f"- Recency: {evaluation_metrics.get('scoring_weights', {}).get('recency', 0.15)}",
+            f"- Quality: {evaluation_metrics.get('scoring_weights', {}).get('quality', 0.15)}",
+            f"- Diversity: {evaluation_metrics.get('scoring_weights', {}).get('diversity', 0.05)}",
             "",
             "## Top 10 Ranked Papers",
             "",
@@ -93,8 +108,8 @@ def generate_report(
             "",
             "## Evidence Chain Table",
             "",
-            "| Rank | Supported | Confidence | Claim | Evidence |",
-            "| ---: | --- | ---: | --- | --- |",
+            "| Rank | Support level | Span match | Confidence | Claim | Evidence |",
+            "| ---: | --- | --- | ---: | --- | --- |",
         ]
     )
     evidence_by_id = {record.paper_id: record for record in evidence_records}
@@ -103,7 +118,8 @@ def generate_report(
         lines.append(
             "| "
             f"{item.rank} | "
-            f"{item.verification.supported} | "
+            f"{item.verification.support_level} | "
+            f"{item.verification.span_match_type} | "
             f"{item.verification.confidence:.2f} | "
             f"{_escape_table(evidence.claim)} | "
             f"{_escape_table(evidence.evidence_sentence)} |"

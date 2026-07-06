@@ -63,6 +63,8 @@ def test_pipeline_with_fake_retrievers_and_no_internet(tmp_path):
     assert (output_dir / "ranked_papers_after_feedback.csv").exists()
     assert (output_dir / "ranked_papers.csv").exists()
     assert (output_dir / "evaluation.json").exists()
+    assert (output_dir / "agent_trace.json").exists()
     assert (output_dir / "report.md").exists()
     assert result.merged_paper_count == 1
     assert result.duplicate_count == 5
+    assert result.agent_trace["planner"]["queries"]

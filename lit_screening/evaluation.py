@@ -104,6 +104,11 @@ def compute_evaluation(
     duplicate_count = max(0, original_paper_count - merged_count)
     missing_abstract_count = sum(1 for paper in merged_papers if not paper.abstract)
     unsupported_count = sum(1 for result in verification_results if not result.supported)
+    support_level_counts: dict[str, int] = {}
+    for result in verification_results:
+        support_level_counts[result.support_level] = (
+            support_level_counts.get(result.support_level, 0) + 1
+        )
     gold_labels = load_gold_labels(gold_labels_path)
     final_ranking = ranked_after_feedback or ranked_before_feedback
 
@@ -116,6 +121,11 @@ def compute_evaluation(
         "unsupported_claim_rate": unsupported_count / len(verification_results)
         if verification_results
         else 0.0,
+        "support_level_counts": support_level_counts,
+        "strict_supported_count": support_level_counts.get("strict_support", 0),
+        "weak_support_count": support_level_counts.get("weak_support", 0),
+        "unverified_count": support_level_counts.get("unverified", 0),
+        "llm_invalid_evidence_count": support_level_counts.get("llm_invalid_evidence", 0),
         "precision_at_10": precision_at_k(final_ranking, gold_labels, 10),
         "ranking_changes": ranking_changes(ranked_before_feedback, ranked_after_feedback),
         "evidence_record_count": len(evidence_records),

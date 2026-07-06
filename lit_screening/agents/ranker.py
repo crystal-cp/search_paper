@@ -18,6 +18,7 @@ class RankerAgent:
         evidence_records: list[EvidenceRecord],
         verification_results: list[VerificationResult],
         question: str,
+        scoring_weights: dict[str, float] | None = None,
     ) -> list[RankedPaper]:
         """Return papers sorted by final score."""
 
@@ -28,7 +29,14 @@ class RankerAgent:
         for paper in papers:
             evidence = evidence_by_id[paper.paper_id]
             verification = verification_by_id[paper.paper_id]
-            scores = score_paper(paper, evidence, verification, question, diversity_score=0.5)
+            scores = score_paper(
+                paper,
+                evidence,
+                verification,
+                question,
+                diversity_score=0.5,
+                weights=scoring_weights,
+            )
             preliminary.append(RankedPaper(0, paper, evidence, verification, scores))
 
         preliminary.sort(key=lambda item: item.scores.final_score, reverse=True)
@@ -46,6 +54,7 @@ class RankerAgent:
                 item.verification,
                 question,
                 diversity_score=diversity,
+                weights=scoring_weights,
             )
             reranked.append(replace(item, scores=scores))
 
