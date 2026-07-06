@@ -165,3 +165,26 @@ def test_pipeline_uses_user_confirmed_query_override(tmp_path):
     assert client.seen_queries == ["surface magnetization antiferromagnetic boundary"]
     assert result.planned_queries == ["surface magnetization antiferromagnetic boundary"]
     assert result.agent_trace["planner"]["metadata"]["query_source"] == "user_confirmed"
+
+
+def test_pipeline_emits_progress_events(tmp_path):
+    events = []
+    retriever = RetrieverAgent(clients={"fake": SurfaceMagnetizationFakeClient()})
+
+    run_pipeline(
+        question="表面磁化的重要性",
+        providers=["fake"],
+        max_per_query=1,
+        from_year=2020,
+        output_dir=str(tmp_path / "outputs"),
+        retriever_agent=retriever,
+        progress_callback=lambda stage, message, details: events.append(
+            (stage, message, details)
+        ),
+    )
+
+    stages = [event[0] for event in events]
+    assert "retrieval" in stages
+    assert "verification" in stages
+    assert stages[-1] == "complete"
+    assert any(event[2].get("provider") == "fake" for event in events)

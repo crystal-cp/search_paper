@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .agents.extractor import ExtractorAgent
 from .agents.human_feedback import HumanFeedbackAgent
@@ -559,6 +559,7 @@ def run_pipeline(
     planner_metadata_override: dict[str, Any] | None = None,
     llm_client: GenericLLMClient | None = None,
     retriever_agent: RetrieverAgent | None = None,
+    progress_callback: Callable[[str, str, dict[str, Any]], None] | None = None,
 ) -> PipelineResult:
     """Run the full MVP pipeline and write output artifacts."""
 
@@ -577,6 +578,16 @@ def run_pipeline(
     active_llm_client = build_llm_client(config, llm_backend, llm_client)
     active_scoring_weights = sanitize_score_weights(scoring_weights)
 
+    if progress_callback:
+        progress_callback(
+            "planning",
+            "Preparing query plan",
+            {
+                "planner_mode": planner_mode,
+                "llm_backend": llm_backend,
+                "query_override": planned_queries_override is not None,
+            },
+        )
     if planned_queries_override is None:
         query_plan = _make_query_plan(question, planner_mode, active_llm_client)
     else:
@@ -596,25 +607,118 @@ def run_pipeline(
     planner_metadata = query_plan["planner_metadata"]
     planning_question = str(query_plan.get("planning_question") or question)
     write_json(out / "planned_queries.json", query_plan)
+    if progress_callback:
+        progress_callback(
+            "planning",
+            "Query plan ready",
+            {
+                "query_count": len(queries),
+                "planning_question": planning_question,
+                "translation_mode": planner_metadata.get("translation_mode", "none"),
+            },
+        )
 
     retriever = retriever_agent or RetrieverAgent(config=config)
+    if progress_callback:
+        progress_callback(
+            "retrieval",
+            "Starting literature metadata retrieval",
+            {
+                "providers": providers,
+                "query_count": len(queries),
+                "max_per_query": max_per_query,
+                "from_year": from_year,
+                "use_cache": use_cache,
+            },
+        )
     raw_papers, _raw_by_provider, retrieval_counts = retriever.retrieve(
         queries=queries,
         providers=providers,
         max_per_query=max_per_query,
         from_year=from_year,
         output_dir=out,
+        progress_callback=progress_callback,
     )
+    if progress_callback:
+        progress_callback(
+            "retrieval",
+            "Retrieval finished",
+            {
+                "raw_paper_count": len(raw_papers),
+                "retrieval_counts_by_provider": retrieval_counts,
+            },
+        )
 
+    if progress_callback:
+        progress_callback(
+            "dedup",
+            "Merging duplicate records by DOI and title",
+            {"raw_paper_count": len(raw_papers)},
+        )
     merged_papers, duplicate_count = deduplicate_with_stats(raw_papers)
+    if progress_callback:
+        progress_callback(
+            "dedup",
+            "Deduplication finished",
+            {
+                "merged_paper_count": len(merged_papers),
+                "duplicate_count": duplicate_count,
+            },
+        )
 
     extractor = ExtractorAgent(mode=extractor_mode, llm_client=active_llm_client)
+    if progress_callback:
+        progress_callback(
+            "extraction",
+            "Extracting evidence sentences from abstracts",
+            {
+                "paper_count": len(merged_papers),
+                "extractor_mode": extractor_mode,
+            },
+        )
     evidence_records = extractor.extract_many(merged_papers, planning_question)
+    if progress_callback:
+        missing_abstract_count = sum(1 for paper in merged_papers if not paper.abstract)
+        progress_callback(
+            "extraction",
+            "Evidence extraction finished",
+            {
+                "evidence_record_count": len(evidence_records),
+                "missing_abstract_count": missing_abstract_count,
+            },
+        )
 
     verifier = VerifierAgent(mode=verifier_mode, llm_client=active_llm_client)
+    if progress_callback:
+        progress_callback(
+            "verification",
+            "Validating evidence spans against abstracts",
+            {
+                "evidence_record_count": len(evidence_records),
+                "verifier_mode": verifier_mode,
+            },
+        )
     verification_results = verifier.verify_many(merged_papers, evidence_records)
+    if progress_callback:
+        support_counts: dict[str, int] = {}
+        for result in verification_results:
+            support_counts[result.support_level] = support_counts.get(result.support_level, 0) + 1
+        progress_callback(
+            "verification",
+            "Evidence grounding verification finished",
+            {
+                "verification_count": len(verification_results),
+                "support_level_counts": support_counts,
+            },
+        )
 
     ranker = RankerAgent()
+    if progress_callback:
+        progress_callback(
+            "ranking",
+            "Ranking papers with configured scoring weights",
+            {"scoring_weights": active_scoring_weights},
+        )
     ranked_before_feedback = ranker.rank(
         merged_papers,
         evidence_records,
@@ -622,12 +726,24 @@ def run_pipeline(
         planning_question,
         scoring_weights=active_scoring_weights,
     )
+    if progress_callback:
+        progress_callback(
+            "ranking",
+            "Initial ranking finished",
+            {"ranked_paper_count": len(ranked_before_feedback)},
+        )
 
     feedback_agent = HumanFeedbackAgent()
     ranked_after_feedback: list[RankedPaper] | None = None
     ranked_final = ranked_before_feedback
     feedback_applied = False
     if feedback_path:
+        if progress_callback:
+            progress_callback(
+                "feedback",
+                "Applying human feedback and reranking",
+                {"feedback_path": feedback_path},
+            )
         feedback_records = feedback_agent.read_feedback(feedback_path)
         ranked_after_feedback = feedback_agent.apply(
             ranked_before_feedback,
@@ -636,7 +752,19 @@ def run_pipeline(
         )
         ranked_final = ranked_after_feedback
         feedback_applied = bool(feedback_records)
+        if progress_callback:
+            progress_callback(
+                "feedback",
+                "Feedback reranking finished",
+                {"feedback_record_count": len(feedback_records)},
+            )
 
+    if progress_callback:
+        progress_callback(
+            "evaluation",
+            "Computing evaluation metrics",
+            {"gold_labels_path": gold_labels_path or ""},
+        )
     metrics = compute_evaluation(
         retrieval_counts=retrieval_counts,
         original_paper_count=len(raw_papers),
@@ -660,6 +788,12 @@ def run_pipeline(
         verification_results=verification_results,
     )
     save_evaluation(out / "evaluation.json", metrics)
+    if progress_callback:
+        progress_callback(
+            "artifacts",
+            "Writing trace, CSV files, and Markdown report",
+            {"output_dir": str(out)},
+        )
     trace = build_agent_trace(
         question=question,
         planning_question=planning_question,
@@ -696,6 +830,16 @@ def run_pipeline(
         evaluation_metrics=metrics,
         feedback_applied=feedback_applied,
     )
+    if progress_callback:
+        progress_callback(
+            "complete",
+            "Literature screening complete",
+            {
+                "output_dir": str(out),
+                "ranked_papers_path": str(out / "ranked_papers.csv"),
+                "report_path": str(out / "report.md"),
+            },
+        )
 
     return PipelineResult(
         output_dir=str(out),

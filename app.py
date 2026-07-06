@@ -60,12 +60,65 @@ WEIGHT_HELP = {
         "zh": "避免结果过度集中在同一 venue 的权重。",
     },
 }
+PIPELINE_STAGE_PROGRESS = {
+    "planning": 5,
+    "retrieval": 25,
+    "dedup": 45,
+    "extraction": 58,
+    "verification": 72,
+    "ranking": 84,
+    "feedback": 88,
+    "evaluation": 92,
+    "artifacts": 96,
+    "complete": 100,
+}
+PIPELINE_STAGE_LABELS = {
+    "planning": "Query planning",
+    "retrieval": "Literature retrieval",
+    "dedup": "Metadata merge",
+    "extraction": "Evidence extraction",
+    "verification": "Evidence grounding",
+    "ranking": "Ranking",
+    "feedback": "Human feedback",
+    "evaluation": "Evaluation",
+    "artifacts": "Output artifacts",
+    "complete": "Complete",
+}
 
 
 def ui_text(language: str, english: str, chinese: str) -> str:
     """Return UI text in the selected interface language."""
 
     return chinese if language == "中文" else english
+
+
+def truncate_text(text: Any, max_length: int = 180) -> str:
+    """Return a compact single-line display string."""
+
+    value = str(text)
+    return value if len(value) <= max_length else f"{value[: max_length - 3]}..."
+
+
+def format_progress_details(details: dict[str, Any]) -> str:
+    """Format callback details without exposing secrets or overwhelming the UI."""
+
+    if not details:
+        return ""
+    parts = []
+    for key, value in details.items():
+        parts.append(f"{key}: {truncate_text(value)}")
+    return " | ".join(parts)
+
+
+def progress_percent(stage: str, message: str) -> int:
+    """Map pipeline events to a stable progress percentage."""
+
+    base = PIPELINE_STAGE_PROGRESS.get(stage, 10)
+    if stage == "retrieval" and "returned" in message.lower():
+        return min(base + 10, 40)
+    if "finished" in message.lower() or "ready" in message.lower():
+        return min(base + 8, 99)
+    return base
 
 
 def slugify(text: str, max_length: int = 48) -> str:
@@ -440,21 +493,60 @@ def run_screening(
     """Run the core pipeline and store the result in session state."""
 
     output_dir = new_project_output_dir(question)
-    with st.spinner("Running literature screening..."):
-        result = run_pipeline(
-            question=question,
-            providers=settings["providers"],
-            max_per_query=settings["max_per_query"],
-            from_year=settings["from_year"],
-            output_dir=str(output_dir),
-            use_cache=settings["use_cache"],
-            llm_backend=settings["llm_backend"],
-            planner_mode=settings["planner_mode"],
-            extractor_mode=settings["extractor_mode"],
-            verifier_mode=settings["verifier_mode"],
-            scoring_weights=settings["scoring_weights"],
-            planned_queries_override=planned_queries,
-            planner_metadata_override=planner_metadata,
+    language = settings["language"]
+    status_label = ui_text(
+        language,
+        "Running literature screening...",
+        "正在运行文献筛选...",
+    )
+    with st.status(status_label, expanded=True) as status:
+        progress_bar = st.progress(0)
+
+        def progress_callback(stage: str, message: str, details: dict[str, Any]) -> None:
+            stage_label = PIPELINE_STAGE_LABELS.get(stage, stage.title())
+            progress_bar.progress(progress_percent(stage, message))
+            st.write(f"**{stage_label}**: {message}")
+            detail_text = format_progress_details(details)
+            if detail_text:
+                st.caption(detail_text)
+
+        try:
+            result = run_pipeline(
+                question=question,
+                providers=settings["providers"],
+                max_per_query=settings["max_per_query"],
+                from_year=settings["from_year"],
+                output_dir=str(output_dir),
+                use_cache=settings["use_cache"],
+                llm_backend=settings["llm_backend"],
+                planner_mode=settings["planner_mode"],
+                extractor_mode=settings["extractor_mode"],
+                verifier_mode=settings["verifier_mode"],
+                scoring_weights=settings["scoring_weights"],
+                planned_queries_override=planned_queries,
+                planner_metadata_override=planner_metadata,
+                progress_callback=progress_callback,
+            )
+        except Exception:
+            status.update(
+                label=ui_text(
+                    language,
+                    "Literature screening failed",
+                    "文献筛选失败",
+                ),
+                state="error",
+                expanded=True,
+            )
+            raise
+        progress_bar.progress(100)
+        status.update(
+            label=ui_text(
+                language,
+                "Literature screening complete",
+                "文献筛选完成",
+            ),
+            state="complete",
+            expanded=False,
         )
     st.session_state.pipeline_result = result
     st.session_state.feedback_records = {}

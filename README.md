@@ -113,6 +113,9 @@ The UI also supports:
   or edit the English queries, then click `Run Search With Current Queries`.
   The preview step does not call literature provider APIs, which helps avoid
   spending requests on a search direction that does not match the user's intent.
+- A collapsible run-status panel shows what the pipeline is doing during
+  screening: retrieval by provider/query, deduplication, evidence extraction,
+  grounding verification, ranking, evaluation, and artifact writing.
 - Runtime API key entry for `OPENALEX_API_KEY`, `S2_API_KEY`, and `DEEPSEEK_API_KEY`.
   Keys are applied to the current Streamlit process and are not written into project files.
 - Adjustable scoring weights for relevance, evidence, recency, quality, and diversity,
