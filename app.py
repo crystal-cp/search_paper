@@ -18,6 +18,7 @@ from lit_screening.agents.human_feedback import HumanFeedbackAgent
 from lit_screening.models import FeedbackRecord, PipelineResult, RankedPaper
 from lit_screening.pipeline import (
     apply_feedback_to_pipeline_result,
+    plan_screening_queries,
     ranked_to_row,
     run_pipeline,
 )
@@ -150,6 +151,10 @@ def ranked_dataframe(ranked_papers: list[RankedPaper]) -> pd.DataFrame:
         "source_provider",
         "support_level",
         "span_match_type",
+        "span_match_confidence",
+        "strict_span_validated",
+        "llm_invalid_evidence",
+        "missing_abstract",
         "confidence",
         "paper_id",
     ]
@@ -384,9 +389,54 @@ def ensure_state() -> None:
     st.session_state.setdefault("feedback_records", {})
     st.session_state.setdefault("active_manifest", None)
     st.session_state.setdefault("saved_project", None)
+    st.session_state.setdefault("query_preview", None)
+    st.session_state.setdefault("query_preview_signature", None)
+    st.session_state.setdefault("query_editor_text", "")
 
 
-def run_screening(question: str, settings: dict[str, Any]) -> None:
+def query_preview_signature(question: str, settings: dict[str, Any]) -> dict[str, Any]:
+    """Return the settings that affect query generation."""
+
+    return {
+        "question": question,
+        "llm_backend": settings["llm_backend"],
+        "planner_mode": settings["planner_mode"],
+    }
+
+
+def generate_query_preview(question: str, settings: dict[str, Any]) -> None:
+    """Generate planned queries without running retrieval."""
+
+    with st.spinner("Planning search queries..."):
+        plan = plan_screening_queries(
+            question=question,
+            llm_backend=settings["llm_backend"],
+            planner_mode=settings["planner_mode"],
+        )
+    st.session_state.query_preview = plan
+    st.session_state.query_preview_signature = query_preview_signature(question, settings)
+    st.session_state.query_editor_text = "\n".join(plan["queries"])
+    st.session_state.pipeline_result = None
+    st.session_state.saved_project = None
+
+
+def parse_query_editor_text(text: str) -> list[str]:
+    """Parse one-query-per-line text into a unique query list."""
+
+    queries: list[str] = []
+    for line in text.splitlines():
+        cleaned = " ".join(line.split())
+        if cleaned and cleaned not in queries:
+            queries.append(cleaned)
+    return queries
+
+
+def run_screening(
+    question: str,
+    settings: dict[str, Any],
+    planned_queries: list[str] | None = None,
+    planner_metadata: dict[str, Any] | None = None,
+) -> None:
     """Run the core pipeline and store the result in session state."""
 
     output_dir = new_project_output_dir(question)
@@ -403,6 +453,8 @@ def run_screening(question: str, settings: dict[str, Any]) -> None:
             extractor_mode=settings["extractor_mode"],
             verifier_mode=settings["verifier_mode"],
             scoring_weights=settings["scoring_weights"],
+            planned_queries_override=planned_queries,
+            planner_metadata_override=planner_metadata,
         )
     st.session_state.pipeline_result = result
     st.session_state.feedback_records = {}
@@ -557,6 +609,111 @@ def render_planned_queries(queries: list[str]) -> None:
     )
 
 
+def render_question_preprocessing(
+    question: str,
+    planner_metadata: dict[str, Any],
+    language: str,
+) -> None:
+    """Show how the research question was prepared for English retrieval."""
+
+    planning_question = planner_metadata.get("planning_question") or question
+    translated_question = planner_metadata.get("translated_question") or ""
+    translation_mode = planner_metadata.get("translation_mode") or "none"
+    question_language = planner_metadata.get("question_language") or "en_or_other"
+    warning = planner_metadata.get("translation_warning") or ""
+
+    rows = [
+        {
+            "field": "original_question",
+            "value": question,
+        },
+        {
+            "field": "planning_question",
+            "value": planning_question,
+        },
+        {
+            "field": "question_language",
+            "value": question_language,
+        },
+        {
+            "field": "translation_mode",
+            "value": translation_mode,
+        },
+    ]
+    if translated_question:
+        rows.insert(
+            2,
+            {
+                "field": "translated_question",
+                "value": translated_question,
+            },
+        )
+    st.caption(
+        ui_text(
+            language,
+            "The pipeline uses the English planning question for retrieval, evidence extraction, and ranking.",
+            "系统会用英文 planning question 进行检索、evidence 抽取和排序。",
+        )
+    )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    if warning:
+        st.info(
+            ui_text(
+                language,
+                f"Translation note: {warning}",
+                f"翻译提示：{warning}",
+            )
+        )
+
+
+def render_query_preview_editor(
+    question: str,
+    settings: dict[str, Any],
+    language: str,
+) -> None:
+    """Render the human checkpoint between planning and retrieval."""
+
+    preview = st.session_state.query_preview
+    if not preview:
+        return
+
+    current_signature = query_preview_signature(question, settings)
+    preview_signature = st.session_state.query_preview_signature
+    if preview_signature != current_signature:
+        st.warning(
+            ui_text(
+                language,
+                "The query preview was generated for an older question or planner setting. Refresh queries before running search.",
+                "当前 query preview 来自旧问题或旧 planner 设置。正式检索前请先重新生成 queries。",
+            )
+        )
+
+    st.subheader("Planned Queries")
+    render_question_preprocessing(
+        preview.get("question", question),
+        preview.get("planner_metadata", {}),
+        language,
+    )
+    st.text_area(
+        ui_text(language, "Edit queries before retrieval", "检索前编辑 queries"),
+        key="query_editor_text",
+        height=170,
+        help=ui_text(
+            language,
+            "One query per line. Retrieval will use exactly this edited list.",
+            "每行一个 query。正式检索会直接使用这里编辑后的列表。",
+        ),
+    )
+    query_count = len(parse_query_editor_text(st.session_state.query_editor_text))
+    st.caption(
+        ui_text(
+            language,
+            f"{query_count} queries ready. No provider API calls have been made at this preview step.",
+            f"当前有 {query_count} 条 queries。预览阶段还没有请求文献 API。",
+        )
+    )
+
+
 def render_downloads(ranked_path: str, report_path: str, language: str) -> None:
     """Render artifact download buttons."""
 
@@ -599,6 +756,8 @@ def render_result(result: PipelineResult, language: str) -> None:
 
     tabs = st.tabs(["Queries", "Ranked Papers", "Evidence", "Feedback", "Trace", "Metrics"])
     with tabs[0]:
+        planner_metadata = result.agent_trace.get("planner", {}).get("metadata", {})
+        render_question_preprocessing(result.question, planner_metadata, language)
         render_planned_queries(result.planned_queries)
 
     with tabs[1]:
@@ -636,6 +795,9 @@ def render_result(result: PipelineResult, language: str) -> None:
                         "support_level": selected.verification.support_level,
                         "span_match_type": selected.verification.span_match_type,
                         "span_match_confidence": selected.verification.span_match_confidence,
+                        "strict_span_validated": selected.verification.support_level == "strict_support",
+                        "llm_invalid_evidence": selected.verification.support_level == "llm_invalid_evidence",
+                        "missing_abstract": selected.verification.support_level == "missing_abstract",
                         "matched_text": selected.verification.matched_text,
                         "rationale": selected.verification.rationale,
                     }
@@ -670,6 +832,8 @@ def render_saved_project(manifest: dict[str, Any], language: str) -> None:
 
     tabs = st.tabs(["Queries", "Ranked Papers", "Trace", "Metrics", "Downloads"])
     with tabs[0]:
+        metadata = planned.get("planner_metadata") or planned.get("llm", {})
+        render_question_preprocessing(planned.get("question", ""), metadata, language)
         render_planned_queries(planned.get("queries", []))
     with tabs[1]:
         if ranked_path.exists():
@@ -712,14 +876,41 @@ def main() -> None:
         height=110,
     )
 
-    if st.button(ui_text(language, "Run Screening", "开始筛选"), type="primary"):
-        if not question.strip():
-            st.error(ui_text(language, "Please enter a research question.", "请先输入研究问题。"))
-        else:
+    cleaned_question = question.strip()
+    action_cols = st.columns(2)
+    with action_cols[0]:
+        if st.button(ui_text(language, "Generate / Preview Queries", "生成 / 预览 Queries"), type="primary"):
+            if not cleaned_question:
+                st.error(ui_text(language, "Please enter a research question.", "请先输入研究问题。"))
+            else:
+                try:
+                    generate_query_preview(cleaned_question, settings)
+                except Exception as exc:
+                    st.error(ui_text(language, f"Query planning failed: {exc}", f"Query 规划失败：{exc}"))
+
+    preview_ready = bool(st.session_state.query_preview)
+    preview_is_current = (
+        st.session_state.query_preview_signature
+        == query_preview_signature(cleaned_question, settings)
+    )
+    edited_queries = parse_query_editor_text(st.session_state.query_editor_text)
+    with action_cols[1]:
+        if st.button(
+            ui_text(language, "Run Search With Current Queries", "用当前 Queries 开始检索"),
+            disabled=not preview_ready or not preview_is_current or not edited_queries,
+        ):
             try:
-                run_screening(question.strip(), settings)
+                preview = st.session_state.query_preview or {}
+                run_screening(
+                    cleaned_question,
+                    settings,
+                    planned_queries=edited_queries,
+                    planner_metadata=preview.get("planner_metadata", {}),
+                )
             except Exception as exc:
                 st.error(ui_text(language, f"Screening failed: {exc}", f"筛选失败：{exc}"))
+
+    render_query_preview_editor(cleaned_question, settings, language)
 
     result = st.session_state.pipeline_result
     saved_project = st.session_state.saved_project

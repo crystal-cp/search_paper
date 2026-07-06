@@ -35,6 +35,9 @@ def generate_report(
 
     destination = Path(path)
     ensure_dir(destination.parent)
+    planner_metadata = retrieval_statistics.get("llm", {}).get("planner", {})
+    planning_question = planner_metadata.get("planning_question", research_question)
+    translated_question = planner_metadata.get("translated_question", "")
 
     lines: list[str] = [
         "# Literature Screening Report",
@@ -43,9 +46,29 @@ def generate_report(
         "",
         research_question,
         "",
-        "## Planned Queries",
-        "",
     ]
+    if planning_question and planning_question != research_question:
+        lines.extend(
+            [
+                "## Question Preprocessing",
+                "",
+                f"Planning question: {planning_question}",
+                "",
+            ]
+        )
+    if translated_question:
+        lines.extend(
+            [
+                f"Translated question: {translated_question}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Planned Queries",
+            "",
+        ]
+    )
     lines.extend([f"- {query}" for query in planned_queries])
     lines.extend(
         [
@@ -72,6 +95,10 @@ def generate_report(
             f"- Weak support count: {retrieval_statistics.get('weak_support_count', 0)}",
             f"- Unverified count: {retrieval_statistics.get('unverified_count', 0)}",
             f"- LLM invalid evidence count: {retrieval_statistics.get('llm_invalid_evidence_count', 0)}",
+            f"- Grounding accuracy: {retrieval_statistics.get('grounding_accuracy', 0):.3f}",
+            f"- Strict support rate: {retrieval_statistics.get('strict_support_rate', 0):.3f}",
+            f"- Weak support rate: {retrieval_statistics.get('weak_support_rate', 0):.3f}",
+            f"- LLM invalid evidence rate: {retrieval_statistics.get('llm_invalid_evidence_rate', 0):.3f}",
             "",
             "## Scoring Formula",
             "",
@@ -108,8 +135,8 @@ def generate_report(
             "",
             "## Evidence Chain Table",
             "",
-            "| Rank | Support level | Span match | Confidence | Claim | Evidence |",
-            "| ---: | --- | --- | ---: | --- | --- |",
+            "| Rank | Support level | Span match | Span confidence | LLM invalid | Missing abstract | Claim | Evidence | Matched text |",
+            "| ---: | --- | --- | ---: | --- | --- | --- | --- | --- |",
         ]
     )
     evidence_by_id = {record.paper_id: record for record in evidence_records}
@@ -120,9 +147,12 @@ def generate_report(
             f"{item.rank} | "
             f"{item.verification.support_level} | "
             f"{item.verification.span_match_type} | "
-            f"{item.verification.confidence:.2f} | "
+            f"{item.verification.span_match_confidence:.2f} | "
+            f"{item.verification.support_level == 'llm_invalid_evidence'} | "
+            f"{item.verification.support_level == 'missing_abstract'} | "
             f"{_escape_table(evidence.claim)} | "
-            f"{_escape_table(evidence.evidence_sentence)} |"
+            f"{_escape_table(evidence.evidence_sentence)} | "
+            f"{_escape_table(item.verification.matched_text)} |"
         )
 
     lines.extend(["", "## Human Feedback Effects", ""])
@@ -141,6 +171,10 @@ def generate_report(
             f"- Missing abstract ratio: {evaluation_metrics.get('missing_abstract_ratio', 0):.3f}",
             f"- Unsupported claim rate: {evaluation_metrics.get('unsupported_claim_rate', 0):.3f}",
             f"- Precision@10: {evaluation_metrics.get('precision_at_10')}",
+            f"- nDCG@10: {evaluation_metrics.get('ndcg_at_10')}",
+            f"- MAP: {evaluation_metrics.get('map')}",
+            f"- Recall@10: {evaluation_metrics.get('recall_at_10')}",
+            f"- Feedback mean absolute rank delta: {evaluation_metrics.get('feedback_before_after_ranking_delta', {}).get('mean_abs_rank_delta', 0)}",
             "",
             "## Limitations",
             "",

@@ -20,6 +20,7 @@ def test_planner_uses_mocked_llm_queries():
     client = FakeLLMClient(
         LLMJSONResult(
             data={
+                "translated_question": "How can human feedback improve LLM literature screening?",
                 "queries": [
                     "human feedback LLM agents literature screening",
                     "claim extraction evidence verification systematic review",
@@ -36,6 +37,34 @@ def test_planner_uses_mocked_llm_queries():
 
     assert queries[0] == "How can human feedback improve LLM literature screening?"
     assert "human feedback LLM agents literature screening" in queries
+
+
+def test_planner_uses_mocked_llm_translation_for_chinese_question():
+    client = FakeLLMClient(
+        LLMJSONResult(
+            data={
+                "translated_question": "the significance of surface magnetization",
+                "queries": [
+                    "surface magnetization significance review",
+                    "surface magnetization mechanism",
+                    "surface magnetization experimental study",
+                    "surface magnetization theoretical study",
+                ],
+            }
+        )
+    )
+
+    planner = PlannerAgent(mode="llm", llm_client=client)
+    queries = planner.plan("表面磁化的重要性")
+
+    assert queries[0] == "the significance of surface magnetization"
+    assert "surface magnetization mechanism" in queries
+    assert planner.last_llm_metadata["question_language"] == "zh"
+    assert planner.last_llm_metadata["translation_mode"] == "llm"
+    assert planner.last_llm_metadata["translated_question"] == (
+        "the significance of surface magnetization"
+    )
+    assert "表面" not in " ".join(queries)
 
 
 def test_extractor_uses_mocked_llm_evidence():

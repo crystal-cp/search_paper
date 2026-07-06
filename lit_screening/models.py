@@ -118,3 +118,5 @@ class PipelineResult:
     evaluation_metrics: dict[str, Any] = field(default_factory=dict)
     agent_trace: dict[str, Any] = field(default_factory=dict)
     scoring_weights: dict[str, float] = field(default_factory=dict)
+    planning_question: str = ""
+    translated_question: str = ""

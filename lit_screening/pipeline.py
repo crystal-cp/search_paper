@@ -57,6 +57,9 @@ EVIDENCE_FIELDS = [
     "span_match_type",
     "span_match_confidence",
     "matched_text",
+    "strict_span_validated",
+    "llm_invalid_evidence",
+    "missing_abstract",
     "rationale",
     "extraction_mode",
     "evidence_llm_used",
@@ -91,6 +94,10 @@ RANKED_FIELDS = [
     "support_level",
     "span_match_type",
     "span_match_confidence",
+    "matched_text",
+    "strict_span_validated",
+    "llm_invalid_evidence",
+    "missing_abstract",
     "claim",
     "evidence_sentence",
     "feedback_label",
@@ -143,6 +150,9 @@ def evidence_to_row(
         "span_match_type": verification.span_match_type,
         "span_match_confidence": f"{verification.span_match_confidence:.4f}",
         "matched_text": verification.matched_text,
+        "strict_span_validated": verification.support_level == "strict_support",
+        "llm_invalid_evidence": verification.support_level == "llm_invalid_evidence",
+        "missing_abstract": verification.support_level == "missing_abstract",
         "rationale": verification.rationale,
         "extraction_mode": evidence.extraction_mode,
         "evidence_llm_used": evidence.llm_used,
@@ -182,6 +192,10 @@ def ranked_to_row(item: RankedPaper) -> dict[str, Any]:
         "support_level": item.verification.support_level,
         "span_match_type": item.verification.span_match_type,
         "span_match_confidence": f"{item.verification.span_match_confidence:.4f}",
+        "matched_text": item.verification.matched_text,
+        "strict_span_validated": item.verification.support_level == "strict_support",
+        "llm_invalid_evidence": item.verification.support_level == "llm_invalid_evidence",
+        "missing_abstract": not bool(item.paper.abstract),
         "claim": item.evidence.claim,
         "evidence_sentence": item.evidence.evidence_sentence,
         "feedback_label": feedback.label if feedback else "",
@@ -298,6 +312,7 @@ def _llm_metrics(
 
 def build_agent_trace(
     question: str,
+    planning_question: str,
     queries: list[str],
     planner_metadata: dict[str, Any],
     retrieval_counts: dict[str, int],
@@ -314,6 +329,7 @@ def build_agent_trace(
     verification_by_id = {result.paper_id: result for result in verification_results}
     return {
         "question": question,
+        "planning_question": planning_question,
         "planner": {
             "queries": queries,
             "metadata": planner_metadata,
@@ -349,6 +365,9 @@ def build_agent_trace(
                 "support_level": result.support_level,
                 "span_match_type": result.span_match_type,
                 "span_match_confidence": result.span_match_confidence,
+                "strict_span_validated": result.support_level == "strict_support",
+                "llm_invalid_evidence": result.support_level == "llm_invalid_evidence",
+                "missing_abstract": result.support_level == "missing_abstract",
                 "error_type": result.error_type,
                 "rationale": result.rationale,
                 "matched_text": result.matched_text,
@@ -364,6 +383,12 @@ def build_agent_trace(
                 "support_level": verification_by_id[item.paper.paper_id].support_level
                 if item.paper.paper_id in verification_by_id
                 else "",
+                "strict_span_validated": verification_by_id[
+                    item.paper.paper_id
+                ].support_level
+                == "strict_support"
+                if item.paper.paper_id in verification_by_id
+                else False,
             }
             for item in ranked_papers[:50]
         ],
@@ -441,6 +466,81 @@ def apply_feedback_to_pipeline_result(
     )
 
 
+def _query_plan_payload(
+    question: str,
+    queries: list[str],
+    planner_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the serializable query-plan payload used by CLI and UI."""
+
+    planning_question = str(planner_metadata.get("planning_question") or question)
+    return {
+        "question": question,
+        "planning_question": planning_question,
+        "translated_question": planner_metadata.get("translated_question", ""),
+        "queries": queries,
+        "planner_metadata": planner_metadata,
+        "llm": planner_metadata,
+    }
+
+
+def _manual_planner_metadata(
+    question: str,
+    planner_mode: str,
+    planner_metadata_override: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return planner metadata for user-confirmed or user-edited queries."""
+
+    if planner_metadata_override:
+        metadata = dict(planner_metadata_override)
+    else:
+        cleaned_question = " ".join(question.split())
+        metadata = {
+            "planner_mode": planner_mode,
+            "llm_used": False,
+            "invalid_llm_output": False,
+            "llm_error_type": "",
+            "original_question": cleaned_question,
+            "question_language": "en_or_other",
+            "translation_used": False,
+            "translation_mode": "none",
+            "translated_question": "",
+            "planning_question": cleaned_question,
+            "translation_warning": "",
+        }
+    metadata["query_source"] = "user_confirmed"
+    return metadata
+
+
+def _make_query_plan(
+    question: str,
+    planner_mode: str,
+    active_llm_client: GenericLLMClient | None,
+) -> dict[str, Any]:
+    """Run the planner and return a structured query plan."""
+
+    planner = PlannerAgent(mode=planner_mode, llm_client=active_llm_client)
+    queries = planner.plan(question)
+    return _query_plan_payload(question, queries, planner.last_llm_metadata)
+
+
+def plan_screening_queries(
+    question: str,
+    llm_backend: str = "none",
+    planner_mode: str = "rule",
+    llm_client: GenericLLMClient | None = None,
+) -> dict[str, Any]:
+    """Plan English scholarly queries without running retrieval.
+
+    This supports a human checkpoint in the UI: users can inspect and edit the
+    generated queries before spending provider requests or LLM extraction calls.
+    """
+
+    config = PipelineConfig(llm_backend=llm_backend)
+    active_llm_client = build_llm_client(config, llm_backend, llm_client)
+    return _make_query_plan(question, planner_mode, active_llm_client)
+
+
 def run_pipeline(
     question: str,
     providers: list[str],
@@ -455,6 +555,8 @@ def run_pipeline(
     extractor_mode: str = "rule",
     verifier_mode: str = "rule",
     scoring_weights: dict[str, float] | None = None,
+    planned_queries_override: list[str] | None = None,
+    planner_metadata_override: dict[str, Any] | None = None,
     llm_client: GenericLLMClient | None = None,
     retriever_agent: RetrieverAgent | None = None,
 ) -> PipelineResult:
@@ -475,16 +577,25 @@ def run_pipeline(
     active_llm_client = build_llm_client(config, llm_backend, llm_client)
     active_scoring_weights = sanitize_score_weights(scoring_weights)
 
-    planner = PlannerAgent(mode=planner_mode, llm_client=active_llm_client)
-    queries = planner.plan(question)
-    write_json(
-        out / "planned_queries.json",
-        {
-            "question": question,
-            "queries": queries,
-            "llm": planner.last_llm_metadata,
-        },
-    )
+    if planned_queries_override is None:
+        query_plan = _make_query_plan(question, planner_mode, active_llm_client)
+    else:
+        cleaned_queries = [
+            " ".join(query.split())
+            for query in planned_queries_override
+            if isinstance(query, str) and " ".join(query.split())
+        ]
+        planner_metadata = _manual_planner_metadata(
+            question,
+            planner_mode,
+            planner_metadata_override,
+        )
+        query_plan = _query_plan_payload(question, cleaned_queries, planner_metadata)
+
+    queries = query_plan["queries"]
+    planner_metadata = query_plan["planner_metadata"]
+    planning_question = str(query_plan.get("planning_question") or question)
+    write_json(out / "planned_queries.json", query_plan)
 
     retriever = retriever_agent or RetrieverAgent(config=config)
     raw_papers, _raw_by_provider, retrieval_counts = retriever.retrieve(
@@ -498,7 +609,7 @@ def run_pipeline(
     merged_papers, duplicate_count = deduplicate_with_stats(raw_papers)
 
     extractor = ExtractorAgent(mode=extractor_mode, llm_client=active_llm_client)
-    evidence_records = extractor.extract_many(merged_papers, question)
+    evidence_records = extractor.extract_many(merged_papers, planning_question)
 
     verifier = VerifierAgent(mode=verifier_mode, llm_client=active_llm_client)
     verification_results = verifier.verify_many(merged_papers, evidence_records)
@@ -508,7 +619,7 @@ def run_pipeline(
         merged_papers,
         evidence_records,
         verification_results,
-        question,
+        planning_question,
         scoring_weights=active_scoring_weights,
     )
 
@@ -544,15 +655,16 @@ def run_pipeline(
         planner_mode=planner_mode,
         extractor_mode=extractor_mode,
         verifier_mode=verifier_mode,
-        planner_metadata=planner.last_llm_metadata,
+        planner_metadata=planner_metadata,
         evidence_records=evidence_records,
         verification_results=verification_results,
     )
     save_evaluation(out / "evaluation.json", metrics)
     trace = build_agent_trace(
         question=question,
+        planning_question=planning_question,
         queries=queries,
-        planner_metadata=planner.last_llm_metadata,
+        planner_metadata=planner_metadata,
         retrieval_counts=retrieval_counts,
         raw_paper_count=len(raw_papers),
         merged_papers=merged_papers,
@@ -595,6 +707,8 @@ def run_pipeline(
         evaluation_path=str(out / "evaluation.json"),
         ranked_papers_path=str(out / "ranked_papers.csv"),
         question=question,
+        planning_question=planning_question,
+        translated_question=str(planner_metadata.get("translated_question") or ""),
         raw_paper_count=len(raw_papers),
         merged_papers=merged_papers,
         evidence_records=evidence_records,
@@ -651,6 +765,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="rule",
         help="Use rule-based or LLM-enhanced evidence verification.",
     )
+    run.add_argument("--weight-relevance", type=float, default=0.40)
+    run.add_argument("--weight-evidence", type=float, default=0.25)
+    run.add_argument("--weight-recency", type=float, default=0.15)
+    run.add_argument("--weight-quality", type=float, default=0.15)
+    run.add_argument("--weight-diversity", type=float, default=0.05)
     run.add_argument(
         "--disable-cache",
         action="store_true",
@@ -679,6 +798,13 @@ def main(argv: list[str] | None = None) -> int:
             planner_mode=args.planner_mode,
             extractor_mode=args.extractor_mode,
             verifier_mode=args.verifier_mode,
+            scoring_weights={
+                "relevance": args.weight_relevance,
+                "evidence": args.weight_evidence,
+                "recency": args.weight_recency,
+                "quality": args.weight_quality,
+                "diversity": args.weight_diversity,
+            },
         )
         print(f"Report: {result.report_path}")
         print(f"Ranking: {result.ranked_papers_path}")

@@ -44,6 +44,19 @@ def test_planner_does_not_inject_unrelated_llm_terms():
     assert "multi-agent" not in joined
 
 
+def test_planner_translates_common_chinese_terms_without_llm():
+    planner = PlannerAgent()
+    queries = planner.plan("表面磁化的重要性")
+    joined = " ".join(queries).lower()
+
+    assert "surface magnetization" in joined
+    assert "importance" in joined
+    assert "表面" not in joined
+    assert planner.last_llm_metadata["question_language"] == "zh"
+    assert planner.last_llm_metadata["translation_mode"] == "rule_glossary"
+    assert planner.last_llm_metadata["planning_question"] == "surface magnetization importance"
+
+
 def test_verifier_requires_strict_span_for_supported():
     paper = Paper(
         paper_id="p1",
