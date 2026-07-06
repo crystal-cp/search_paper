@@ -1,0 +1,4 @@
+paper_id,label,adjustment,note
+example-paper-1,include,0.15,Highly relevant example row.
+example-paper-2,exclude,-0.20,Out of scope example row.
+example-paper-3,uncertain,0.00,Needs closer review.
