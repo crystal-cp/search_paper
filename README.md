@@ -127,6 +127,9 @@ The UI also supports:
   queries, then click `Step 4: Run Retrieval`.
   The preview step does not call literature provider APIs, which helps avoid
   spending requests on a search direction that does not match the user's intent.
+  Step 3 is a collapsible checkpoint with a field guide, research-intent editor,
+  and provider-query editor. After Step 4 completes, the Step 3 panel collapses
+  by default but remains available for auditing the exact query plan used.
 - Project-style tabs for `Research Intent`, `Search Strategy`, `Results Map`,
   `Paper Cards`, `Feedback`, `Report & Export`, `Trace`, and `Metrics`.
 - Aspect coverage tables, grouped result lists, a PRISMA-like screening flow,

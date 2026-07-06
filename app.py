@@ -82,6 +82,134 @@ SEARCH_INTENTS = [
     "proposal",
     "systematic_review",
 ]
+STEP3_FIELD_GUIDE = [
+    {
+        "field": "Refined English question",
+        "en": "The English planning question used for retrieval, evidence extraction, and ranking.",
+        "zh": "用于检索、evidence 抽取和排序的英文规划问题。",
+        "edit": {
+            "en": "Edit when the translation or topic focus is wrong.",
+            "zh": "当翻译不准或主题焦点偏了时修改。",
+        },
+    },
+    {
+        "field": "Search intent",
+        "en": "Tells the system whether this is an overview, frontier scan, implementation search, systematic review, and so on.",
+        "zh": "告诉系统这是背景综述、前沿扫描、实现方法、系统综述等哪类检索。",
+        "edit": {
+            "en": "Change it when the paper type or ranking emphasis should change.",
+            "zh": "当你希望论文类型或排序侧重点改变时修改。",
+        },
+    },
+    {
+        "field": "Time window",
+        "en": "A human-readable time preference for the search brief. The hard year filter is controlled in the sidebar.",
+        "zh": "检索意图中的时间偏好说明。真正硬性的年份过滤在侧边栏控制。",
+        "edit": {
+            "en": "Use it to describe recent-only, historical, or no-strict-window searches.",
+            "zh": "用于说明只看近期、看历史脉络，或不严格限制时间。",
+        },
+    },
+    {
+        "field": "User goal",
+        "en": "Plain-language goal that guides ranking and the final report.",
+        "zh": "用户目标说明，会影响排序解释和最终 report。",
+        "edit": {
+            "en": "Edit when the search purpose is not captured.",
+            "zh": "当系统没有理解你的检索目的时修改。",
+        },
+    },
+    {
+        "field": "inclusion_criteria",
+        "en": "Topics or properties papers should include. These guide query terms and aspect coverage.",
+        "zh": "希望论文包含的主题或性质，会影响 query 和 aspect coverage。",
+        "edit": {
+            "en": "Add one item per line for concepts that must stay in scope.",
+            "zh": "每行写一个必须保留在范围内的概念。",
+        },
+    },
+    {
+        "field": "exclusion_criteria",
+        "en": "Topics to avoid. These can become excluded terms in provider queries when supported.",
+        "zh": "希望避开的主题，在数据源支持时会转成排除词。",
+        "edit": {
+            "en": "Add noisy meanings or unrelated domains here.",
+            "zh": "把容易干扰的含义或无关领域写在这里。",
+        },
+    },
+    {
+        "field": "required_aspects",
+        "en": "Aspects used by the aspect-coverage agent to check what each paper covers.",
+        "zh": "aspect coverage agent 会用它判断每篇论文覆盖了哪些方面。",
+        "edit": {
+            "en": "Use this for dimensions you want the final result set to cover.",
+            "zh": "用于定义最终结果集应该覆盖的维度。",
+        },
+    },
+    {
+        "field": "preferred_paper_types",
+        "en": "Preferred paper categories such as review, survey, benchmark, method, or tutorial.",
+        "zh": "偏好的论文类型，例如 review、survey、benchmark、method、tutorial。",
+        "edit": {
+            "en": "Edit when you need background papers, methods, benchmarks, or recent frontier work.",
+            "zh": "当你想偏向背景论文、方法论文、benchmark 或前沿工作时修改。",
+        },
+    },
+    {
+        "field": "core_terms",
+        "en": "Central topic phrases. Multi-word core terms are important for provider query construction.",
+        "zh": "中心主题短语，多词术语会影响 provider query 的构造。",
+        "edit": {
+            "en": "Keep the real scientific object here; remove drift terms.",
+            "zh": "这里保留真正的科学对象，删掉跑偏的词。",
+        },
+    },
+    {
+        "field": "must_terms",
+        "en": "High-priority terms that should appear in focused searches.",
+        "zh": "高优先级术语，用于更聚焦的检索。",
+        "edit": {
+            "en": "Use fewer must terms for broad searches and more for strict searches.",
+            "zh": "宽泛检索少放 must terms，严格检索多放。",
+        },
+    },
+    {
+        "field": "optional_terms",
+        "en": "Useful expansions such as mechanisms, applications, or review-related terms.",
+        "zh": "有用的扩展词，例如机制、应用、review/survey 等。",
+        "edit": {
+            "en": "Edit to broaden or redirect the search without making terms mandatory.",
+            "zh": "用于拓宽或调整方向，但不把它们变成必选词。",
+        },
+    },
+    {
+        "field": "exclude_terms",
+        "en": "Negative terms used to reduce off-topic results.",
+        "zh": "负向词，用来减少跑题结果。",
+        "edit": {
+            "en": "Add ambiguous domains or meanings you do not want.",
+            "zh": "把你不想要的歧义领域或含义加在这里。",
+        },
+    },
+    {
+        "field": "OpenAlex queries",
+        "en": "Provider-specific search strings sent to OpenAlex.",
+        "zh": "实际发送给 OpenAlex 的 provider-specific 检索式。",
+        "edit": {
+            "en": "Edit these when OpenAlex search direction is too narrow, too broad, or off-topic.",
+            "zh": "当 OpenAlex 检索方向过窄、过宽或跑题时修改。",
+        },
+    },
+    {
+        "field": "Semantic Scholar queries",
+        "en": "Provider-specific search strings sent to Semantic Scholar.",
+        "zh": "实际发送给 Semantic Scholar 的 provider-specific 检索式。",
+        "edit": {
+            "en": "Use +required and -excluded terms when you want stronger control.",
+            "zh": "需要更强控制时可以使用 +必选词 和 -排除词。",
+        },
+    },
+]
 PIPELINE_STAGE_PROGRESS = {
     "planning": 5,
     "retrieval": 25,
@@ -238,6 +366,7 @@ def ranked_dataframe(ranked_papers: list[RankedPaper]) -> pd.DataFrame:
         "title",
         "year",
         "venue",
+        "doi",
         "source_provider",
         "support_level",
         "span_match_type",
@@ -1081,6 +1210,43 @@ def render_planned_queries(queries: list[str]) -> None:
     )
 
 
+def step3_field_guide_dataframe(language: str) -> pd.DataFrame:
+    """Build the Step 3 field guide as a localized table."""
+
+    return pd.DataFrame(
+        [
+            {
+                "field": item["field"],
+                "what_it_controls": item["zh" if language == "中文" else "en"],
+                "when_to_edit": item["edit"]["zh" if language == "中文" else "en"],
+            }
+            for item in STEP3_FIELD_GUIDE
+        ]
+    )
+
+
+def render_step3_summary(language: str, openalex_count: int, semantic_count: int) -> None:
+    """Render a compact Step 3 summary before the editable details."""
+
+    st.caption(
+        ui_text(
+            language,
+            (
+                "This checkpoint is where you inspect and edit the search plan "
+                "before spending provider API calls."
+            ),
+            "这里是在真正请求文献 API 之前检查和修改检索计划的检查点。",
+        )
+    )
+    summary_cols = st.columns(3)
+    summary_cols[0].metric("OpenAlex queries", openalex_count)
+    summary_cols[1].metric("Semantic Scholar queries", semantic_count)
+    summary_cols[2].metric(
+        ui_text(language, "Provider calls made", "已请求文献 API"),
+        ui_text(language, "No", "否"),
+    )
+
+
 def render_question_preprocessing(
     question: str,
     planner_metadata: dict[str, Any],
@@ -1160,143 +1326,239 @@ def render_query_preview_editor(
             )
         )
 
-    st.subheader("Step 3: Review Query Plan")
-    render_question_preprocessing(
-        preview.get("question", question),
-        preview.get("planner_metadata", {}),
-        language,
-    )
-    with st.expander(
-        ui_text(language, "Research Intent And Inclusion Logic", "研究意图与纳入逻辑"),
-        expanded=True,
-    ):
-        st.text_area(
-            ui_text(language, "Refined English question", "英文 refined question"),
-            key="refined_question_text",
-            height=90,
-            help=ui_text(
-                language,
-                "This English question is used by retrieval, extraction, and ranking.",
-                "系统会用这个英文问题进行检索、evidence 抽取和排序。",
-            ),
-        )
-        intent_cols = st.columns(3)
-        with intent_cols[0]:
-            st.selectbox(
-                ui_text(language, "Search intent", "搜索意图"),
-                SEARCH_INTENTS,
-                key="search_intent_value",
-                help=ui_text(
-                    language,
-                    "Controls preferred paper types, aspects, and ranking emphasis.",
-                    "影响偏好的论文类型、required aspects 和排序侧重点。",
-                ),
-            )
-        with intent_cols[1]:
-            st.text_input(
-                ui_text(language, "Time window", "时间窗口"),
-                key="time_window_text",
-            )
-        with intent_cols[2]:
-            st.text_input(
-                ui_text(language, "User goal", "用户目标"),
-                key="user_goal_text",
-            )
-        logic_cols = st.columns(4)
-        with logic_cols[0]:
-            st.text_area(
-                "inclusion_criteria",
-                key="inclusion_criteria_text",
-                height=130,
-                help=ui_text(
-                    language,
-                    "One criterion per line. These become required or high-priority query terms.",
-                    "每行一条。系统会把它们作为高优先级检索条件。",
-                ),
-            )
-        with logic_cols[1]:
-            st.text_area(
-                "exclusion_criteria",
-                key="exclusion_criteria_text",
-                height=130,
-                help=ui_text(
-                    language,
-                    "One exclusion per line. These become provider-specific negative terms when possible.",
-                    "每行一条。系统会尽量转换成数据源支持的排除词。",
-                ),
-            )
-        with logic_cols[2]:
-            st.text_area(
-                "required_aspects",
-                key="required_aspects_text",
-                height=130,
-                help=ui_text(
-                    language,
-                    "Aspects that each paper should cover. These are used by aspect coverage and ranking.",
-                    "论文最好覆盖的方面，会用于 aspect coverage 和排序。",
-                ),
-            )
-        with logic_cols[3]:
-            st.text_area(
-                "preferred_paper_types",
-                key="preferred_paper_types_text",
-                height=130,
-                help=ui_text(
-                    language,
-                    "Preferred literature types, such as review, method paper, benchmark paper.",
-                    "偏好的论文类型，例如 review、method paper、benchmark paper。",
-                ),
-            )
-        st.text_area(
-            ui_text(language, "Success definition", "成功标准"),
-            key="success_definition_text",
-            height=70,
-        )
-
-    term_cols = st.columns(4)
-    with term_cols[0]:
-        st.text_area("core_terms", key="core_terms_text", height=140)
-    with term_cols[1]:
-        st.text_area("must_terms", key="must_terms_text", height=140)
-    with term_cols[2]:
-        st.text_area("optional_terms", key="optional_terms_text", height=140)
-    with term_cols[3]:
-        st.text_area("exclude_terms", key="exclude_terms_text", height=140)
-
-    query_cols = st.columns(2)
-    with query_cols[0]:
-        st.text_area(
-            "OpenAlex queries",
-            key="openalex_queries_text",
-            height=180,
-            help=ui_text(
-                language,
-                "One OpenAlex query per line. Multi-word core terms should usually stay quoted.",
-                "每行一条 OpenAlex query。多词核心术语通常建议保留引号。",
-            ),
-        )
-    with query_cols[1]:
-        st.text_area(
-            "Semantic Scholar queries",
-            key="semantic_scholar_queries_text",
-            height=180,
-            help=ui_text(
-                language,
-                "One Semantic Scholar query per line. Required terms can use + and excluded terms can use -.",
-                "每行一条 Semantic Scholar query。必选词可以用 +，排除词可以用 -。",
-            ),
-        )
     openalex_count = len(parse_query_editor_text(st.session_state.openalex_queries_text))
     semantic_count = len(
         parse_query_editor_text(st.session_state.semantic_scholar_queries_text)
     )
-    st.caption(
-        ui_text(
-            language,
-            f"{openalex_count} OpenAlex queries and {semantic_count} Semantic Scholar queries ready. No provider API calls have been made at this preview step.",
-            f"当前有 {openalex_count} 条 OpenAlex queries、{semantic_count} 条 Semantic Scholar queries。预览阶段还没有请求文献 API。",
-        )
+    step3_label = ui_text(
+        language,
+        f"Step 3: Review Query Plan ({openalex_count} OpenAlex / {semantic_count} Semantic Scholar)",
+        f"第 3 步：检查 Query Plan（OpenAlex {openalex_count} 条 / Semantic Scholar {semantic_count} 条）",
     )
+    with st.expander(
+        step3_label,
+        expanded=st.session_state.pipeline_result is None,
+    ):
+        render_step3_summary(language, openalex_count, semantic_count)
+        tabs = st.tabs(
+            [
+                ui_text(language, "Field Guide", "字段说明"),
+                ui_text(language, "Research Intent", "研究意图"),
+                ui_text(language, "Terms And Provider Queries", "术语与 Provider Queries"),
+            ]
+        )
+
+        with tabs[0]:
+            st.markdown(
+                ui_text(
+                    language,
+                    (
+                        "Use this table as a checklist before Step 4. "
+                        "The most important fields to check are usually "
+                        "`Refined English question`, `core_terms`, `must_terms`, "
+                        "and the provider queries."
+                    ),
+                    (
+                        "第 4 步之前可以把这张表当作检查清单。通常最值得检查的是 "
+                        "`Refined English question`、`core_terms`、`must_terms` "
+                        "和两个 provider 的 queries。"
+                    ),
+                )
+            )
+            st.dataframe(
+                step3_field_guide_dataframe(language),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        with tabs[1]:
+            render_question_preprocessing(
+                preview.get("question", question),
+                preview.get("planner_metadata", {}),
+                language,
+            )
+            st.text_area(
+                ui_text(language, "Refined English question", "英文 refined question"),
+                key="refined_question_text",
+                height=90,
+                help=ui_text(
+                    language,
+                    "This English question is used by retrieval, extraction, and ranking.",
+                    "系统会用这个英文问题进行检索、evidence 抽取和排序。",
+                ),
+            )
+            intent_cols = st.columns(3)
+            with intent_cols[0]:
+                st.selectbox(
+                    ui_text(language, "Search intent", "搜索意图"),
+                    SEARCH_INTENTS,
+                    key="search_intent_value",
+                    help=ui_text(
+                        language,
+                        "Controls preferred paper types, aspects, and ranking emphasis.",
+                        "影响偏好的论文类型、required aspects 和排序侧重点。",
+                    ),
+                )
+            with intent_cols[1]:
+                st.text_input(
+                    ui_text(language, "Time window", "时间窗口"),
+                    key="time_window_text",
+                    help=ui_text(
+                        language,
+                        "A soft time preference in the search brief. Use the sidebar year filter for a hard cutoff.",
+                        "SearchBrief 里的软性时间偏好。硬性年份截止请用侧边栏年份过滤。",
+                    ),
+                )
+            with intent_cols[2]:
+                st.text_input(
+                    ui_text(language, "User goal", "用户目标"),
+                    key="user_goal_text",
+                    help=ui_text(
+                        language,
+                        "The practical reason for the search. This appears in the report and helps interpret ranking.",
+                        "检索的实际目标，会进入 report 并帮助解释排序。",
+                    ),
+                )
+            logic_cols = st.columns(4)
+            with logic_cols[0]:
+                st.text_area(
+                    "inclusion_criteria",
+                    key="inclusion_criteria_text",
+                    height=130,
+                    help=ui_text(
+                        language,
+                        "One criterion per line. These become required or high-priority query terms.",
+                        "每行一条。系统会把它们作为高优先级检索条件。",
+                    ),
+                )
+            with logic_cols[1]:
+                st.text_area(
+                    "exclusion_criteria",
+                    key="exclusion_criteria_text",
+                    height=130,
+                    help=ui_text(
+                        language,
+                        "One exclusion per line. These become provider-specific negative terms when possible.",
+                        "每行一条。系统会尽量转换成数据源支持的排除词。",
+                    ),
+                )
+            with logic_cols[2]:
+                st.text_area(
+                    "required_aspects",
+                    key="required_aspects_text",
+                    height=130,
+                    help=ui_text(
+                        language,
+                        "Aspects that each paper should cover. These are used by aspect coverage and ranking.",
+                        "论文最好覆盖的方面，会用于 aspect coverage 和排序。",
+                    ),
+                )
+            with logic_cols[3]:
+                st.text_area(
+                    "preferred_paper_types",
+                    key="preferred_paper_types_text",
+                    height=130,
+                    help=ui_text(
+                        language,
+                        "Preferred literature types, such as review, method paper, benchmark paper.",
+                        "偏好的论文类型，例如 review、method paper、benchmark paper。",
+                    ),
+                )
+            st.text_area(
+                ui_text(language, "Success definition", "成功标准"),
+                key="success_definition_text",
+                height=70,
+                help=ui_text(
+                    language,
+                    "What a good result set should look like.",
+                    "什么样的结果集算是满足本次检索目标。",
+                ),
+            )
+
+        with tabs[2]:
+            st.caption(
+                ui_text(
+                    language,
+                    "Edit one item per line. Step 4 will use these exact values unless you regenerate the query plan.",
+                    "每行一个条目。除非重新生成 Query Plan，第 4 步会直接使用这里的值。",
+                )
+            )
+            term_cols = st.columns(4)
+            with term_cols[0]:
+                st.text_area(
+                    "core_terms",
+                    key="core_terms_text",
+                    height=140,
+                    help=ui_text(
+                        language,
+                        "Central scientific objects or phrases. Remove terms that drift away from the topic.",
+                        "中心科学对象或短语。删掉明显跑偏的词。",
+                    ),
+                )
+            with term_cols[1]:
+                st.text_area(
+                    "must_terms",
+                    key="must_terms_text",
+                    height=140,
+                    help=ui_text(
+                        language,
+                        "High-priority terms used for focused query construction.",
+                        "用于聚焦检索式的高优先级术语。",
+                    ),
+                )
+            with term_cols[2]:
+                st.text_area(
+                    "optional_terms",
+                    key="optional_terms_text",
+                    height=140,
+                    help=ui_text(
+                        language,
+                        "Expansion terms that broaden the search without becoming mandatory.",
+                        "扩展检索范围，但不作为必选词。",
+                    ),
+                )
+            with term_cols[3]:
+                st.text_area(
+                    "exclude_terms",
+                    key="exclude_terms_text",
+                    height=140,
+                    help=ui_text(
+                        language,
+                        "Terms or meanings to avoid when the provider supports exclusion.",
+                        "当 provider 支持时，用于排除不想要的词或含义。",
+                    ),
+                )
+
+            query_cols = st.columns(2)
+            with query_cols[0]:
+                st.text_area(
+                    "OpenAlex queries",
+                    key="openalex_queries_text",
+                    height=180,
+                    help=ui_text(
+                        language,
+                        "One OpenAlex query per line. Multi-word core terms should usually stay quoted.",
+                        "每行一条 OpenAlex query。多词核心术语通常建议保留引号。",
+                    ),
+                )
+            with query_cols[1]:
+                st.text_area(
+                    "Semantic Scholar queries",
+                    key="semantic_scholar_queries_text",
+                    height=180,
+                    help=ui_text(
+                        language,
+                        "One Semantic Scholar query per line. Required terms can use + and excluded terms can use -.",
+                        "每行一条 Semantic Scholar query。必选词可以用 +，排除词可以用 -。",
+                    ),
+                )
+        st.caption(
+            ui_text(
+                language,
+                f"{openalex_count} OpenAlex queries and {semantic_count} Semantic Scholar queries ready. No provider API calls have been made at this preview step.",
+                f"当前有 {openalex_count} 条 OpenAlex queries、{semantic_count} 条 Semantic Scholar queries。预览阶段还没有请求文献 API。",
+            )
+        )
 
 
 def render_downloads(ranked_path: str, report_path: str, language: str) -> None:

@@ -106,6 +106,8 @@ UI 的推荐流程：
 6. 查看 ranked papers、evidence chain、result groups、paper cards、metrics 和 trace。
 7. 对论文标记 include / exclude / uncertain，导入或导出 feedback CSV，并在不重新调用 API 的情况下 rerank。
 
+Step 3 是一个可折叠检查点，里面分为字段说明、研究意图、术语与 provider queries。第 4 步检索完成后，Step 3 会默认收起，但仍然可以展开查看本次实际使用的 query plan。
+
 注意：`From year` 只有在 `Apply year filter` 勾选后才生效。启用后，pipeline 会在 provider 返回结果之后再做一次本地硬过滤，早于该年份的论文不会进入 dedup、evidence extraction 或 ranking。缺少年份元数据的论文也会被排除，因为无法证明它满足年份条件。
 
 ## Optional DeepSeek LLM
