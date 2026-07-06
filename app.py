@@ -327,6 +327,7 @@ def save_project_manifest(
         "scoring_weights": result.scoring_weights,
         "merged_paper_count": result.merged_paper_count,
         "duplicate_count": result.duplicate_count,
+        "imported_library": result.evaluation_metrics.get("imported_library", {}),
         "ranked_papers_path": result.ranked_papers_path,
         "report_path": result.report_path,
         "evaluation_path": result.evaluation_path,
@@ -352,6 +353,31 @@ def save_project_manifest(
     history.insert(0, manifest)
     save_history(history[:50])
     return manifest
+
+
+def uploaded_library_format(file_name: str) -> str:
+    """Return the import format for an uploaded literature-library file."""
+
+    suffix = Path(file_name).suffix.lower()
+    if suffix in {".bib", ".bibtex"}:
+        return "bibtex"
+    if suffix == ".ris":
+        return "ris"
+    if suffix == ".csv":
+        return "csv"
+    return "auto"
+
+
+def save_uploaded_library(uploaded_file: Any, output_dir: Path) -> tuple[str | None, str]:
+    """Save an uploaded library file into the project folder."""
+
+    if uploaded_file is None:
+        return None, "auto"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(uploaded_file.name).suffix or ".txt"
+    destination = output_dir / f"imported_library{suffix}"
+    destination.write_bytes(uploaded_file.getvalue())
+    return str(destination), uploaded_library_format(uploaded_file.name)
 
 
 def ranked_dataframe(ranked_papers: list[RankedPaper]) -> pd.DataFrame:
@@ -970,11 +996,13 @@ def run_screening(
     query_plan: QueryPlan | None = None,
     search_brief: SearchBrief | None = None,
     planner_metadata: dict[str, Any] | None = None,
+    uploaded_library: Any = None,
 ) -> None:
     """Run the core pipeline and store the result in session state."""
 
     output_dir = new_project_output_dir(question)
     language = settings["language"]
+    input_file, input_format = save_uploaded_library(uploaded_library, output_dir)
     connectivity = check_provider_connectivity(settings["providers"])
     st.session_state.provider_connectivity = connectivity
     if any(not row["reachable"] for row in connectivity):
@@ -1016,6 +1044,8 @@ def run_screening(
                 openalex_mode=settings["openalex_mode"],
                 sort_preference=settings["sort_preference"],
                 ranking_profile=settings["ranking_profile"],
+                input_file=input_file,
+                input_format=input_format,
                 progress_callback=progress_callback,
             )
         except Exception as exc:
@@ -1678,6 +1708,21 @@ def render_result(result: PipelineResult, language: str) -> None:
         result.evaluation_metrics.get("weak_support_count", 0),
     )
     year_filter = result.evaluation_metrics.get("year_filter", {})
+    imported_library = result.evaluation_metrics.get("imported_library", {})
+    if imported_library and imported_library.get("paper_count", 0):
+        st.caption(
+            ui_text(
+                language,
+                (
+                    f"Imported library: {imported_library.get('paper_count', 0)} papers "
+                    f"from {imported_library.get('detected_format', 'unknown')}."
+                ),
+                (
+                    f"外部文献库导入：{imported_library.get('paper_count', 0)} 篇，"
+                    f"格式 {imported_library.get('detected_format', 'unknown')}。"
+                ),
+            )
+        )
     if year_filter:
         if year_filter.get("enabled"):
             st.caption(
@@ -1847,6 +1892,8 @@ def render_result(result: PipelineResult, language: str) -> None:
         st.json(result.evaluation_metrics.get("prisma_like_flow", {}))
         st.subheader(ui_text(language, "Year Filter Audit", "年份过滤审计"))
         st.json(result.evaluation_metrics.get("year_filter", {}))
+        st.subheader(ui_text(language, "Imported Library Audit", "导入文献库审计"))
+        st.json(result.evaluation_metrics.get("imported_library", {}))
 
     with tabs[5]:
         st.subheader(ui_text(language, "Recommended Reading Path", "推荐阅读路径"))
@@ -1869,6 +1916,8 @@ def render_result(result: PipelineResult, language: str) -> None:
         render_downloads(result.ranked_papers_path, result.report_path, language)
         extra_artifacts = [
             ("aspect_coverage.csv", Path(result.output_dir) / "aspect_coverage.csv", "text/csv"),
+            ("imported_papers.csv", Path(result.output_dir) / "imported_papers.csv", "text/csv"),
+            ("import_diagnostics.json", Path(result.output_dir) / "import_diagnostics.json", "application/json"),
             ("retrieval_diagnostics.json", Path(result.output_dir) / "retrieval_diagnostics.json", "application/json"),
             ("run_events.jsonl", Path(result.output_dir) / "run_events.jsonl", "application/jsonl"),
             ("paper_cards.md", Path(result.output_dir) / "paper_cards.md", "text/markdown"),
@@ -2010,6 +2059,42 @@ def main() -> None:
         ),
         height=110,
     )
+    with st.expander(
+        ui_text(
+            language,
+            "Import Existing Literature Library",
+            "导入已有文献库",
+        ),
+        expanded=False,
+    ):
+        uploaded_library = st.file_uploader(
+            ui_text(
+                language,
+                "Upload BibTeX, RIS, or CSV export",
+                "上传 BibTeX、RIS 或 CSV 导出文件",
+            ),
+            type=["bib", "bibtex", "ris", "csv"],
+            help=ui_text(
+                language,
+                "Use exports from Zotero, Web of Science, Scopus, Google Scholar, or a curated CSV. Imported records are merged with provider retrieval results.",
+                "可使用 Zotero、Web of Science、Scopus、Google Scholar 或手工 CSV 导出。导入记录会和在线检索结果合并筛选。",
+            ),
+        )
+        st.caption(
+            ui_text(
+                language,
+                "CSV columns can include: title, abstract, authors, year, venue, doi, url, citation_count.",
+                "CSV 可包含列：title、abstract、authors、year、venue、doi、url、citation_count。",
+            )
+        )
+        if uploaded_library is not None:
+            st.success(
+                ui_text(
+                    language,
+                    f"Ready to import {uploaded_library.name}.",
+                    f"已准备导入 {uploaded_library.name}。",
+                )
+            )
 
     cleaned_question = question.strip()
     action_cols = st.columns(2)
@@ -2050,6 +2135,7 @@ def main() -> None:
                     query_plan=current_query_plan,
                     search_brief=current_search_brief,
                     planner_metadata=preview.get("planner_metadata", {}),
+                    uploaded_library=uploaded_library,
                 )
             except Exception as exc:
                 st.error(ui_text(language, f"Screening failed: {exc}", f"筛选失败：{exc}"))

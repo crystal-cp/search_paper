@@ -13,7 +13,7 @@ from lit_screening.models import (
     RankedPaper,
     VerificationResult,
 )
-from lit_screening.scoring import score_paper
+from lit_screening.scoring import compute_score_breakdown
 
 
 class RankerAgent:
@@ -43,7 +43,7 @@ class RankerAgent:
         for paper in papers:
             evidence = evidence_by_id[paper.paper_id]
             verification = verification_by_id[paper.paper_id]
-            scores = score_paper(
+            scores = compute_score_breakdown(
                 paper,
                 evidence,
                 verification,
@@ -68,7 +68,7 @@ class RankerAgent:
             count = venue_seen.get(venue_key, 0)
             diversity = 1.0 / (1.0 + count)
             venue_seen[venue_key] = count + 1
-            scores = score_paper(
+            scores = compute_score_breakdown(
                 item.paper,
                 item.evidence,
                 item.verification,

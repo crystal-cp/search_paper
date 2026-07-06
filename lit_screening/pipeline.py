@@ -19,6 +19,7 @@ from .agents.verifier import VerifierAgent
 from .config import PipelineConfig
 from .dedup import deduplicate_with_stats
 from .evaluation import compute_evaluation, save_evaluation
+from .importers import ImportResult, import_papers_from_file
 from .llm_client import GenericLLMClient
 from .models import (
     AspectCoverageRecord,
@@ -368,6 +369,7 @@ def build_agent_trace(
     scoring_weights: dict[str, float],
     result_groups: dict[str, Any] | None = None,
     year_filter_stats: dict[str, Any] | None = None,
+    import_diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an inspectable trace of agent decisions for demos and audits."""
 
@@ -393,6 +395,7 @@ def build_agent_trace(
             "retrieval_counts_by_provider": retrieval_counts,
             "raw_paper_count": raw_paper_count,
             "year_filter": year_filter_stats or {},
+            "imported_library": import_diagnostics or {},
         },
         "deduplicator": {
             "merged_paper_count": len(merged_papers),
@@ -502,6 +505,8 @@ def apply_feedback_to_pipeline_result(
         metrics["llm"] = result.evaluation_metrics["llm"]
     if "year_filter" in result.evaluation_metrics:
         metrics["year_filter"] = result.evaluation_metrics["year_filter"]
+    if "imported_library" in result.evaluation_metrics:
+        metrics["imported_library"] = result.evaluation_metrics["imported_library"]
     metrics["scoring_weights"] = result.scoring_weights
     result_groups = group_ranked_papers(
         ranked_after_feedback,
@@ -819,6 +824,7 @@ def build_retrieval_diagnostics(
     duplicate_count: int,
     ranked_papers: list[RankedPaper],
     year_filter_stats: dict[str, Any] | None = None,
+    import_diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build transparent retrieval and reranking diagnostics."""
 
@@ -858,6 +864,7 @@ def build_retrieval_diagnostics(
         "merged_count": len(merged_papers),
         "duplicate_count": duplicate_count,
         "year_filter": year_filter_stats or {},
+        "imported_library": import_diagnostics or {},
         "missing_abstract_count": sum(1 for paper in merged_papers if not paper.abstract),
         "top_titles_per_query": top_titles_per_query,
         "top_10_score_breakdown": [
@@ -936,6 +943,12 @@ def filter_papers_by_from_year(
     }
 
 
+def empty_import_result() -> ImportResult:
+    """Return an empty import result for runs without external library files."""
+
+    return ImportResult(papers=[], raw_count=0, detected_format="none")
+
+
 def run_pipeline(
     question: str,
     providers: list[str],
@@ -958,6 +971,8 @@ def run_pipeline(
     openalex_mode: str = "keyword+semantic",
     sort_preference: str = "relevance",
     ranking_profile: str = "balanced",
+    input_file: str | None = None,
+    input_format: str = "auto",
     llm_client: GenericLLMClient | None = None,
     retriever_agent: RetrieverAgent | None = None,
     progress_callback: Callable[[str, str, dict[str, Any]], None] | None = None,
@@ -988,6 +1003,8 @@ def run_pipeline(
             "extractor_mode": extractor_mode,
             "verifier_mode": verifier_mode,
             "use_cache": use_cache,
+            "input_file": input_file or "",
+            "input_format": input_format,
         },
     )
 
@@ -1133,6 +1150,29 @@ def run_pipeline(
         progress_callback=progress_callback,
         sort_mode=sort_preference,
     )
+    import_result = empty_import_result()
+    if input_file:
+        if progress_callback:
+            progress_callback(
+                "retrieval",
+                "Importing external literature library",
+                {"input_file": input_file, "input_format": input_format},
+            )
+        import_result = import_papers_from_file(input_file, input_format)
+        raw_papers.extend(import_result.papers)
+        retrieval_counts["imported"] = len(import_result.papers)
+        write_csv(
+            out / "imported_papers.csv",
+            [paper_to_row(paper) for paper in import_result.papers],
+            PAPER_FIELDS,
+        )
+        write_json(out / "import_diagnostics.json", import_result.diagnostics())
+        if progress_callback:
+            progress_callback(
+                "retrieval",
+                "External literature library imported",
+                import_result.diagnostics(),
+            )
     raw_paper_count_before_year_filter = len(raw_papers)
     if progress_callback:
         progress_callback(
@@ -1327,6 +1367,7 @@ def run_pipeline(
     )
     metrics["duplicate_count"] = duplicate_count
     metrics["year_filter"] = year_filter_stats
+    metrics["imported_library"] = import_result.diagnostics()
     metrics["scoring_weights"] = active_scoring_weights
     metrics["query_controls"] = {
         "strictness": strictness,
@@ -1378,6 +1419,7 @@ def run_pipeline(
         scoring_weights=active_scoring_weights,
         result_groups=result_groups,
         year_filter_stats=year_filter_stats,
+        import_diagnostics=import_result.diagnostics(),
     )
     write_json(out / "agent_trace.json", trace)
     write_json(out / "result_groups.json", result_groups)
@@ -1391,6 +1433,7 @@ def run_pipeline(
         duplicate_count=duplicate_count,
         ranked_papers=ranked_final,
         year_filter_stats=year_filter_stats,
+        import_diagnostics=import_result.diagnostics(),
     )
     write_json(out / "retrieval_diagnostics.json", retrieval_diagnostics)
     generate_paper_cards(
@@ -1494,6 +1537,17 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--gold-labels", dest="gold_labels_path", default=None)
     run.add_argument("--output-dir", default="outputs")
     run.add_argument(
+        "--input-file",
+        default=None,
+        help="Optional external literature library export: BibTeX, RIS, or CSV.",
+    )
+    run.add_argument(
+        "--input-format",
+        choices=["auto", "bibtex", "bib", "ris", "csv"],
+        default="auto",
+        help="Format for --input-file. Auto-detects from extension by default.",
+    )
+    run.add_argument(
         "--llm-backend",
         choices=["none", "deepseek"],
         default="none",
@@ -1587,6 +1641,8 @@ def main(argv: list[str] | None = None) -> int:
                 openalex_mode=args.openalex_mode,
                 sort_preference=args.sort_preference,
                 ranking_profile=args.ranking_profile,
+                input_file=args.input_file,
+                input_format=args.input_format,
             )
         except Exception as exc:
             ScreeningRunLogger(args.output_dir).log_exception(

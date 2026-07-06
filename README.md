@@ -10,13 +10,14 @@ The MVP pipeline:
 2. refines broad questions into optional subquestions,
 3. builds a structured, provider-aware query plan from the brief,
 4. retrieves metadata from OpenAlex and Semantic Scholar using provider-specific queries,
-5. normalizes and deduplicates papers,
-6. extracts claim-level evidence from abstracts,
-7. verifies whether evidence is grounded in the abstract with strict span validation,
-8. ranks papers with hybrid TF-IDF/API/field relevance, aspect coverage, and transparent scoring,
-9. groups papers into reading roles and generates paper evidence cards,
-10. optionally applies human feedback,
-11. writes CSV, JSON, Markdown outputs, and an agent decision trace.
+5. optionally imports existing BibTeX, RIS, or CSV literature-library exports,
+6. normalizes and deduplicates papers,
+7. extracts claim-level evidence from abstracts,
+8. verifies whether evidence is grounded in the abstract with strict span validation,
+9. ranks papers with hybrid TF-IDF/API/field relevance, aspect coverage, and transparent scoring,
+10. groups papers into reading roles and generates paper evidence cards,
+11. optionally applies human feedback,
+12. writes CSV, JSON, Markdown outputs, and an agent decision trace.
 
 ## Setup
 
@@ -72,6 +73,23 @@ python -m lit_screening.pipeline run \
   --verifier-mode llm \
   --output-dir outputs
 ```
+
+You can also screen an existing literature library exported from Zotero, Web of
+Science, Scopus, Google Scholar, or a curated spreadsheet:
+
+```bash
+python -m lit_screening.pipeline run \
+  --question "surface magnetization boundary spin signals" \
+  --providers openalex semantic_scholar \
+  --max-per-query 10 \
+  --input-file examples/my_library.bib \
+  --input-format auto \
+  --output-dir outputs
+```
+
+Supported import formats are BibTeX (`.bib` / `.bibtex`), RIS (`.ris`), and CSV
+(`.csv`). CSV columns can include `title`, `abstract`, `authors`, `year`,
+`venue`, `doi`, `url`, and `citation_count`.
 
 The DeepSeek base URL and model live in `lit_screening/config.py`:
 
@@ -134,6 +152,9 @@ The UI also supports:
   `Paper Cards`, `Feedback`, `Report & Export`, `Trace`, and `Metrics`.
 - Aspect coverage tables, grouped result lists, a PRISMA-like screening flow,
   recommended reading path, and top-paper evidence cards.
+- Existing-library import from BibTeX, RIS, or CSV. Imported records are merged
+  with provider retrieval results, deduplicated, screened, and ranked through
+  the same core pipeline.
 - Search mode controls for strictness, OpenAlex mode, sort preference, and ranking
   profile (`relevance_first`, `balanced`, `high_quality_review`).
 - A collapsible run-status panel shows what the pipeline is doing during
@@ -180,6 +201,8 @@ The pipeline writes:
 - `outputs/evaluation.json`
 - `outputs/agent_trace.json`
 - `outputs/run_events.jsonl`
+- `outputs/imported_papers.csv`, when an external library is imported
+- `outputs/import_diagnostics.json`, when an external library is imported
 - `outputs/retrieval_diagnostics.json`
 - `outputs/result_groups.json`
 - `outputs/prisma_like_flow.json`
@@ -194,10 +217,10 @@ It records stage transitions, provider errors, and fatal exceptions so failed
 runs can be diagnosed even when later artifacts were not produced.
 
 `retrieval_diagnostics.json` records the query plan, per-provider queries,
-per-query raw counts, provider errors, top titles per query, top score
-breakdowns, and year-filter audit information. When `from_year` is set, papers
-published before that year, or papers with missing year metadata, are filtered
-locally before deduplication and ranking.
+per-query raw counts, provider errors, imported-library counts, top titles per
+query, top score breakdowns, and year-filter audit information. When
+`from_year` is set, papers published before that year, or papers with missing
+year metadata, are filtered locally before deduplication and ranking.
 
 ## Query Planning, Sensemaking, And Scoring
 
@@ -230,6 +253,8 @@ hybrid_relevance_score =
 + 0.10 * field_match_score
 ```
 
+Code: `lit_screening/reranking.py::compute_hybrid_relevance_features`.
+
 Evidence score combines grounding and relevance:
 
 ```text
@@ -237,6 +262,8 @@ evidence_score =
 0.60 * verifier_confidence
 + 0.40 * evidence_question_relevance
 ```
+
+Code: `lit_screening/scoring.py::score_evidence`.
 
 The final ranking score remains transparent and profile-driven:
 
@@ -249,6 +276,11 @@ final_score =
 + 0.05 * diversity_score
 + human_feedback_adjustment
 ```
+
+Code: `lit_screening/scoring.py::compute_score_breakdown` is the main scoring
+entrypoint used by `RankerAgent`; `compute_final_score` is the low-level formula
+helper for combining already-computed score components. `score_paper` remains
+only as a backward-compatible alias.
 
 Base scores are clamped to `[0, 1]`. Human feedback is an explicit additive adjustment.
 Ranking profiles can change the base weights before any user-provided weight

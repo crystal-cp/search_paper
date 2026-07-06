@@ -153,7 +153,7 @@ def compute_final_score(
     ranking_profile: str = "balanced",
     aspect_coverage_score: float = 0.0,
 ) -> ScoreBreakdown:
-    """Compute the requested weighted score formula."""
+    """Low-level formula helper for combining already-computed score components."""
 
     score_weights = sanitize_score_weights(weights, ranking_profile=ranking_profile)
     relevance = clamp(relevance_score)
@@ -181,7 +181,7 @@ def compute_final_score(
     )
 
 
-def score_paper(
+def compute_score_breakdown(
     paper: Paper,
     evidence: EvidenceRecord,
     verification: VerificationResult,
@@ -193,7 +193,13 @@ def score_paper(
     ranking_profile: str = "balanced",
     aspect_coverage_score: float = 0.0,
 ) -> ScoreBreakdown:
-    """Compute all ranking sub-scores for one paper."""
+    """Main scoring entrypoint for one paper.
+
+    This is the implementation corresponding to the README formulas:
+    hybrid relevance is computed in reranking.py, evidence score combines
+    grounding confidence and evidence-question relevance, and final_score is
+    produced by compute_final_score().
+    """
 
     relevance = score_relevance(paper, evidence, question, query_plan=query_plan)
     if aspect_coverage_score:
@@ -206,6 +212,38 @@ def score_paper(
         diversity_score=diversity_score,
         human_feedback_adjustment=human_feedback_adjustment,
         weights=weights,
+        ranking_profile=ranking_profile,
+        aspect_coverage_score=aspect_coverage_score,
+    )
+
+
+def score_paper(
+    paper: Paper,
+    evidence: EvidenceRecord,
+    verification: VerificationResult,
+    question: str,
+    diversity_score: float = 0.5,
+    human_feedback_adjustment: float = 0.0,
+    weights: dict[str, float] | None = None,
+    query_plan: QueryPlan | None = None,
+    ranking_profile: str = "balanced",
+    aspect_coverage_score: float = 0.0,
+) -> ScoreBreakdown:
+    """Backward-compatible alias for compute_score_breakdown().
+
+    New ranking code should call compute_score_breakdown() so there is one
+    obvious scoring entrypoint.
+    """
+
+    return compute_score_breakdown(
+        paper=paper,
+        evidence=evidence,
+        verification=verification,
+        question=question,
+        diversity_score=diversity_score,
+        human_feedback_adjustment=human_feedback_adjustment,
+        weights=weights,
+        query_plan=query_plan,
         ranking_profile=ranking_profile,
         aspect_coverage_score=aspect_coverage_score,
     )

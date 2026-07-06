@@ -7,12 +7,13 @@ Build a lightweight, reproducible, human-in-the-loop multi-agent system for evid
 Given a research question, the system should:
 1. plan scholarly search queries,
 2. retrieve papers from OpenAlex and Semantic Scholar,
-3. normalize and deduplicate metadata,
-4. extract claim-level evidence from title and abstract,
-5. verify whether the claim is grounded in the abstract,
-6. rank papers with a transparent multi-objective scoring function,
-7. refine ranking with human feedback,
-8. output CSV files, evaluation metrics, and a Markdown report.
+3. optionally import papers from BibTeX, RIS, or CSV literature-library exports,
+4. normalize and deduplicate metadata,
+5. extract claim-level evidence from title and abstract,
+6. verify whether the claim is grounded in the abstract,
+7. rank papers with a transparent multi-objective scoring function,
+8. refine ranking with human feedback,
+9. output CSV files, evaluation metrics, and a Markdown report.
 
 ## Development rules
 
@@ -25,6 +26,8 @@ Given a research question, the system should:
   - S2_API_KEY
   - DEEPSEEK_API_KEY
 - The core pipeline must run without an LLM key using rule-based fallback agents.
+- Existing-library import should stay dependency-light and normalize into `Paper`.
+- `compute_score_breakdown()` is the main ranking score entrypoint; keep README formulas aligned with scoring.py/reranking.py.
 - All external API calls must have timeout, retry, and basic rate-limit handling.
 - Cache API responses locally under data/cache/.
 - Do not commit .env, cache files, or outputs except .gitkeep.
@@ -41,6 +44,16 @@ python -m lit_screening.pipeline run \
   --providers openalex semantic_scholar \
   --max-per-query 10 \
   --from-year 2020 \
+  --output-dir outputs
+
+Optional external-library import should work like:
+
+python -m lit_screening.pipeline run \
+  --question "surface magnetization boundary spin signals" \
+  --providers openalex semantic_scholar \
+  --max-per-query 10 \
+  --input-file path/to/library.bib \
+  --input-format auto \
   --output-dir outputs
 
 ## Required outputs
@@ -60,6 +73,8 @@ outputs/
 - evaluation.json
 - agent_trace.json
 - run_events.jsonl
+- imported_papers.csv, if an external library is imported
+- import_diagnostics.json, if an external library is imported
 - retrieval_diagnostics.json
 - result_groups.json
 - prisma_like_flow.json

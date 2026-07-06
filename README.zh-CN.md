@@ -14,13 +14,14 @@
 2. 生成结构化 `QueryPlan`，包含 `core_terms`、`must_terms`、`optional_terms`、`exclude_terms` 和不同 provider 的 query。
 3. 对中文研究问题生成英文 planning question 和英文检索 query。
 4. 调用 OpenAlex 和 Semantic Scholar 检索论文元数据。
-5. 规范化论文字段并按 DOI / 标题去重。
-6. 从摘要中抽取 claim-level evidence。
-7. 用 span validation 验证 evidence sentence 是否能在 abstract 中 exact match 或 high-confidence fuzzy match。
-8. 将 unsupported、weak_support、strict_support、missing_abstract、llm_invalid_evidence 区分开。
-9. 用混合相关性、证据质量、年份、引用质量、多样性和人工反馈计算排序。
-10. 输出 CSV、JSON、Markdown report、agent trace、run events 和 retrieval diagnostics。
-11. 在 Streamlit UI 中展示 query plan、ranking、evidence chain、反馈重排、run history 和项目输出。
+5. 可导入已有 BibTeX、RIS 或 CSV 文献库导出文件。
+6. 规范化论文字段并按 DOI / 标题去重。
+7. 从摘要中抽取 claim-level evidence。
+8. 用 span validation 验证 evidence sentence 是否能在 abstract 中 exact match 或 high-confidence fuzzy match。
+9. 将 unsupported、weak_support、strict_support、missing_abstract、llm_invalid_evidence 区分开。
+10. 用混合相关性、证据质量、年份、引用质量、多样性和人工反馈计算排序。
+11. 输出 CSV、JSON、Markdown report、agent trace、run events 和 retrieval diagnostics。
+12. 在 Streamlit UI 中展示 query plan、ranking、evidence chain、反馈重排、run history 和项目输出。
 
 ## 安装
 
@@ -80,6 +81,20 @@ python -m lit_screening.pipeline run \
   --output-dir outputs
 ```
 
+也可以筛选已有文献库，例如 Zotero、Web of Science、Scopus、Google Scholar 或手工表格导出的文件：
+
+```bash
+python -m lit_screening.pipeline run \
+  --question "surface magnetization boundary spin signals" \
+  --providers openalex semantic_scholar \
+  --max-per-query 10 \
+  --input-file examples/my_library.bib \
+  --input-format auto \
+  --output-dir outputs
+```
+
+支持 BibTeX（`.bib` / `.bibtex`）、RIS（`.ris`）和 CSV（`.csv`）。CSV 常用列包括 `title`、`abstract`、`authors`、`year`、`venue`、`doi`、`url`、`citation_count`。
+
 离线烟雾测试可以避免真实 API 调用：
 
 ```bash
@@ -102,9 +117,10 @@ UI 的推荐流程：
 2. 如果需要限制年份，勾选 `Apply year filter`，再设置 `From year`。
 3. 在主页面输入 research question。
 4. 点击 `Generate Query Plan`，先检查并可编辑 SearchBrief、core terms、must terms、exclude terms、OpenAlex queries 和 Semantic Scholar queries。
-5. 确认 query 方向没偏后，再点击 `Run Retrieval`。
-6. 查看 ranked papers、evidence chain、result groups、paper cards、metrics 和 trace。
-7. 对论文标记 include / exclude / uncertain，导入或导出 feedback CSV，并在不重新调用 API 的情况下 rerank。
+5. 如已有文献库导出文件，可在 `Import Existing Literature Library` 上传 BibTeX、RIS 或 CSV。
+6. 确认 query 方向没偏后，再点击 `Run Retrieval`。
+7. 查看 ranked papers、evidence chain、result groups、paper cards、metrics 和 trace。
+8. 对论文标记 include / exclude / uncertain，导入或导出 feedback CSV，并在不重新调用 API 的情况下 rerank。
 
 Step 3 是一个可折叠检查点，里面分为字段说明、研究意图、术语与 provider queries。第 4 步检索完成后，Step 3 会默认收起，但仍然可以展开查看本次实际使用的 query plan。
 
@@ -151,6 +167,8 @@ outputs/
   evaluation.json
   agent_trace.json
   run_events.jsonl
+  imported_papers.csv
+  import_diagnostics.json
   retrieval_diagnostics.json
   result_groups.json
   prisma_like_flow.json
@@ -162,7 +180,9 @@ outputs/
 其中：
 
 - `run_events.jsonl`：运行过程日志，记录每个阶段、provider 错误和 fatal exception，方便分析为什么搜不到论文。
-- `retrieval_diagnostics.json`：记录 query plan、每个 provider 的 query、每个 query 返回多少、provider error、top titles、top score breakdown 和年份过滤审计。
+- `imported_papers.csv`：当导入外部文献库时，保存导入并规范化后的论文。
+- `import_diagnostics.json`：当导入外部文献库时，保存导入格式、数量、跳过记录和错误信息。
+- `retrieval_diagnostics.json`：记录 query plan、每个 provider 的 query、每个 query 返回多少、provider error、导入文献库数量、top titles、top score breakdown 和年份过滤审计。
 - `agent_trace.json`：记录 planner、retriever、extractor、verifier、ranker 的关键决策。
 - `ranked_papers.csv`：最终排序结果。
 - `report.md`：面向展示和复盘的 Markdown 报告。
@@ -207,6 +227,8 @@ hybrid_relevance_score =
 + 0.10 * field_match_score
 ```
 
+代码对应：`lit_screening/reranking.py::compute_hybrid_relevance_features`。
+
 证据分数：
 
 ```text
@@ -214,6 +236,8 @@ evidence_score =
 0.60 * verifier_confidence
 + 0.40 * evidence_question_relevance
 ```
+
+代码对应：`lit_screening/scoring.py::score_evidence`。
 
 最终分数：
 
@@ -226,6 +250,8 @@ final_score =
 + 0.05 * diversity_score
 + human_feedback_adjustment
 ```
+
+代码对应：`lit_screening/scoring.py::compute_score_breakdown` 是 `RankerAgent` 使用的主评分入口；`compute_final_score` 是组合已有分数组件的底层公式 helper。`score_paper` 只保留为向后兼容 alias。
 
 UI 和 CLI 都支持调整权重。UI 中每个权重旁边有说明，方便展示这个权重如何影响论文排序。
 
@@ -251,3 +277,5 @@ pytest
 - retrieval diagnostics
 - provider 错误日志
 - 本地硬年份过滤
+- BibTeX / RIS / CSV 外部文献库导入
+- scoring weights 和 ranking profile 确实改变排序

@@ -57,6 +57,12 @@ class RetrieverAgent:
         all_papers: list[Paper] = []
         raw_by_provider: dict[str, list[dict]] = {provider: [] for provider in providers}
         retrieval_counts: dict[str, int] = {provider: 0 for provider in providers}
+        if max_per_query <= 0:
+            if output_dir:
+                out = Path(output_dir)
+                for provider, raw_items in raw_by_provider.items():
+                    write_json(out / f"raw_{provider}_results.json", raw_items)
+            return all_papers, raw_by_provider, retrieval_counts
 
         for provider in providers:
             if provider not in self.clients:

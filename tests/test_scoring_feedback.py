@@ -1,4 +1,5 @@
 from lit_screening.agents.human_feedback import HumanFeedbackAgent
+from lit_screening.agents.ranker import RankerAgent
 from lit_screening.models import EvidenceRecord, FeedbackRecord, Paper, QueryPlan, RankedPaper, VerificationResult
 from lit_screening.reranking import hybrid_relevance_score
 from lit_screening.scoring import compute_final_score, score_evidence
@@ -130,3 +131,103 @@ def test_evidence_score_is_lower_when_grounded_evidence_is_not_question_relevant
         relevant,
         question,
     )
+
+
+def _ranking_fixture():
+    relevant_low_quality = Paper(
+        paper_id="relevant",
+        title="Surface magnetization spin signals",
+        abstract="Surface magnetization controls spin signals at boundaries.",
+        year=2021,
+        venue="",
+        citation_count=0,
+    )
+    broad_high_quality = Paper(
+        paper_id="quality",
+        title="Surface magnetization review",
+        abstract="A broad review of surface magnetization in magnetic materials.",
+        year=2021,
+        venue="Nature Reviews Materials",
+        citation_count=10000,
+    )
+    evidence_records = [
+        EvidenceRecord(
+            paper_id="relevant",
+            title=relevant_low_quality.title,
+            claim="Surface magnetization controls spin signals.",
+            evidence_sentence="Surface magnetization controls spin signals.",
+            relevance_reason="test",
+        ),
+        EvidenceRecord(
+            paper_id="quality",
+            title=broad_high_quality.title,
+            claim="The article reviews magnetic materials.",
+            evidence_sentence="The article reviews magnetic materials.",
+            relevance_reason="test",
+        ),
+    ]
+    verification_results = [
+        VerificationResult("relevant", True, 1.0, "", "grounded"),
+        VerificationResult("quality", True, 1.0, "", "grounded"),
+    ]
+    return [relevant_low_quality, broad_high_quality], evidence_records, verification_results
+
+
+def test_custom_scoring_weights_change_ranking_order():
+    papers, evidence_records, verification_results = _ranking_fixture()
+    ranker = RankerAgent()
+    question = "surface magnetization spin signals"
+
+    relevance_first = ranker.rank(
+        papers,
+        evidence_records,
+        verification_results,
+        question,
+        scoring_weights={
+            "relevance": 1.0,
+            "evidence": 0.0,
+            "recency": 0.0,
+            "quality": 0.0,
+            "diversity": 0.0,
+        },
+    )
+    quality_first = ranker.rank(
+        papers,
+        evidence_records,
+        verification_results,
+        question,
+        scoring_weights={
+            "relevance": 0.0,
+            "evidence": 0.0,
+            "recency": 0.0,
+            "quality": 1.0,
+            "diversity": 0.0,
+        },
+    )
+
+    assert relevance_first[0].paper.paper_id == "relevant"
+    assert quality_first[0].paper.paper_id == "quality"
+
+
+def test_ranking_profile_changes_ranking_order():
+    papers, evidence_records, verification_results = _ranking_fixture()
+    ranker = RankerAgent()
+    question = "surface magnetization spin signals"
+
+    relevance_profile = ranker.rank(
+        papers,
+        evidence_records,
+        verification_results,
+        question,
+        ranking_profile="relevance_first",
+    )
+    quality_profile = ranker.rank(
+        papers,
+        evidence_records,
+        verification_results,
+        question,
+        ranking_profile="high_quality_review",
+    )
+
+    assert relevance_profile[0].paper.paper_id == "relevant"
+    assert quality_profile[0].paper.paper_id == "quality"

@@ -200,6 +200,41 @@ def test_pipeline_applies_hard_local_from_year_filter(tmp_path):
     assert evaluation["year_filter"]["excluded_before_year_count"] == 1
 
 
+def test_pipeline_ranks_imported_csv_without_provider_calls(tmp_path):
+    input_path = tmp_path / "library.csv"
+    input_path.write_text(
+        (
+            "title,abstract,authors,year,venue,doi,url,citation_count\n"
+            "Imported surface magnetization paper,"
+            "Surface magnetization controls boundary spin signals.,"
+            "Ada Researcher,2024,Demo Journal,10.2468/imported,https://example.test/imported,9\n"
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_pipeline(
+        question="surface magnetization boundary spin signals",
+        providers=[],
+        max_per_query=0,
+        from_year=2020,
+        output_dir=str(tmp_path / "outputs"),
+        input_file=str(input_path),
+        input_format="csv",
+    )
+
+    output_dir = tmp_path / "outputs"
+    diagnostics = json.loads((output_dir / "retrieval_diagnostics.json").read_text())
+    evaluation = json.loads((output_dir / "evaluation.json").read_text())
+
+    assert result.raw_paper_count == 1
+    assert result.merged_paper_count == 1
+    assert result.ranked_final[0].paper.doi == "10.2468/imported"
+    assert (output_dir / "imported_papers.csv").exists()
+    assert (output_dir / "import_diagnostics.json").exists()
+    assert diagnostics["imported_library"]["paper_count"] == 1
+    assert evaluation["retrieval_counts_by_provider"]["imported"] == 1
+
+
 def test_pipeline_uses_english_planning_question_for_chinese_input(tmp_path):
     retriever = RetrieverAgent(clients={"fake": SurfaceMagnetizationFakeClient()})
 
