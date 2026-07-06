@@ -7,6 +7,22 @@ from typing import Any
 
 
 @dataclass
+class SearchBrief:
+    """Intent-level interpretation of the user's literature search need."""
+
+    original_question: str
+    refined_question: str
+    search_intent: str
+    user_goal: str
+    inclusion_criteria: list[str] = field(default_factory=list)
+    exclusion_criteria: list[str] = field(default_factory=list)
+    required_aspects: list[str] = field(default_factory=list)
+    preferred_paper_types: list[str] = field(default_factory=list)
+    time_window: str = ""
+    success_definition: str = ""
+
+
+@dataclass
 class QueryPlan:
     """Structured, provider-aware search plan for a research question."""
 
@@ -17,6 +33,7 @@ class QueryPlan:
     must_terms: list[str] = field(default_factory=list)
     optional_terms: list[str] = field(default_factory=list)
     exclude_terms: list[str] = field(default_factory=list)
+    required_aspects: list[str] = field(default_factory=list)
     openalex_queries: list[str] = field(default_factory=list)
     semantic_scholar_queries: list[str] = field(default_factory=list)
     filters: dict[str, Any] = field(default_factory=dict)
@@ -97,6 +114,18 @@ class ScoreBreakdown:
     diversity_score: float
     human_feedback_adjustment: float
     final_score: float
+    aspect_coverage_score: float = 0.0
+
+
+@dataclass
+class AspectCoverageRecord:
+    """Required-aspect coverage for one screened paper."""
+
+    paper_id: str
+    title: str
+    covered_aspects: list[str] = field(default_factory=list)
+    missing_aspects: list[str] = field(default_factory=list)
+    aspect_coverage_score: float = 0.0
 
 
 @dataclass
@@ -147,3 +176,7 @@ class PipelineResult:
     planning_question: str = ""
     translated_question: str = ""
     query_plan: QueryPlan | None = None
+    search_brief: SearchBrief | None = None
+    question_refinement: dict[str, Any] = field(default_factory=dict)
+    aspect_coverage_records: list[AspectCoverageRecord] = field(default_factory=list)
+    result_groups: dict[str, Any] = field(default_factory=dict)

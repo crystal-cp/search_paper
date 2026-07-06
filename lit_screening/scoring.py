@@ -32,6 +32,41 @@ RANKING_PROFILES = {
         "quality": 0.35,
         "diversity": 0.05,
     },
+    "overview": {
+        "relevance": 0.35,
+        "evidence": 0.20,
+        "recency": 0.10,
+        "quality": 0.25,
+        "diversity": 0.10,
+    },
+    "frontier": {
+        "relevance": 0.42,
+        "evidence": 0.18,
+        "recency": 0.25,
+        "quality": 0.10,
+        "diversity": 0.05,
+    },
+    "implementation": {
+        "relevance": 0.42,
+        "evidence": 0.25,
+        "recency": 0.10,
+        "quality": 0.15,
+        "diversity": 0.08,
+    },
+    "proposal": {
+        "relevance": 0.40,
+        "evidence": 0.20,
+        "recency": 0.15,
+        "quality": 0.15,
+        "diversity": 0.10,
+    },
+    "systematic_review": {
+        "relevance": 0.34,
+        "evidence": 0.28,
+        "recency": 0.08,
+        "quality": 0.25,
+        "diversity": 0.05,
+    },
 }
 
 
@@ -116,6 +151,7 @@ def compute_final_score(
     human_feedback_adjustment: float = 0.0,
     weights: dict[str, float] | None = None,
     ranking_profile: str = "balanced",
+    aspect_coverage_score: float = 0.0,
 ) -> ScoreBreakdown:
     """Compute the requested weighted score formula."""
 
@@ -141,6 +177,7 @@ def compute_final_score(
         diversity_score=diversity,
         human_feedback_adjustment=human_feedback_adjustment,
         final_score=final,
+        aspect_coverage_score=clamp(aspect_coverage_score),
     )
 
 
@@ -154,11 +191,15 @@ def score_paper(
     weights: dict[str, float] | None = None,
     query_plan: QueryPlan | None = None,
     ranking_profile: str = "balanced",
+    aspect_coverage_score: float = 0.0,
 ) -> ScoreBreakdown:
     """Compute all ranking sub-scores for one paper."""
 
+    relevance = score_relevance(paper, evidence, question, query_plan=query_plan)
+    if aspect_coverage_score:
+        relevance = clamp(0.85 * relevance + 0.15 * aspect_coverage_score)
     return compute_final_score(
-        relevance_score=score_relevance(paper, evidence, question, query_plan=query_plan),
+        relevance_score=relevance,
         evidence_score=score_evidence(verification, evidence, question),
         recency_score=score_recency(paper.year),
         quality_score=score_quality(paper.citation_count, paper.venue),
@@ -166,4 +207,5 @@ def score_paper(
         human_feedback_adjustment=human_feedback_adjustment,
         weights=weights,
         ranking_profile=ranking_profile,
+        aspect_coverage_score=aspect_coverage_score,
     )

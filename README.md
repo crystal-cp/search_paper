@@ -4,14 +4,17 @@ This repository is a lightweight, reproducible research prototype for evidence-g
 
 The MVP pipeline:
 
-1. builds a structured, provider-aware query plan from a research question,
-2. retrieves metadata from OpenAlex and Semantic Scholar using provider-specific queries,
-3. normalizes and deduplicates papers,
-4. extracts claim-level evidence from abstracts,
-5. verifies whether evidence is grounded in the abstract with strict span validation,
-6. reranks papers with hybrid TF-IDF/API/field relevance plus transparent scoring,
-7. optionally applies human feedback,
-8. writes CSV, JSON, Markdown outputs, and an agent decision trace.
+1. interprets the user's search intent as a `SearchBrief`,
+2. refines broad questions into optional subquestions,
+3. builds a structured, provider-aware query plan from the brief,
+4. retrieves metadata from OpenAlex and Semantic Scholar using provider-specific queries,
+5. normalizes and deduplicates papers,
+6. extracts claim-level evidence from abstracts,
+7. verifies whether evidence is grounded in the abstract with strict span validation,
+8. ranks papers with hybrid TF-IDF/API/field relevance, aspect coverage, and transparent scoring,
+9. groups papers into reading roles and generates paper evidence cards,
+10. optionally applies human feedback,
+11. writes CSV, JSON, Markdown outputs, and an agent decision trace.
 
 ## Setup
 
@@ -114,10 +117,15 @@ The UI also supports:
   retrieval, evidence extraction, and ranking. The Queries tab shows the original
   question, translated/planning question, and translation mode.
 - A structured query checkpoint: click `Step 2: Generate Query Plan`, inspect
-  or edit `core_terms`, `must_terms`, `optional_terms`, `exclude_terms`, OpenAlex
-  queries, and Semantic Scholar queries, then click `Step 4: Run Retrieval`.
+  or edit the SearchBrief, `core_terms`, `must_terms`, `optional_terms`,
+  `exclude_terms`, `required_aspects`, OpenAlex queries, and Semantic Scholar
+  queries, then click `Step 4: Run Retrieval`.
   The preview step does not call literature provider APIs, which helps avoid
   spending requests on a search direction that does not match the user's intent.
+- Project-style tabs for `Research Intent`, `Search Strategy`, `Results Map`,
+  `Paper Cards`, `Feedback`, `Report & Export`, `Trace`, and `Metrics`.
+- Aspect coverage tables, grouped result lists, a PRISMA-like screening flow,
+  recommended reading path, and top-paper evidence cards.
 - Search mode controls for strictness, OpenAlex mode, sort preference, and ranking
   profile (`relevance_first`, `balanced`, `high_quality_review`).
 - A collapsible run-status panel shows what the pipeline is doing during
@@ -144,27 +152,45 @@ python -m lit_screening.pipeline run \
 The pipeline writes:
 
 - `outputs/planned_queries.json`
+- `outputs/search_brief.json`
+- `outputs/question_refinement.json`
 - `outputs/raw_openalex_results.json`
 - `outputs/raw_semantic_scholar_results.json`
 - `outputs/merged_papers.csv`
 - `outputs/evidence_table.csv`
+- `outputs/aspect_coverage.csv`
 - `outputs/ranked_papers_before_feedback.csv`
 - `outputs/ranked_papers_after_feedback.csv`, when feedback is provided
 - `outputs/ranked_papers.csv`
 - `outputs/evaluation.json`
 - `outputs/agent_trace.json`
 - `outputs/retrieval_diagnostics.json`
+- `outputs/result_groups.json`
+- `outputs/prisma_like_flow.json`
+- `outputs/paper_cards.md`
+- `outputs/reading_path.md`
 - `outputs/report.md`
 
 Raw cache files are stored under `data/cache/` and ignored by git.
 
-## Query Planning And Scoring
+## Query Planning, Sensemaking, And Scoring
 
-The planner writes a structured `QueryPlan` into `planned_queries.json`, including
-topic terms, provider-specific queries, and search controls. OpenAlex queries use
-quoted multi-word core terms plus boolean-style `AND` / `OR` / `NOT` where useful.
-Semantic Scholar queries use quoted phrases, `+required` terms, `-excluded` terms,
-and OR alternatives.
+The intent agent writes a `SearchBrief` with the refined question, search intent,
+inclusion/exclusion criteria, required aspects, preferred paper types, and a
+success definition. The planner then writes a structured `QueryPlan` into
+`planned_queries.json`, including topic terms, provider-specific queries, and
+search controls. OpenAlex queries use quoted multi-word core terms plus
+boolean-style `AND` / `OR` / `NOT` where useful. Semantic Scholar queries use
+quoted phrases, `+required` terms, `-excluded` terms, and OR alternatives.
+
+After evidence verification, the aspect classifier checks which required aspects
+each paper covers. The report and UI expose:
+
+- aspect coverage records,
+- grouped result lists such as `must_read`, `recent_frontier`, and `background_or_survey`,
+- a recommended reading path,
+- paper evidence cards with suggested include/exclude/uncertain actions,
+- a PRISMA-like screening-flow summary.
 
 Hybrid relevance combines TF-IDF similarities with provider metadata:
 

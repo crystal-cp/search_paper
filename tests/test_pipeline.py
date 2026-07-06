@@ -91,15 +91,27 @@ def test_pipeline_with_fake_retrievers_and_no_internet(tmp_path):
     assert (output_dir / "raw_fake_results.json").exists()
     assert (output_dir / "merged_papers.csv").exists()
     assert (output_dir / "evidence_table.csv").exists()
+    assert (output_dir / "aspect_coverage.csv").exists()
     assert (output_dir / "ranked_papers_before_feedback.csv").exists()
     assert (output_dir / "ranked_papers_after_feedback.csv").exists()
     assert (output_dir / "ranked_papers.csv").exists()
     assert (output_dir / "evaluation.json").exists()
     assert (output_dir / "agent_trace.json").exists()
+    assert (output_dir / "search_brief.json").exists()
+    assert (output_dir / "question_refinement.json").exists()
+    assert (output_dir / "result_groups.json").exists()
+    assert (output_dir / "prisma_like_flow.json").exists()
+    assert (output_dir / "paper_cards.md").exists()
+    assert (output_dir / "reading_path.md").exists()
     assert (output_dir / "retrieval_diagnostics.json").exists()
     assert (output_dir / "report.md").exists()
     assert result.merged_paper_count == 1
     assert result.duplicate_count == result.raw_paper_count - result.merged_paper_count
+    assert result.search_brief is not None
+    assert result.aspect_coverage_records
+    assert result.result_groups
+    assert "research_intent" in result.agent_trace
+    assert "aspect_coverage" in result.agent_trace
     assert result.agent_trace["planner"]["queries"]
 
 
@@ -210,3 +222,25 @@ def test_retrieval_diagnostics_json_is_produced(tmp_path):
     assert diagnostics["merged_count"] == 1
     assert diagnostics["raw_count_per_query"]["fake"]
     assert diagnostics["top_10_score_breakdown"]
+
+
+def test_fake_pipeline_produces_sensemaking_outputs(tmp_path):
+    retriever = RetrieverAgent(clients={"fake": SurfaceMagnetizationFakeClient()})
+
+    result = run_pipeline(
+        question="Give me an overview of the significance of surface magnetization",
+        providers=["fake"],
+        max_per_query=1,
+        output_dir=str(tmp_path / "outputs"),
+        retriever_agent=retriever,
+    )
+
+    output_dir = tmp_path / "outputs"
+    assert result.search_brief.search_intent == "overview"
+    assert result.question_refinement["subquestions"]
+    assert (output_dir / "aspect_coverage.csv").read_text()
+    assert "Surface magnetization" in (output_dir / "paper_cards.md").read_text()
+    assert "Recommended Reading Path" in (output_dir / "reading_path.md").read_text()
+    assert json.loads((output_dir / "prisma_like_flow.json").read_text())[
+        "records_screened"
+    ] == 1

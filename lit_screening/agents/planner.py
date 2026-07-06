@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from lit_screening.llm_client import GenericLLMClient
-from lit_screening.models import QueryPlan
+from lit_screening.models import QueryPlan, SearchBrief
 from lit_screening.utils import STOPWORDS, tokenize
 
 
@@ -314,6 +314,7 @@ class PlannerAgent:
         openalex_mode: str = "keyword+semantic",
         sort_preference: str = "relevance",
         ranking_profile: str = "balanced",
+        search_brief: SearchBrief | None = None,
     ) -> QueryPlan:
         """Return a structured, provider-aware query plan."""
 
@@ -324,6 +325,7 @@ class PlannerAgent:
                 openalex_mode=openalex_mode,
                 sort_preference=sort_preference,
                 ranking_profile=ranking_profile,
+                search_brief=search_brief,
             )
         preprocessing = self._preprocess_question_rule(question)
         plan = self._plan_structured_rule(
@@ -333,6 +335,7 @@ class PlannerAgent:
             openalex_mode=openalex_mode,
             sort_preference=sort_preference,
             ranking_profile=ranking_profile,
+            search_brief=search_brief,
         )
         self.last_llm_metadata = self._metadata(
             preprocessing,
@@ -371,10 +374,11 @@ class PlannerAgent:
         openalex_mode: str,
         sort_preference: str,
         ranking_profile: str,
+        search_brief: SearchBrief | None = None,
     ) -> QueryPlan:
         """Build a topic-aware structured plan without requiring an LLM."""
 
-        planning_question = preprocessing["planning_question"]
+        planning_question = search_brief.refined_question if search_brief else preprocessing["planning_question"]
         detected_language = "zh" if preprocessing["question_language"] == "zh" else "en"
         tokens = tokenize(planning_question)
         candidate_phrases = _extract_candidate_phrases(planning_question)
@@ -390,6 +394,8 @@ class PlannerAgent:
         if strictness == "broad":
             must_count = 1
         must_terms = _unique(core_terms[:must_count], 5)
+        if search_brief:
+            must_terms = _unique([*must_terms, *search_brief.inclusion_criteria[:3]], 8)
 
         topical_optional = [
             token
@@ -400,6 +406,15 @@ class PlannerAgent:
         if ranking_profile == "high_quality_review":
             generic_optional = ["review", "systematic review", "survey", "meta-analysis"]
         optional_terms = _unique([*topical_optional, *generic_optional], 8)
+        if search_brief:
+            optional_terms = _unique(
+                [
+                    *optional_terms,
+                    *search_brief.preferred_paper_types,
+                    *search_brief.required_aspects,
+                ],
+                12,
+            )
 
         if not (set(tokens) & LLM_RELATED_TERMS):
             optional_terms = [
@@ -415,7 +430,14 @@ class PlannerAgent:
             core_terms=core_terms,
             must_terms=must_terms,
             optional_terms=optional_terms,
-            exclude_terms=_extract_exclude_terms(planning_question),
+            exclude_terms=_unique(
+                [
+                    *_extract_exclude_terms(planning_question),
+                    *(search_brief.exclusion_criteria if search_brief else []),
+                ],
+                8,
+            ),
+            required_aspects=(search_brief.required_aspects if search_brief else []),
             filters={
                 "strictness": strictness,
                 "openalex_mode": openalex_mode,
@@ -503,6 +525,7 @@ class PlannerAgent:
         openalex_mode: str,
         sort_preference: str,
         ranking_profile: str,
+        search_brief: SearchBrief | None = None,
     ) -> QueryPlan:
         """Use an LLM to enrich structured query planning, falling back safely."""
 
@@ -542,6 +565,7 @@ class PlannerAgent:
             openalex_mode=openalex_mode,
             sort_preference=sort_preference,
             ranking_profile=ranking_profile,
+            search_brief=search_brief,
         )
         queries = result.data.get("queries")
 
@@ -590,6 +614,7 @@ class PlannerAgent:
             must_terms=must_terms,
             optional_terms=optional_terms,
             exclude_terms=exclude_terms,
+            required_aspects=search_brief.required_aspects if search_brief else rule_plan.required_aspects,
             filters={
                 "strictness": strictness,
                 "openalex_mode": openalex_mode,

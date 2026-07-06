@@ -5,7 +5,14 @@ from __future__ import annotations
 from dataclasses import replace
 
 from lit_screening.dedup import normalize_title
-from lit_screening.models import EvidenceRecord, Paper, QueryPlan, RankedPaper, VerificationResult
+from lit_screening.models import (
+    AspectCoverageRecord,
+    EvidenceRecord,
+    Paper,
+    QueryPlan,
+    RankedPaper,
+    VerificationResult,
+)
 from lit_screening.scoring import score_paper
 
 
@@ -21,11 +28,16 @@ class RankerAgent:
         scoring_weights: dict[str, float] | None = None,
         query_plan: QueryPlan | None = None,
         ranking_profile: str = "balanced",
+        aspect_coverage_records: list[AspectCoverageRecord] | None = None,
     ) -> list[RankedPaper]:
         """Return papers sorted by final score."""
 
         evidence_by_id = {record.paper_id: record for record in evidence_records}
         verification_by_id = {result.paper_id: result for result in verification_results}
+        aspect_by_id = {
+            record.paper_id: record
+            for record in aspect_coverage_records or []
+        }
 
         preliminary: list[RankedPaper] = []
         for paper in papers:
@@ -40,6 +52,10 @@ class RankerAgent:
                 weights=scoring_weights,
                 query_plan=query_plan,
                 ranking_profile=ranking_profile,
+                aspect_coverage_score=aspect_by_id.get(
+                    paper.paper_id,
+                    AspectCoverageRecord(paper.paper_id, paper.title),
+                ).aspect_coverage_score,
             )
             preliminary.append(RankedPaper(0, paper, evidence, verification, scores))
 
@@ -61,6 +77,10 @@ class RankerAgent:
                 weights=scoring_weights,
                 query_plan=query_plan,
                 ranking_profile=ranking_profile,
+                aspect_coverage_score=aspect_by_id.get(
+                    item.paper.paper_id,
+                    AspectCoverageRecord(item.paper.paper_id, item.paper.title),
+                ).aspect_coverage_score,
             )
             reranked.append(replace(item, scores=scores))
 

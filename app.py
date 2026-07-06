@@ -15,7 +15,13 @@ import pandas as pd
 import streamlit as st
 
 from lit_screening.agents.human_feedback import HumanFeedbackAgent
-from lit_screening.models import FeedbackRecord, PipelineResult, QueryPlan, RankedPaper
+from lit_screening.models import (
+    FeedbackRecord,
+    PipelineResult,
+    QueryPlan,
+    RankedPaper,
+    SearchBrief,
+)
 from lit_screening.pipeline import (
     apply_feedback_to_pipeline_result,
     plan_screening_queries,
@@ -60,12 +66,21 @@ WEIGHT_HELP = {
         "zh": "避免结果过度集中在同一 venue 的权重。",
     },
 }
+SEARCH_INTENTS = [
+    "overview",
+    "frontier",
+    "implementation",
+    "evidence_verification",
+    "proposal",
+    "systematic_review",
+]
 PIPELINE_STAGE_PROGRESS = {
     "planning": 5,
     "retrieval": 25,
     "dedup": 45,
     "extraction": 58,
     "verification": 72,
+    "aspect_coverage": 78,
     "ranking": 84,
     "feedback": 88,
     "evaluation": 92,
@@ -78,6 +93,7 @@ PIPELINE_STAGE_LABELS = {
     "dedup": "Metadata merge",
     "extraction": "Evidence extraction",
     "verification": "Evidence grounding",
+    "aspect_coverage": "Aspect coverage",
     "ranking": "Ranking",
     "feedback": "Human feedback",
     "evaluation": "Evaluation",
@@ -178,6 +194,14 @@ def save_project_manifest(
         "ranked_papers_path": result.ranked_papers_path,
         "report_path": result.report_path,
         "evaluation_path": result.evaluation_path,
+        "search_brief_path": str(Path(result.output_dir) / "search_brief.json"),
+        "question_refinement_path": str(Path(result.output_dir) / "question_refinement.json"),
+        "aspect_coverage_path": str(Path(result.output_dir) / "aspect_coverage.csv"),
+        "retrieval_diagnostics_path": str(Path(result.output_dir) / "retrieval_diagnostics.json"),
+        "result_groups_path": str(Path(result.output_dir) / "result_groups.json"),
+        "prisma_like_flow_path": str(Path(result.output_dir) / "prisma_like_flow.json"),
+        "paper_cards_path": str(Path(result.output_dir) / "paper_cards.md"),
+        "reading_path_path": str(Path(result.output_dir) / "reading_path.md"),
         "agent_trace_path": str(Path(result.output_dir) / "agent_trace.json"),
     }
     output_dir = Path(result.output_dir)
@@ -225,6 +249,15 @@ def file_bytes(path: str | Path) -> bytes | None:
     if not candidate.exists():
         return None
     return candidate.read_bytes()
+
+
+def file_text(path: str | Path) -> str:
+    """Read a text artifact if it exists."""
+
+    candidate = Path(path)
+    if not candidate.exists():
+        return ""
+    return candidate.read_text(encoding="utf-8")
 
 
 def read_json_file(path: str | Path) -> dict[str, Any]:
@@ -484,8 +517,17 @@ def ensure_state() -> None:
     st.session_state.setdefault("must_terms_text", "")
     st.session_state.setdefault("optional_terms_text", "")
     st.session_state.setdefault("exclude_terms_text", "")
+    st.session_state.setdefault("required_aspects_text", "")
     st.session_state.setdefault("openalex_queries_text", "")
     st.session_state.setdefault("semantic_scholar_queries_text", "")
+    st.session_state.setdefault("refined_question_text", "")
+    st.session_state.setdefault("search_intent_value", "overview")
+    st.session_state.setdefault("user_goal_text", "")
+    st.session_state.setdefault("inclusion_criteria_text", "")
+    st.session_state.setdefault("exclusion_criteria_text", "")
+    st.session_state.setdefault("preferred_paper_types_text", "")
+    st.session_state.setdefault("time_window_text", "")
+    st.session_state.setdefault("success_definition_text", "")
 
 
 def query_preview_signature(question: str, settings: dict[str, Any]) -> dict[str, Any]:
@@ -500,6 +542,51 @@ def query_preview_signature(question: str, settings: dict[str, Any]) -> dict[str
         "sort_preference": settings["sort_preference"],
         "ranking_profile": settings["ranking_profile"],
     }
+
+
+def preview_search_brief(preview: dict[str, Any], question: str = "") -> SearchBrief:
+    """Return a SearchBrief object from a preview payload."""
+
+    value = preview.get("search_brief")
+    if isinstance(value, SearchBrief):
+        return value
+    data = value or {}
+    return SearchBrief(
+        original_question=data.get("original_question", preview.get("question", question)),
+        refined_question=data.get("refined_question", preview.get("planning_question", question)),
+        search_intent=data.get("search_intent", "overview"),
+        user_goal=data.get("user_goal", ""),
+        inclusion_criteria=list(data.get("inclusion_criteria", [])),
+        exclusion_criteria=list(data.get("exclusion_criteria", [])),
+        required_aspects=list(data.get("required_aspects", [])),
+        preferred_paper_types=list(data.get("preferred_paper_types", [])),
+        time_window=data.get("time_window", ""),
+        success_definition=data.get("success_definition", ""),
+    )
+
+
+def edited_search_brief(preview: dict[str, Any], question: str) -> SearchBrief:
+    """Build a SearchBrief from the editable UI fields."""
+
+    base = preview_search_brief(preview, question)
+    return SearchBrief(
+        original_question=base.original_question or question,
+        refined_question=" ".join(st.session_state.refined_question_text.split())
+        or base.refined_question
+        or question,
+        search_intent=st.session_state.search_intent_value
+        if st.session_state.search_intent_value in SEARCH_INTENTS
+        else base.search_intent,
+        user_goal=" ".join(st.session_state.user_goal_text.split()) or base.user_goal,
+        inclusion_criteria=parse_query_editor_text(st.session_state.inclusion_criteria_text),
+        exclusion_criteria=parse_query_editor_text(st.session_state.exclusion_criteria_text),
+        required_aspects=parse_query_editor_text(st.session_state.required_aspects_text),
+        preferred_paper_types=parse_query_editor_text(
+            st.session_state.preferred_paper_types_text
+        ),
+        time_window=" ".join(st.session_state.time_window_text.split()),
+        success_definition=" ".join(st.session_state.success_definition_text.split()),
+    )
 
 
 def generate_query_preview(question: str, settings: dict[str, Any]) -> None:
@@ -518,11 +605,29 @@ def generate_query_preview(question: str, settings: dict[str, Any]) -> None:
     st.session_state.query_preview = plan
     st.session_state.query_preview_signature = query_preview_signature(question, settings)
     st.session_state.query_editor_text = "\n".join(plan["queries"])
+    search_brief = preview_search_brief(plan, question)
+    st.session_state.refined_question_text = search_brief.refined_question
+    st.session_state.search_intent_value = (
+        search_brief.search_intent
+        if search_brief.search_intent in SEARCH_INTENTS
+        else "overview"
+    )
+    st.session_state.user_goal_text = search_brief.user_goal
+    st.session_state.inclusion_criteria_text = "\n".join(search_brief.inclusion_criteria)
+    st.session_state.exclusion_criteria_text = "\n".join(search_brief.exclusion_criteria)
+    st.session_state.required_aspects_text = "\n".join(search_brief.required_aspects)
+    st.session_state.preferred_paper_types_text = "\n".join(
+        search_brief.preferred_paper_types
+    )
+    st.session_state.time_window_text = search_brief.time_window
+    st.session_state.success_definition_text = search_brief.success_definition
     query_plan = plan["query_plan"]
     st.session_state.core_terms_text = "\n".join(query_plan.core_terms)
     st.session_state.must_terms_text = "\n".join(query_plan.must_terms)
     st.session_state.optional_terms_text = "\n".join(query_plan.optional_terms)
     st.session_state.exclude_terms_text = "\n".join(query_plan.exclude_terms)
+    if not st.session_state.required_aspects_text:
+        st.session_state.required_aspects_text = "\n".join(query_plan.required_aspects)
     st.session_state.openalex_queries_text = "\n".join(query_plan.openalex_queries)
     st.session_state.semantic_scholar_queries_text = "\n".join(
         query_plan.semantic_scholar_queries
@@ -557,6 +662,7 @@ def preview_query_plan(preview: dict[str, Any]) -> QueryPlan:
         must_terms=list(value.get("must_terms", [])),
         optional_terms=list(value.get("optional_terms", [])),
         exclude_terms=list(value.get("exclude_terms", [])),
+        required_aspects=list(value.get("required_aspects", [])),
         openalex_queries=list(value.get("openalex_queries", [])),
         semantic_scholar_queries=list(value.get("semantic_scholar_queries", [])),
         filters=dict(value.get("filters", {})),
@@ -570,11 +676,13 @@ def edited_query_plan(preview: dict[str, Any], settings: dict[str, Any]) -> Quer
     return QueryPlan(
         original_question=base.original_question,
         detected_language=base.detected_language,
-        translated_question=base.translated_question,
+        translated_question=" ".join(st.session_state.refined_question_text.split())
+        or base.translated_question,
         core_terms=parse_query_editor_text(st.session_state.core_terms_text),
         must_terms=parse_query_editor_text(st.session_state.must_terms_text),
         optional_terms=parse_query_editor_text(st.session_state.optional_terms_text),
         exclude_terms=parse_query_editor_text(st.session_state.exclude_terms_text),
+        required_aspects=parse_query_editor_text(st.session_state.required_aspects_text),
         openalex_queries=parse_query_editor_text(st.session_state.openalex_queries_text),
         semantic_scholar_queries=parse_query_editor_text(
             st.session_state.semantic_scholar_queries_text
@@ -594,6 +702,7 @@ def run_screening(
     settings: dict[str, Any],
     planned_queries: list[str] | None = None,
     query_plan: QueryPlan | None = None,
+    search_brief: SearchBrief | None = None,
     planner_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Run the core pipeline and store the result in session state."""
@@ -629,6 +738,7 @@ def run_screening(
                 extractor_mode=settings["extractor_mode"],
                 verifier_mode=settings["verifier_mode"],
                 scoring_weights=settings["scoring_weights"],
+                search_brief_override=search_brief,
                 planned_queries_override=planned_queries,
                 query_plan_override=query_plan,
                 planner_metadata_override=planner_metadata,
@@ -910,6 +1020,93 @@ def render_query_preview_editor(
         preview.get("planner_metadata", {}),
         language,
     )
+    with st.expander(
+        ui_text(language, "Research Intent And Inclusion Logic", "研究意图与纳入逻辑"),
+        expanded=True,
+    ):
+        st.text_area(
+            ui_text(language, "Refined English question", "英文 refined question"),
+            key="refined_question_text",
+            height=90,
+            help=ui_text(
+                language,
+                "This English question is used by retrieval, extraction, and ranking.",
+                "系统会用这个英文问题进行检索、evidence 抽取和排序。",
+            ),
+        )
+        intent_cols = st.columns(3)
+        with intent_cols[0]:
+            st.selectbox(
+                ui_text(language, "Search intent", "搜索意图"),
+                SEARCH_INTENTS,
+                key="search_intent_value",
+                help=ui_text(
+                    language,
+                    "Controls preferred paper types, aspects, and ranking emphasis.",
+                    "影响偏好的论文类型、required aspects 和排序侧重点。",
+                ),
+            )
+        with intent_cols[1]:
+            st.text_input(
+                ui_text(language, "Time window", "时间窗口"),
+                key="time_window_text",
+            )
+        with intent_cols[2]:
+            st.text_input(
+                ui_text(language, "User goal", "用户目标"),
+                key="user_goal_text",
+            )
+        logic_cols = st.columns(4)
+        with logic_cols[0]:
+            st.text_area(
+                "inclusion_criteria",
+                key="inclusion_criteria_text",
+                height=130,
+                help=ui_text(
+                    language,
+                    "One criterion per line. These become required or high-priority query terms.",
+                    "每行一条。系统会把它们作为高优先级检索条件。",
+                ),
+            )
+        with logic_cols[1]:
+            st.text_area(
+                "exclusion_criteria",
+                key="exclusion_criteria_text",
+                height=130,
+                help=ui_text(
+                    language,
+                    "One exclusion per line. These become provider-specific negative terms when possible.",
+                    "每行一条。系统会尽量转换成数据源支持的排除词。",
+                ),
+            )
+        with logic_cols[2]:
+            st.text_area(
+                "required_aspects",
+                key="required_aspects_text",
+                height=130,
+                help=ui_text(
+                    language,
+                    "Aspects that each paper should cover. These are used by aspect coverage and ranking.",
+                    "论文最好覆盖的方面，会用于 aspect coverage 和排序。",
+                ),
+            )
+        with logic_cols[3]:
+            st.text_area(
+                "preferred_paper_types",
+                key="preferred_paper_types_text",
+                height=130,
+                help=ui_text(
+                    language,
+                    "Preferred literature types, such as review, method paper, benchmark paper.",
+                    "偏好的论文类型，例如 review、method paper、benchmark paper。",
+                ),
+            )
+        st.text_area(
+            ui_text(language, "Success definition", "成功标准"),
+            key="success_definition_text",
+            height=70,
+        )
+
     term_cols = st.columns(4)
     with term_cols[0]:
         st.text_area("core_terms", key="core_terms_text", height=140)
@@ -980,6 +1177,83 @@ def render_downloads(ranked_path: str, report_path: str, language: str) -> None:
             )
 
 
+def render_search_brief_result(result: PipelineResult, language: str) -> None:
+    """Render the intent-level interpretation used by the pipeline."""
+
+    brief = result.search_brief
+    if brief is None:
+        st.info(ui_text(language, "No SearchBrief was saved for this run.", "此运行没有保存 SearchBrief。"))
+        return
+    rows = [
+        ("refined_question", brief.refined_question),
+        ("search_intent", brief.search_intent),
+        ("user_goal", brief.user_goal),
+        ("inclusion_criteria", "; ".join(brief.inclusion_criteria)),
+        ("exclusion_criteria", "; ".join(brief.exclusion_criteria)),
+        ("required_aspects", "; ".join(brief.required_aspects)),
+        ("preferred_paper_types", "; ".join(brief.preferred_paper_types)),
+        ("time_window", brief.time_window),
+        ("success_definition", brief.success_definition),
+    ]
+    st.dataframe(
+        pd.DataFrame(rows, columns=["field", "value"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+    if result.question_refinement:
+        st.subheader(ui_text(language, "Refined Subquestions", "细化子问题"))
+        subquestions = result.question_refinement.get("subquestions", [])
+        if subquestions:
+            for item in subquestions:
+                st.markdown(f"- {item}")
+        else:
+            st.caption(ui_text(language, "No subquestions were needed.", "无需拆分子问题。"))
+
+
+def render_aspect_coverage(result: PipelineResult, language: str) -> None:
+    """Render aspect coverage records as a matrix-like table."""
+
+    if not result.aspect_coverage_records:
+        st.info(ui_text(language, "No aspect coverage records were generated.", "没有生成 aspect coverage 记录。"))
+        return
+    rows = [
+        {
+            "paper_id": record.paper_id,
+            "title": record.title,
+            "covered_aspects": "; ".join(record.covered_aspects),
+            "missing_aspects": "; ".join(record.missing_aspects),
+            "aspect_coverage_score": record.aspect_coverage_score,
+        }
+        for record in result.aspect_coverage_records
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def render_result_groups(result: PipelineResult, language: str) -> None:
+    """Render grouped result lists."""
+
+    groups = result.result_groups or {}
+    if not groups:
+        st.info(ui_text(language, "No grouped results were generated.", "没有生成结果分组。"))
+        return
+    for group_name, rows in groups.items():
+        with st.expander(f"{group_name} ({len(rows)})", expanded=group_name == "must_read"):
+            if rows:
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            else:
+                st.caption(ui_text(language, "No papers in this group.", "这个分组没有论文。"))
+
+
+def render_markdown_artifact(path: str | Path, empty_message: str) -> None:
+    """Render a generated Markdown artifact."""
+
+    text = file_text(path)
+    if text:
+        st.markdown(text)
+    else:
+        st.info(empty_message)
+
+
 def render_result(result: PipelineResult, language: str) -> None:
     """Render active project results."""
 
@@ -996,13 +1270,64 @@ def render_result(result: PipelineResult, language: str) -> None:
         result.evaluation_metrics.get("weak_support_count", 0),
     )
 
-    tabs = st.tabs(["Queries", "Ranked Papers", "Evidence", "Feedback", "Trace", "Metrics"])
+    selected: RankedPaper | None = None
+    if result.ranked_final:
+        options = {
+            f"{item.rank}. {item.paper.title[:100]}": item
+            for item in result.ranked_final
+        }
+        selected_label = st.selectbox(
+            ui_text(language, "Selected paper", "选择论文"),
+            list(options),
+        )
+        selected = options[selected_label]
+
+    tabs = st.tabs(
+        [
+            "Research Intent",
+            "Search Strategy",
+            "Ranked Papers",
+            "Evidence Chain",
+            "Results Map",
+            "Paper Cards",
+            "Feedback",
+            "Report & Export",
+            "Trace",
+            "Metrics",
+        ]
+    )
     with tabs[0]:
-        planner_metadata = result.agent_trace.get("planner", {}).get("metadata", {})
-        render_question_preprocessing(result.question, planner_metadata, language)
-        render_planned_queries(result.planned_queries)
+        render_search_brief_result(result, language)
 
     with tabs[1]:
+        planner_metadata = result.agent_trace.get("planner", {}).get("metadata", {})
+        render_question_preprocessing(result.question, planner_metadata, language)
+        if result.query_plan:
+            st.subheader(ui_text(language, "Structured Query Plan", "结构化 Query Plan"))
+            plan_rows = [
+                ("core_terms", "; ".join(result.query_plan.core_terms)),
+                ("must_terms", "; ".join(result.query_plan.must_terms)),
+                ("optional_terms", "; ".join(result.query_plan.optional_terms)),
+                ("exclude_terms", "; ".join(result.query_plan.exclude_terms)),
+                ("required_aspects", "; ".join(result.query_plan.required_aspects)),
+                ("filters", json.dumps(result.query_plan.filters, ensure_ascii=False)),
+            ]
+            st.dataframe(
+                pd.DataFrame(plan_rows, columns=["field", "value"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+            query_cols = st.columns(2)
+            with query_cols[0]:
+                st.caption("OpenAlex")
+                render_planned_queries(result.query_plan.openalex_queries)
+            with query_cols[1]:
+                st.caption("Semantic Scholar")
+                render_planned_queries(result.query_plan.semantic_scholar_queries)
+        st.subheader(ui_text(language, "Combined Planned Queries", "合并后的 Planned Queries"))
+        render_planned_queries(result.planned_queries)
+
+    with tabs[2]:
         if result.merged_paper_count == 0:
             st.warning(
                 ui_text(
@@ -1013,18 +1338,8 @@ def render_result(result: PipelineResult, language: str) -> None:
             )
         table = ranked_dataframe(result.ranked_final)
         st.dataframe(table, use_container_width=True, hide_index=True)
-        render_downloads(result.ranked_papers_path, result.report_path, language)
 
-    selected: RankedPaper | None = None
-    if result.ranked_final:
-        options = {
-            f"{item.rank}. {item.paper.title[:100]}": item
-            for item in result.ranked_final
-        }
-        selected_label = st.selectbox(ui_text(language, "Selected paper", "选择论文"), list(options))
-        selected = options[selected_label]
-
-    with tabs[2]:
+    with tabs[3]:
         if selected is None:
             st.info(ui_text(language, "Run a screening project and select a paper to inspect evidence.", "先运行一个筛选项目，并选择一篇论文查看 evidence。"))
         else:
@@ -1047,15 +1362,53 @@ def render_result(result: PipelineResult, language: str) -> None:
             )
             st.dataframe(evidence_table, use_container_width=True, hide_index=True)
 
-    with tabs[3]:
+    with tabs[4]:
+        st.subheader(ui_text(language, "Aspect Coverage Matrix", "Aspect Coverage 矩阵"))
+        render_aspect_coverage(result, language)
+        st.subheader(ui_text(language, "Grouped Result Lists", "结果分组"))
+        render_result_groups(result, language)
+        st.subheader(ui_text(language, "PRISMA-like Screening Flow", "PRISMA-like 筛选流程"))
+        st.json(result.evaluation_metrics.get("prisma_like_flow", {}))
+
+    with tabs[5]:
+        st.subheader(ui_text(language, "Recommended Reading Path", "推荐阅读路径"))
+        render_markdown_artifact(
+            Path(result.output_dir) / "reading_path.md",
+            ui_text(language, "reading_path.md was not generated.", "没有生成 reading_path.md。"),
+        )
+        st.subheader(ui_text(language, "Top Paper Evidence Cards", "Top Paper Evidence Cards"))
+        render_markdown_artifact(
+            Path(result.output_dir) / "paper_cards.md",
+            ui_text(language, "paper_cards.md was not generated.", "没有生成 paper_cards.md。"),
+        )
+
+    with tabs[6]:
         render_feedback_tools(result, language)
         if selected is not None:
             render_manual_feedback(selected, result, language)
 
-    with tabs[4]:
+    with tabs[7]:
+        render_downloads(result.ranked_papers_path, result.report_path, language)
+        extra_artifacts = [
+            ("aspect_coverage.csv", Path(result.output_dir) / "aspect_coverage.csv", "text/csv"),
+            ("retrieval_diagnostics.json", Path(result.output_dir) / "retrieval_diagnostics.json", "application/json"),
+            ("paper_cards.md", Path(result.output_dir) / "paper_cards.md", "text/markdown"),
+            ("reading_path.md", Path(result.output_dir) / "reading_path.md", "text/markdown"),
+        ]
+        for file_name, path, mime in extra_artifacts:
+            data = file_bytes(path)
+            if data is not None:
+                st.download_button(
+                    file_name,
+                    data=data,
+                    file_name=file_name,
+                    mime=mime,
+                )
+
+    with tabs[8]:
         st.json(result.agent_trace)
 
-    with tabs[5]:
+    with tabs[9]:
         st.json(result.evaluation_metrics)
 
 
@@ -1071,23 +1424,84 @@ def render_saved_project(manifest: dict[str, Any], language: str) -> None:
     ranked_path = output_dir / "ranked_papers.csv"
     evaluation = read_json_file(output_dir / "evaluation.json")
     trace = read_json_file(output_dir / "agent_trace.json")
+    search_brief = read_json_file(output_dir / "search_brief.json")
+    question_refinement = read_json_file(output_dir / "question_refinement.json")
+    result_groups = read_json_file(output_dir / "result_groups.json")
+    prisma_flow = read_json_file(output_dir / "prisma_like_flow.json")
 
-    tabs = st.tabs(["Queries", "Ranked Papers", "Trace", "Metrics", "Downloads"])
+    tabs = st.tabs(
+        [
+            "Research Intent",
+            "Search Strategy",
+            "Ranked Papers",
+            "Results Map",
+            "Paper Cards",
+            "Report & Export",
+            "Trace",
+            "Metrics",
+        ]
+    )
     with tabs[0]:
+        if search_brief:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        ("refined_question", search_brief.get("refined_question", "")),
+                        ("search_intent", search_brief.get("search_intent", "")),
+                        ("user_goal", search_brief.get("user_goal", "")),
+                        (
+                            "inclusion_criteria",
+                            "; ".join(search_brief.get("inclusion_criteria", [])),
+                        ),
+                        (
+                            "exclusion_criteria",
+                            "; ".join(search_brief.get("exclusion_criteria", [])),
+                        ),
+                        (
+                            "required_aspects",
+                            "; ".join(search_brief.get("required_aspects", [])),
+                        ),
+                    ],
+                    columns=["field", "value"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        if question_refinement:
+            st.json(question_refinement)
+
+    with tabs[1]:
         metadata = planned.get("planner_metadata") or planned.get("llm", {})
         render_question_preprocessing(planned.get("question", ""), metadata, language)
         render_planned_queries(planned.get("queries", []))
-    with tabs[1]:
+    with tabs[2]:
         if ranked_path.exists():
             st.dataframe(pd.read_csv(ranked_path), use_container_width=True)
         else:
             st.warning(ui_text(language, "Saved ranked_papers.csv is missing.", "保存的 ranked_papers.csv 不存在。"))
-    with tabs[2]:
-        st.json(trace)
     with tabs[3]:
-        st.json(evaluation)
+        aspect_path = output_dir / "aspect_coverage.csv"
+        if aspect_path.exists():
+            st.dataframe(pd.read_csv(aspect_path), use_container_width=True)
+        st.subheader(ui_text(language, "Grouped Result Lists", "结果分组"))
+        st.json(result_groups)
+        st.subheader(ui_text(language, "PRISMA-like Screening Flow", "PRISMA-like 筛选流程"))
+        st.json(prisma_flow)
     with tabs[4]:
+        render_markdown_artifact(
+            output_dir / "reading_path.md",
+            ui_text(language, "reading_path.md was not generated.", "没有生成 reading_path.md。"),
+        )
+        render_markdown_artifact(
+            output_dir / "paper_cards.md",
+            ui_text(language, "paper_cards.md was not generated.", "没有生成 paper_cards.md。"),
+        )
+    with tabs[5]:
         render_downloads(str(ranked_path), str(output_dir / "report.md"), language)
+    with tabs[6]:
+        st.json(trace)
+    with tabs[7]:
+        st.json(evaluation)
 
 
 def main() -> None:
@@ -1150,10 +1564,12 @@ def main() -> None:
             try:
                 preview = st.session_state.query_preview or {}
                 current_query_plan = edited_query_plan(preview, settings)
+                current_search_brief = edited_search_brief(preview, cleaned_question)
                 run_screening(
                     cleaned_question,
                     settings,
                     query_plan=current_query_plan,
+                    search_brief=current_search_brief,
                     planner_metadata=preview.get("planner_metadata", {}),
                 )
             except Exception as exc:

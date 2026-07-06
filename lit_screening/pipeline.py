@@ -7,10 +7,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
+from .agents.aspect_classifier import AspectCoverageAgent
 from .agents.extractor import ExtractorAgent
 from .agents.human_feedback import HumanFeedbackAgent
 from .agents.planner import PlannerAgent
+from .agents.question_refiner import QuestionRefinementAgent
 from .agents.ranker import RankerAgent
+from .agents.research_intent import ResearchIntentAgent
 from .agents.retriever import RetrieverAgent
 from .agents.verifier import VerifierAgent
 from .config import PipelineConfig
@@ -18,16 +21,22 @@ from .dedup import deduplicate_with_stats
 from .evaluation import compute_evaluation, save_evaluation
 from .llm_client import GenericLLMClient
 from .models import (
+    AspectCoverageRecord,
     EvidenceRecord,
     FeedbackRecord,
     Paper,
     PipelineResult,
     QueryPlan,
     RankedPaper,
+    SearchBrief,
     VerificationResult,
 )
+from .paper_cards import generate_paper_cards
+from .reading_path import generate_reading_path
 from .report import generate_report
+from .result_groups import group_ranked_papers
 from .scoring import sanitize_score_weights
+from .screening_flow import build_prisma_like_flow
 from .utils import ensure_dir, write_csv, write_json
 
 
@@ -87,6 +96,7 @@ RANKED_FIELDS = [
     "recency_score",
     "quality_score",
     "diversity_score",
+    "aspect_coverage_score",
     "human_feedback_adjustment",
     "final_score",
     "supported",
@@ -111,6 +121,14 @@ RANKED_FIELDS = [
     "verification_llm_used",
     "verification_invalid_llm_output",
     "verification_llm_error_type",
+]
+
+ASPECT_COVERAGE_FIELDS = [
+    "paper_id",
+    "title",
+    "covered_aspects",
+    "missing_aspects",
+    "aspect_coverage_score",
 ]
 
 
@@ -185,6 +203,7 @@ def ranked_to_row(item: RankedPaper) -> dict[str, Any]:
         "recency_score": f"{item.scores.recency_score:.4f}",
         "quality_score": f"{item.scores.quality_score:.4f}",
         "diversity_score": f"{item.scores.diversity_score:.4f}",
+        "aspect_coverage_score": f"{item.scores.aspect_coverage_score:.4f}",
         "human_feedback_adjustment": f"{item.scores.human_feedback_adjustment:.4f}",
         "final_score": f"{item.scores.final_score:.4f}",
         "supported": item.verification.supported,
@@ -209,6 +228,18 @@ def ranked_to_row(item: RankedPaper) -> dict[str, Any]:
         "verification_llm_used": item.verification.llm_used,
         "verification_invalid_llm_output": item.verification.invalid_llm_output,
         "verification_llm_error_type": item.verification.llm_error_type,
+    }
+
+
+def aspect_coverage_to_row(record: AspectCoverageRecord) -> dict[str, Any]:
+    """Convert an AspectCoverageRecord into a CSV row."""
+
+    return {
+        "paper_id": record.paper_id,
+        "title": record.title,
+        "covered_aspects": "; ".join(record.covered_aspects),
+        "missing_aspects": "; ".join(record.missing_aspects),
+        "aspect_coverage_score": f"{record.aspect_coverage_score:.4f}",
     }
 
 
@@ -240,6 +271,7 @@ def write_pipeline_csvs(
     merged_papers: list[Paper],
     evidence_records: list[EvidenceRecord],
     verification_results: list[VerificationResult],
+    aspect_coverage_records: list[AspectCoverageRecord],
     ranked_before_feedback: list[RankedPaper],
     ranked_final: list[RankedPaper],
     ranked_after_feedback: list[RankedPaper] | None,
@@ -260,6 +292,11 @@ def write_pipeline_csvs(
             if record.paper_id in verification_by_id
         ],
         EVIDENCE_FIELDS,
+    )
+    write_csv(
+        output_dir / "aspect_coverage.csv",
+        [aspect_coverage_to_row(record) for record in aspect_coverage_records],
+        ASPECT_COVERAGE_FIELDS,
     )
     write_csv(
         output_dir / "ranked_papers_before_feedback.csv",
@@ -316,6 +353,8 @@ def build_agent_trace(
     planning_question: str,
     queries: list[str],
     query_plan: QueryPlan | None,
+    search_brief: SearchBrief | None,
+    question_refinement: dict[str, Any] | None,
     planner_metadata: dict[str, Any],
     retrieval_counts: dict[str, int],
     raw_paper_count: int,
@@ -323,8 +362,10 @@ def build_agent_trace(
     duplicate_count: int,
     evidence_records: list[EvidenceRecord],
     verification_results: list[VerificationResult],
+    aspect_coverage_records: list[AspectCoverageRecord],
     ranked_papers: list[RankedPaper],
     scoring_weights: dict[str, float],
+    result_groups: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an inspectable trace of agent decisions for demos and audits."""
 
@@ -332,6 +373,14 @@ def build_agent_trace(
     return {
         "question": question,
         "planning_question": planning_question,
+        "research_intent": {
+            "search_brief": search_brief,
+            "decision": "Interpreted the user's search goal before query planning.",
+        },
+        "question_refiner": {
+            "refinement": question_refinement or {},
+            "decision": "Flagged broad or mixed questions and suggested subquestions.",
+        },
         "planner": {
             "queries": queries,
             "query_plan": query_plan,
@@ -377,6 +426,16 @@ def build_agent_trace(
             }
             for result in verification_results
         ],
+        "aspect_coverage": [
+            {
+                "paper_id": record.paper_id,
+                "title": record.title,
+                "covered_aspects": record.covered_aspects,
+                "missing_aspects": record.missing_aspects,
+                "aspect_coverage_score": record.aspect_coverage_score,
+            }
+            for record in aspect_coverage_records[:50]
+        ],
         "ranker": [
             {
                 "rank": item.rank,
@@ -395,6 +454,9 @@ def build_agent_trace(
             }
             for item in ranked_papers[:50]
         ],
+        "result_groups": {
+            name: len(rows) for name, rows in (result_groups or {}).items()
+        },
         "scoring_weights": scoring_weights,
     }
 
@@ -423,10 +485,37 @@ def apply_feedback_to_pipeline_result(
         gold_labels_path=gold_labels_path,
     )
     metrics["duplicate_count"] = result.duplicate_count
+    metrics["query_controls"] = result.evaluation_metrics.get("query_controls", {})
+    metrics["search_intent"] = (
+        result.search_brief.search_intent if result.search_brief else result.evaluation_metrics.get("search_intent", "")
+    )
+    metrics["average_aspect_coverage"] = (
+        sum(record.aspect_coverage_score for record in result.aspect_coverage_records)
+        / len(result.aspect_coverage_records)
+        if result.aspect_coverage_records
+        else 0.0
+    )
     if "llm" in result.evaluation_metrics:
         metrics["llm"] = result.evaluation_metrics["llm"]
     metrics["scoring_weights"] = result.scoring_weights
+    result_groups = group_ranked_papers(
+        ranked_after_feedback,
+        result.aspect_coverage_records,
+        result.search_brief,
+    )
+    prisma_like_flow = build_prisma_like_flow(
+        retrieval_counts=result.retrieval_counts,
+        raw_paper_count=result.raw_paper_count,
+        merged_papers=result.merged_papers,
+        duplicate_count=result.duplicate_count,
+        verification_results=result.verification_results,
+        ranked_papers=ranked_after_feedback,
+    )
+    metrics["prisma_like_flow"] = prisma_like_flow
     trace = dict(result.agent_trace)
+    trace["result_groups"] = {
+        name: len(rows) for name, rows in result_groups.items()
+    }
     trace["feedback"] = [
         {
             "paper_id": record.paper_id,
@@ -440,11 +529,24 @@ def apply_feedback_to_pipeline_result(
     output_dir = Path(result.output_dir)
     save_evaluation(output_dir / "evaluation.json", metrics)
     write_json(output_dir / "agent_trace.json", trace)
+    write_json(output_dir / "result_groups.json", result_groups)
+    write_json(output_dir / "prisma_like_flow.json", prisma_like_flow)
+    generate_paper_cards(
+        output_dir / "paper_cards.md",
+        ranked_after_feedback,
+        result.aspect_coverage_records,
+    )
+    generate_reading_path(
+        output_dir / "reading_path.md",
+        ranked_after_feedback,
+        result_groups,
+    )
     write_pipeline_csvs(
         output_dir,
         result.merged_papers,
         result.evidence_records,
         result.verification_results,
+        result.aspect_coverage_records,
         result.ranked_before_feedback,
         ranked_after_feedback,
         ranked_after_feedback,
@@ -458,6 +560,14 @@ def apply_feedback_to_pipeline_result(
         evidence_records=result.evidence_records,
         evaluation_metrics=metrics,
         feedback_applied=bool(feedback_records),
+        search_brief=result.search_brief,
+        question_refinement=result.question_refinement,
+        query_plan=result.query_plan,
+        aspect_coverage_records=result.aspect_coverage_records,
+        result_groups=result_groups,
+        reading_path_path=output_dir / "reading_path.md",
+        paper_cards_path=output_dir / "paper_cards.md",
+        prisma_like_flow=prisma_like_flow,
     )
 
     return replace(
@@ -466,6 +576,7 @@ def apply_feedback_to_pipeline_result(
         ranked_final=ranked_after_feedback,
         evaluation_metrics=metrics,
         agent_trace=trace,
+        result_groups=result_groups,
     )
 
 
@@ -532,9 +643,39 @@ def _coerce_query_plan(value: QueryPlan | dict[str, Any] | None) -> QueryPlan | 
         must_terms=list(data.get("must_terms", [])),
         optional_terms=list(data.get("optional_terms", [])),
         exclude_terms=list(data.get("exclude_terms", [])),
+        required_aspects=list(data.get("required_aspects", [])),
         openalex_queries=list(data.get("openalex_queries", [])),
         semantic_scholar_queries=list(data.get("semantic_scholar_queries", [])),
         filters=dict(data.get("filters", {})),
+    )
+
+
+def _coerce_search_brief(
+    value: SearchBrief | dict[str, Any] | None,
+    fallback_question: str,
+) -> SearchBrief | None:
+    """Convert UI/API search-brief payloads back into a SearchBrief dataclass."""
+
+    if value is None:
+        return None
+    if isinstance(value, SearchBrief):
+        return value
+    data = value.get("search_brief", value)
+    return SearchBrief(
+        original_question=str(data.get("original_question") or fallback_question),
+        refined_question=str(
+            data.get("refined_question")
+            or data.get("translated_question")
+            or fallback_question
+        ),
+        search_intent=str(data.get("search_intent") or "overview"),
+        user_goal=str(data.get("user_goal") or "Find papers aligned with the research question."),
+        inclusion_criteria=list(data.get("inclusion_criteria", [])),
+        exclusion_criteria=list(data.get("exclusion_criteria", [])),
+        required_aspects=list(data.get("required_aspects", [])),
+        preferred_paper_types=list(data.get("preferred_paper_types", [])),
+        time_window=str(data.get("time_window") or ""),
+        success_definition=str(data.get("success_definition") or ""),
     )
 
 
@@ -574,6 +715,7 @@ def _make_query_plan(
     openalex_mode: str = "keyword+semantic",
     sort_preference: str = "relevance",
     ranking_profile: str = "balanced",
+    search_brief: Any | None = None,
 ) -> dict[str, Any]:
     """Run the planner and return a structured query plan."""
 
@@ -584,6 +726,7 @@ def _make_query_plan(
         openalex_mode=openalex_mode,
         sort_preference=sort_preference,
         ranking_profile=ranking_profile,
+        search_brief=search_brief,
     )
     return _query_plan_payload(question, query_plan, planner.last_llm_metadata)
 
@@ -606,7 +749,12 @@ def plan_screening_queries(
 
     config = PipelineConfig(llm_backend=llm_backend)
     active_llm_client = build_llm_client(config, llm_backend, llm_client)
-    return _make_query_plan(
+    search_brief = ResearchIntentAgent(
+        mode=planner_mode,
+        llm_client=active_llm_client,
+    ).analyze(question)
+    refinement = QuestionRefinementAgent().refine(question, search_brief)
+    payload = _make_query_plan(
         question,
         planner_mode,
         active_llm_client,
@@ -614,7 +762,11 @@ def plan_screening_queries(
         openalex_mode=openalex_mode,
         sort_preference=sort_preference,
         ranking_profile=ranking_profile,
+        search_brief=search_brief,
     )
+    payload["search_brief"] = search_brief
+    payload["question_refinement"] = refinement
+    return payload
 
 
 def _queries_by_provider(
@@ -722,6 +874,7 @@ def run_pipeline(
     extractor_mode: str = "rule",
     verifier_mode: str = "rule",
     scoring_weights: dict[str, float] | None = None,
+    search_brief_override: SearchBrief | dict[str, Any] | None = None,
     planned_queries_override: list[str] | None = None,
     query_plan_override: QueryPlan | dict[str, Any] | None = None,
     planner_metadata_override: dict[str, Any] | None = None,
@@ -752,6 +905,15 @@ def run_pipeline(
         scoring_weights,
         ranking_profile=ranking_profile,
     )
+    search_brief = _coerce_search_brief(search_brief_override, question)
+    if search_brief is None:
+        search_brief = ResearchIntentAgent(
+            mode=planner_mode,
+            llm_client=active_llm_client,
+        ).analyze(question)
+    question_refinement = QuestionRefinementAgent().refine(question, search_brief)
+    write_json(out / "search_brief.json", search_brief)
+    write_json(out / "question_refinement.json", question_refinement)
 
     if progress_callback:
         progress_callback(
@@ -773,6 +935,7 @@ def run_pipeline(
             openalex_mode=openalex_mode,
             sort_preference=sort_preference,
             ranking_profile=ranking_profile,
+            search_brief=search_brief,
         )
     else:
         planner_metadata = _manual_planner_metadata(
@@ -793,6 +956,7 @@ def run_pipeline(
                 if planner_metadata.get("question_language") == "zh"
                 else "en",
                 translated_question=str(planner_metadata.get("translated_question") or ""),
+                required_aspects=search_brief.required_aspects,
                 openalex_queries=cleaned_queries,
                 semantic_scholar_queries=cleaned_queries,
                 filters={
@@ -803,7 +967,13 @@ def run_pipeline(
                     "query_source": "user_confirmed",
                 },
             )
+            if not structured_override.translated_question and search_brief.refined_question:
+                structured_override.translated_question = search_brief.refined_question
         else:
+            if not structured_override.required_aspects:
+                structured_override.required_aspects = search_brief.required_aspects
+            if not structured_override.translated_question and search_brief.refined_question:
+                structured_override.translated_question = search_brief.refined_question
             structured_override.filters = {
                 **structured_override.filters,
                 "strictness": strictness,
@@ -819,6 +989,8 @@ def run_pipeline(
         )
 
     query_plan = query_plan_payload["query_plan"]
+    query_plan_payload["search_brief"] = search_brief
+    query_plan_payload["question_refinement"] = question_refinement
     queries = query_plan_payload["queries"]
     planner_metadata = query_plan_payload["planner_metadata"]
     planning_question = str(query_plan_payload.get("planning_question") or question)
@@ -934,6 +1106,35 @@ def run_pipeline(
             },
         )
 
+    aspect_agent = AspectCoverageAgent()
+    required_aspects = query_plan.required_aspects or search_brief.required_aspects
+    if progress_callback:
+        progress_callback(
+            "aspect_coverage",
+            "Classifying required-aspect coverage",
+            {"required_aspects": required_aspects},
+        )
+    aspect_coverage_records = aspect_agent.classify_many(
+        merged_papers,
+        evidence_records,
+        required_aspects,
+    )
+    if progress_callback:
+        average_coverage = (
+            sum(record.aspect_coverage_score for record in aspect_coverage_records)
+            / len(aspect_coverage_records)
+            if aspect_coverage_records
+            else 0.0
+        )
+        progress_callback(
+            "aspect_coverage",
+            "Aspect coverage classification finished",
+            {
+                "paper_count": len(aspect_coverage_records),
+                "average_aspect_coverage": average_coverage,
+            },
+        )
+
     ranker = RankerAgent()
     if progress_callback:
         progress_callback(
@@ -949,6 +1150,7 @@ def run_pipeline(
         scoring_weights=active_scoring_weights,
         query_plan=query_plan,
         ranking_profile=ranking_profile,
+        aspect_coverage_records=aspect_coverage_records,
     )
     if progress_callback:
         progress_callback(
@@ -983,6 +1185,20 @@ def run_pipeline(
                 {"feedback_record_count": len(feedback_records)},
             )
 
+    result_groups = group_ranked_papers(
+        ranked_final,
+        aspect_coverage_records,
+        search_brief,
+    )
+    prisma_like_flow = build_prisma_like_flow(
+        retrieval_counts=retrieval_counts,
+        raw_paper_count=len(raw_papers),
+        merged_papers=merged_papers,
+        duplicate_count=duplicate_count,
+        verification_results=verification_results,
+        ranked_papers=ranked_final,
+    )
+
     if progress_callback:
         progress_callback(
             "evaluation",
@@ -1007,6 +1223,14 @@ def run_pipeline(
         "sort_preference": sort_preference,
         "ranking_profile": ranking_profile,
     }
+    metrics["search_intent"] = search_brief.search_intent
+    metrics["average_aspect_coverage"] = (
+        sum(record.aspect_coverage_score for record in aspect_coverage_records)
+        / len(aspect_coverage_records)
+        if aspect_coverage_records
+        else 0.0
+    )
+    metrics["prisma_like_flow"] = prisma_like_flow
     metrics["llm"] = _llm_metrics(
         llm_backend=llm_backend,
         active_llm_backend=active_llm_client.provider_name if active_llm_client else "none",
@@ -1029,6 +1253,8 @@ def run_pipeline(
         planning_question=planning_question,
         queries=queries,
         query_plan=query_plan,
+        search_brief=search_brief,
+        question_refinement=question_refinement,
         planner_metadata=planner_metadata,
         retrieval_counts=retrieval_counts,
         raw_paper_count=len(raw_papers),
@@ -1036,10 +1262,14 @@ def run_pipeline(
         duplicate_count=duplicate_count,
         evidence_records=evidence_records,
         verification_results=verification_results,
+        aspect_coverage_records=aspect_coverage_records,
         ranked_papers=ranked_final,
         scoring_weights=active_scoring_weights,
+        result_groups=result_groups,
     )
     write_json(out / "agent_trace.json", trace)
+    write_json(out / "result_groups.json", result_groups)
+    write_json(out / "prisma_like_flow.json", prisma_like_flow)
     retrieval_diagnostics = build_retrieval_diagnostics(
         question=question,
         query_plan=query_plan,
@@ -1050,12 +1280,23 @@ def run_pipeline(
         ranked_papers=ranked_final,
     )
     write_json(out / "retrieval_diagnostics.json", retrieval_diagnostics)
+    generate_paper_cards(
+        out / "paper_cards.md",
+        ranked_final,
+        aspect_coverage_records,
+    )
+    generate_reading_path(
+        out / "reading_path.md",
+        ranked_final,
+        result_groups,
+    )
 
     write_pipeline_csvs(
         out,
         merged_papers,
         evidence_records,
         verification_results,
+        aspect_coverage_records,
         ranked_before_feedback,
         ranked_final,
         ranked_after_feedback,
@@ -1070,6 +1311,14 @@ def run_pipeline(
         evidence_records=evidence_records,
         evaluation_metrics=metrics,
         feedback_applied=feedback_applied,
+        search_brief=search_brief,
+        question_refinement=question_refinement,
+        query_plan=query_plan,
+        aspect_coverage_records=aspect_coverage_records,
+        result_groups=result_groups,
+        reading_path_path=out / "reading_path.md",
+        paper_cards_path=out / "paper_cards.md",
+        prisma_like_flow=prisma_like_flow,
     )
     if progress_callback:
         progress_callback(
@@ -1105,6 +1354,10 @@ def run_pipeline(
         agent_trace=trace,
         scoring_weights=active_scoring_weights,
         query_plan=query_plan,
+        search_brief=search_brief,
+        question_refinement=question_refinement,
+        aspect_coverage_records=aspect_coverage_records,
+        result_groups=result_groups,
     )
 
 

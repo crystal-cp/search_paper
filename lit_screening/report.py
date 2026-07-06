@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .models import EvidenceRecord, RankedPaper
+from .models import AspectCoverageRecord, EvidenceRecord, QueryPlan, RankedPaper, SearchBrief
 from .utils import ensure_dir
 
 
@@ -30,6 +30,14 @@ def generate_report(
     evidence_records: list[EvidenceRecord],
     evaluation_metrics: dict[str, Any],
     feedback_applied: bool = False,
+    search_brief: SearchBrief | None = None,
+    question_refinement: dict[str, Any] | None = None,
+    query_plan: QueryPlan | None = None,
+    aspect_coverage_records: list[AspectCoverageRecord] | None = None,
+    result_groups: dict[str, Any] | None = None,
+    reading_path_path: str | Path | None = None,
+    paper_cards_path: str | Path | None = None,
+    prisma_like_flow: dict[str, Any] | None = None,
 ) -> None:
     """Generate a human-readable Markdown report."""
 
@@ -63,6 +71,45 @@ def generate_report(
                 "",
             ]
         )
+    if search_brief:
+        lines.extend(
+            [
+                "## Search Brief",
+                "",
+                f"- Refined question: {search_brief.refined_question}",
+                f"- Search intent: {search_brief.search_intent}",
+                f"- User goal: {search_brief.user_goal}",
+                f"- Inclusion criteria: {', '.join(search_brief.inclusion_criteria)}",
+                f"- Exclusion criteria: {', '.join(search_brief.exclusion_criteria)}",
+                f"- Required aspects: {', '.join(search_brief.required_aspects)}",
+                f"- Preferred paper types: {', '.join(search_brief.preferred_paper_types)}",
+                f"- Time window: {search_brief.time_window}",
+                f"- Success definition: {search_brief.success_definition}",
+                "",
+            ]
+        )
+    if question_refinement:
+        lines.extend(["## Refined Subquestions", ""])
+        subquestions = question_refinement.get("subquestions", [])
+        if subquestions:
+            lines.extend([f"- {item}" for item in subquestions])
+        else:
+            lines.append("- No subquestions were needed for this run.")
+        lines.append("")
+    if query_plan:
+        lines.extend(
+            [
+                "## Query Strategy",
+                "",
+                f"- Core terms: {', '.join(query_plan.core_terms)}",
+                f"- Must terms: {', '.join(query_plan.must_terms)}",
+                f"- Optional terms: {', '.join(query_plan.optional_terms)}",
+                f"- Exclude terms: {', '.join(query_plan.exclude_terms)}",
+                f"- Required aspects: {', '.join(query_plan.required_aspects)}",
+                f"- Filters: {query_plan.filters}",
+                "",
+            ]
+        )
     lines.extend(
         [
             "## Planned Queries",
@@ -79,6 +126,17 @@ def generate_report(
             f"- Merged paper count: {retrieval_statistics.get('merged_paper_count', 0)}",
             f"- Duplicate count: {retrieval_statistics.get('duplicate_count', 0)}",
             f"- Counts by provider: {retrieval_statistics.get('retrieval_counts_by_provider', {})}",
+            "",
+            "## PRISMA-like Screening Flow",
+            "",
+            f"- Records identified by OpenAlex: {(prisma_like_flow or {}).get('records_identified_by_openalex', 0)}",
+            f"- Records identified by Semantic Scholar: {(prisma_like_flow or {}).get('records_identified_by_semantic_scholar', 0)}",
+            f"- Duplicate records removed: {(prisma_like_flow or {}).get('duplicate_records_removed', 0)}",
+            f"- Records with missing abstracts: {(prisma_like_flow or {}).get('records_with_missing_abstracts', 0)}",
+            f"- Records screened: {(prisma_like_flow or {}).get('records_screened', 0)}",
+            f"- Included in top ranked results: {(prisma_like_flow or {}).get('records_included_in_top_ranked_results', 0)}",
+            f"- Excluded or low confidence: {(prisma_like_flow or {}).get('records_excluded_or_low_confidence', 0)}",
+            f"- Common exclusion reasons: {(prisma_like_flow or {}).get('common_exclusion_reasons', {})}",
             "",
             "## LLM Settings",
             "",
@@ -99,6 +157,7 @@ def generate_report(
             f"- Strict support rate: {retrieval_statistics.get('strict_support_rate', 0):.3f}",
             f"- Weak support rate: {retrieval_statistics.get('weak_support_rate', 0):.3f}",
             f"- LLM invalid evidence rate: {retrieval_statistics.get('llm_invalid_evidence_rate', 0):.3f}",
+            f"- Average aspect coverage: {retrieval_statistics.get('average_aspect_coverage', 0):.3f}",
             "",
             "## Scoring Formula",
             "",
@@ -129,6 +188,42 @@ def generate_report(
             f"{_escape_table(item.paper.venue)} | "
             f"{_escape_table(item.paper.doi)} |"
         )
+
+    lines.extend(["", "## Aspect Coverage Summary", ""])
+    aspect_records = aspect_coverage_records or []
+    if aspect_records:
+        lines.extend(
+            [
+                "| Paper | Covered aspects | Missing aspects | Score |",
+                "| --- | --- | --- | ---: |",
+            ]
+        )
+        for record in aspect_records[:10]:
+            lines.append(
+                "| "
+                f"{_escape_table(record.title)} | "
+                f"{_escape_table(', '.join(record.covered_aspects))} | "
+                f"{_escape_table(', '.join(record.missing_aspects))} | "
+                f"{record.aspect_coverage_score:.2f} |"
+            )
+    else:
+        lines.append("- No required aspects were classified.")
+
+    lines.extend(["", "## Recommended Reading Path", ""])
+    if reading_path_path:
+        lines.append(f"- See `{Path(reading_path_path).name}`.")
+    else:
+        lines.append("- No reading path was generated.")
+
+    lines.extend(["", "## Grouped Result Lists", ""])
+    for group_name, rows in (result_groups or {}).items():
+        lines.append(f"- {group_name}: {len(rows)} papers")
+
+    lines.extend(["", "## Top Paper Evidence Cards", ""])
+    if paper_cards_path:
+        lines.append(f"- See `{Path(paper_cards_path).name}`.")
+    else:
+        lines.append("- No paper cards were generated.")
 
     lines.extend(
         [

@@ -79,6 +79,7 @@ class HumanFeedbackAgent:
                 item.scores.diversity_score,
                 feedback.adjustment,
                 weights=scoring_weights,
+                aspect_coverage_score=item.scores.aspect_coverage_score,
             )
             adjusted.append(replace(item, scores=scores, feedback=feedback))
 
