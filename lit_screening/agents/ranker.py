@@ -7,6 +7,7 @@ from dataclasses import replace
 from lit_screening.dedup import normalize_title
 from lit_screening.models import (
     AspectCoverageRecord,
+    DomainAssessment,
     EvidenceRecord,
     Paper,
     QueryPlan,
@@ -29,6 +30,7 @@ class RankerAgent:
         query_plan: QueryPlan | None = None,
         ranking_profile: str = "balanced",
         aspect_coverage_records: list[AspectCoverageRecord] | None = None,
+        domain_assessments: list[DomainAssessment] | None = None,
     ) -> list[RankedPaper]:
         """Return papers sorted by final score."""
 
@@ -38,11 +40,16 @@ class RankerAgent:
             record.paper_id: record
             for record in aspect_coverage_records or []
         }
+        domain_by_id = {
+            record.paper_id: record
+            for record in domain_assessments or []
+        }
 
         preliminary: list[RankedPaper] = []
         for paper in papers:
             evidence = evidence_by_id[paper.paper_id]
             verification = verification_by_id[paper.paper_id]
+            domain_assessment = domain_by_id.get(paper.paper_id)
             scores = compute_score_breakdown(
                 paper,
                 evidence,
@@ -56,8 +63,18 @@ class RankerAgent:
                     paper.paper_id,
                     AspectCoverageRecord(paper.paper_id, paper.title),
                 ).aspect_coverage_score,
+                domain_assessment=domain_assessment,
             )
-            preliminary.append(RankedPaper(0, paper, evidence, verification, scores))
+            preliminary.append(
+                RankedPaper(
+                    0,
+                    paper,
+                    evidence,
+                    verification,
+                    scores,
+                    domain_assessment=domain_assessment,
+                )
+            )
 
         preliminary.sort(key=lambda item: item.scores.final_score, reverse=True)
 
@@ -81,6 +98,7 @@ class RankerAgent:
                     item.paper.paper_id,
                     AspectCoverageRecord(item.paper.paper_id, item.paper.title),
                 ).aspect_coverage_score,
+                domain_assessment=item.domain_assessment,
             )
             reranked.append(replace(item, scores=scores))
 

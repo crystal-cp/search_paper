@@ -11,13 +11,14 @@ The MVP pipeline:
 3. builds a structured, provider-aware query plan from the brief,
 4. retrieves metadata from OpenAlex and Semantic Scholar using provider-specific queries,
 5. optionally imports existing BibTeX, RIS, or CSV literature-library exports,
-6. normalizes and deduplicates papers,
-7. extracts claim-level evidence from abstracts,
-8. verifies whether evidence is grounded in the abstract with strict span validation,
-9. ranks papers with hybrid TF-IDF/API/field relevance, aspect coverage, and transparent scoring,
-10. groups papers into reading roles and generates paper evidence cards,
-11. optionally applies human feedback,
-12. writes CSV, JSON, Markdown outputs, and an agent decision trace.
+6. optionally expands from seed papers through references, citations, and recommendations,
+7. normalizes and deduplicates papers,
+8. extracts claim-level evidence from abstracts,
+9. verifies whether evidence is grounded in the abstract with strict span validation,
+10. ranks papers with hybrid TF-IDF/API/field relevance, aspect coverage, and transparent scoring,
+11. groups papers into reading roles and generates paper evidence cards,
+12. optionally applies human feedback,
+13. writes CSV, JSON, Markdown outputs, and an agent decision trace.
 
 ## Setup
 
@@ -91,6 +92,29 @@ Supported import formats are BibTeX (`.bib` / `.bibtex`), RIS (`.ris`), and CSV
 (`.csv`). CSV columns can include `title`, `abstract`, `authors`, `year`,
 `venue`, `doi`, `url`, and `citation_count`.
 
+You can also start from known seed papers and optionally expand through
+Semantic Scholar references, citations, and recommendations. Snowballing is off
+by default and requires `--enable-snowballing`. If no seed papers are provided,
+the pipeline uses the top high-confidence ranked papers as seeds when possible.
+Functional snowballing uses Semantic Scholar paper lookup, reference, citation,
+and recommendation endpoints. If `S2_API_KEY` is missing, the pipeline keeps the
+seed records for auditability and safely skips expansion instead of failing.
+
+```bash
+python -m lit_screening.pipeline run \
+  --question "surface magnetization boundary spin signals" \
+  --providers openalex semantic_scholar \
+  --max-per-query 10 \
+  --seed-paper "10.48550/arXiv.2301.10140" \
+  --seed-file examples/seed_papers.csv \
+  --enable-snowballing \
+  --snowball-top-n 3 \
+  --output-dir outputs
+```
+
+Seed CSV columns are `seed_id`, `seed_type`, `title`, `doi`, and `note`.
+Supported seed types include `doi`, `semantic_scholar`, `openalex`, and `title`.
+
 The DeepSeek base URL and model live in `lit_screening/config.py`:
 
 - `deepseek_base_url = "https://api.deepseek.com"`
@@ -121,6 +145,20 @@ python -m lit_screening.pipeline run \
   --output-dir outputs
 ```
 
+Optional pilot search runs a small pre-retrieval sample and can apply repaired
+queries before full retrieval:
+
+```bash
+python -m lit_screening.pipeline run \
+  --question "How can LLM agents improve literature screening?" \
+  --providers openalex semantic_scholar \
+  --max-per-query 10 \
+  --pilot-search \
+  --pilot-max-per-query 5 \
+  --auto-repair-queries \
+  --output-dir outputs
+```
+
 ## Run The UI
 
 ```bash
@@ -145,6 +183,8 @@ The UI also supports:
   queries, then click `Step 4: Run Retrieval`.
   The preview step does not call literature provider APIs, which helps avoid
   spending requests on a search direction that does not match the user's intent.
+  You can also click `Run Pilot Search` to retrieve a small sample, diagnose
+  off-topic drift, and accept repaired queries before full retrieval.
   Step 3 is a collapsible checkpoint with a field guide, research-intent editor,
   and provider-query editor. After Step 4 completes, the Step 3 panel collapses
   by default but remains available for auditing the exact query plan used.
@@ -155,8 +195,14 @@ The UI also supports:
 - Existing-library import from BibTeX, RIS, or CSV. Imported records are merged
   with provider retrieval results, deduplicated, screened, and ranked through
   the same core pipeline.
+- Seed Paper Mode: enter seed DOIs, titles, Semantic Scholar IDs, or OpenAlex IDs,
+  upload `seed_papers.csv`, enable citation snowballing, and inspect retrieval
+  paths showing whether an expanded paper came from a reference, citation, or
+  recommendation.
 - Search mode controls for strictness, OpenAlex mode, sort preference, and ranking
   profile (`relevance_first`, `balanced`, `high_quality_review`).
+  OpenAlex `keyword`, `exact`, and `semantic` modes map to separate OpenAlex
+  request parameters: `search`, `search.exact`, and `search.semantic`.
 - A collapsible run-status panel shows what the pipeline is doing during
   screening: retrieval by provider/query, deduplication, evidence extraction,
   grounding verification, ranking, evaluation, and artifact writing.
@@ -189,12 +235,28 @@ The pipeline writes:
 
 - `outputs/planned_queries.json`
 - `outputs/search_brief.json`
+- `outputs/search_contract.json`
+- `outputs/ambiguity_analysis.json`
 - `outputs/question_refinement.json`
 - `outputs/raw_openalex_results.json`
 - `outputs/raw_semantic_scholar_results.json`
 - `outputs/merged_papers.csv`
 - `outputs/evidence_table.csv`
 - `outputs/aspect_coverage.csv`
+- `outputs/domain_assessments.json`
+- `outputs/screening_decisions.csv`
+- `outputs/screening_decisions.json`
+- `outputs/preference_learning.json`
+- `outputs/feedback_query_refinement.json`
+- `outputs/seed_papers.json`
+- `outputs/citation_expansion.csv`
+- `outputs/retrieval_paths.csv`
+- `outputs/method_comparison_matrix.csv`
+- `outputs/method_comparison_matrix.md`
+- `outputs/research_gap_matrix.csv`
+- `outputs/research_gap_matrix.md`
+- `outputs/suggested_next_searches.json`
+- `outputs/suggested_next_searches.md`
 - `outputs/ranked_papers_before_feedback.csv`
 - `outputs/ranked_papers_after_feedback.csv`, when feedback is provided
 - `outputs/ranked_papers.csv`
@@ -204,6 +266,8 @@ The pipeline writes:
 - `outputs/imported_papers.csv`, when an external library is imported
 - `outputs/import_diagnostics.json`, when an external library is imported
 - `outputs/retrieval_diagnostics.json`
+- `outputs/query_pilot_diagnostics.json`
+- `outputs/query_repair_suggestions.json`
 - `outputs/result_groups.json`
 - `outputs/prisma_like_flow.json`
 - `outputs/paper_cards.md`
@@ -221,6 +285,37 @@ per-query raw counts, provider errors, imported-library counts, top titles per
 query, top score breakdowns, and year-filter audit information. When
 `from_year` is set, papers published before that year, or papers with missing
 year metadata, are filtered locally before deduplication and ranking.
+
+`search_contract.json` records the intended domain, required concepts, excluded
+concepts, and field-of-study boundaries used before query planning.
+`ambiguity_analysis.json` records ambiguous terms such as `screening`, `agent`,
+`evidence`, `optimization`, and `ranking` with the selected meaning and
+recommended exclude terms.
+`domain_assessments.json` records whether each merged paper is `in_scope`,
+`borderline`, or `out_of_scope` for the SearchContract. Ranking applies a
+transparent hard-demotion multiplier: `in_scope` x1.0, `borderline` x0.7,
+and `out_of_scope` x0.3.
+`screening_decisions.csv` and `screening_decisions.json` record per-paper
+include / maybe / exclude recommendations, decision confidence, reading
+priority, suggested action, and normalized exclusion reasons.
+`preference_learning.json` and `feedback_query_refinement.json` record terms
+learned from human include/exclude feedback and suggested terms for the next
+retrieval run.
+`seed_papers.json`, `citation_expansion.csv`, and `retrieval_paths.csv` record
+Seed Paper Mode inputs, expanded candidate papers, and why each expanded paper
+entered the candidate set.
+`method_comparison_matrix.*`, `research_gap_matrix.*`, and
+`suggested_next_searches.*` turn the ranking into a decision memo: what methods
+are represented, what gaps remain, and what to search next.
+`query_pilot_diagnostics.json` and `query_repair_suggestions.json` are written
+for the optional pilot-search workflow. Pilot search is off by default and runs
+only when requested through the UI or CLI flags such as `--pilot-search`.
+
+`ranked_papers.csv` includes provenance columns such as `retrieval_provider`,
+`retrieval_stage`, `retrieval_query`, `source_stage`, `seed_paper_id`,
+`seed_title`, and `seed_reason`, so a ranked paper can be traced back to keyword
+search, semantic search, imported-library input, reference expansion, citation
+expansion, or recommendation expansion.
 
 ## Query Planning, Sensemaking, And Scoring
 
@@ -328,3 +423,5 @@ pytest
 ```
 
 The tests use fake retrievers for pipeline behavior, so they do not require internet access or API keys.
+They also cover seed-file parsing, citation snowballing with fake Semantic
+Scholar responses, and pipeline output generation for Seed Paper Mode.

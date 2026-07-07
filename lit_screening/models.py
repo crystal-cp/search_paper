@@ -23,6 +23,41 @@ class SearchBrief:
 
 
 @dataclass
+class DomainProfile:
+    """Domain boundaries used to keep retrieval aligned with user intent."""
+
+    domain_name: str
+    positive_domains: list[str] = field(default_factory=list)
+    negative_domains: list[str] = field(default_factory=list)
+    required_concepts: list[str] = field(default_factory=list)
+    forbidden_concepts: list[str] = field(default_factory=list)
+    preferred_venues: list[str] = field(default_factory=list)
+    excluded_venues: list[str] = field(default_factory=list)
+    field_of_study_whitelist: list[str] = field(default_factory=list)
+    field_of_study_blacklist: list[str] = field(default_factory=list)
+    terminology_map: dict[str, list[str]] = field(default_factory=dict)
+
+
+@dataclass
+class SearchContract:
+    """Explicit retrieval contract derived from a user question and search brief."""
+
+    original_question: str
+    refined_question: str
+    user_goal: str
+    search_intent: str
+    domain_profile: DomainProfile
+    must_include_concepts: list[str] = field(default_factory=list)
+    must_exclude_concepts: list[str] = field(default_factory=list)
+    inclusion_criteria: list[str] = field(default_factory=list)
+    exclusion_criteria: list[str] = field(default_factory=list)
+    required_aspects: list[str] = field(default_factory=list)
+    preferred_paper_types: list[str] = field(default_factory=list)
+    time_window: str = ""
+    success_definition: str = ""
+
+
+@dataclass
 class QueryPlan:
     """Structured, provider-aware search plan for a research question."""
 
@@ -40,6 +75,28 @@ class QueryPlan:
 
 
 @dataclass
+class SeedPaper:
+    """User-provided or auto-selected seed paper for citation expansion."""
+
+    seed_id: str
+    seed_type: str = "title"
+    title: str = ""
+    doi: str = ""
+    note: str = ""
+
+
+@dataclass
+class RetrievalPath:
+    """Trace how a paper entered the candidate set."""
+
+    paper_id: str
+    source_stage: str
+    seed_paper_id: str
+    seed_title: str
+    reason: str
+
+
+@dataclass
 class Paper:
     """Normalized metadata for one scholarly paper."""
 
@@ -52,6 +109,13 @@ class Paper:
     doi: str = ""
     url: str = ""
     source_provider: str = ""
+    retrieval_provider: str = ""
+    retrieval_stage: str = ""
+    retrieval_query: str = ""
+    source_stage: str = ""
+    seed_paper_id: str = ""
+    seed_title: str = ""
+    seed_reason: str = ""
     provider_ids: dict[str, str] = field(default_factory=dict)
     citation_count: int = 0
     api_relevance_score: float = 0.0
@@ -104,6 +168,20 @@ class VerificationResult:
 
 
 @dataclass
+class DomainAssessment:
+    """Domain guardrail decision for one paper."""
+
+    paper_id: str
+    domain_match_score: float
+    domain_decision: str
+    off_topic_reason: str
+    positive_domain_matches: list[str] = field(default_factory=list)
+    negative_domain_matches: list[str] = field(default_factory=list)
+    missing_required_concepts: list[str] = field(default_factory=list)
+    forbidden_concepts_found: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ScoreBreakdown:
     """Transparent multi-objective score for a ranked paper."""
 
@@ -115,6 +193,28 @@ class ScoreBreakdown:
     human_feedback_adjustment: float
     final_score: float
     aspect_coverage_score: float = 0.0
+    domain_penalty_multiplier: float = 1.0
+    pre_domain_final_score: float = 0.0
+    preference_score: float = 0.0
+    preference_adjustment: float = 0.0
+
+
+@dataclass
+class PreferenceLearningResult:
+    """Learned relevance preferences from human feedback."""
+
+    enabled: bool
+    model_type: str = "none"
+    labeled_paper_count: int = 0
+    include_count: int = 0
+    exclude_count: int = 0
+    preference_scores: dict[str, float] = field(default_factory=dict)
+    positive_terms: list[str] = field(default_factory=list)
+    negative_terms: list[str] = field(default_factory=list)
+    suggested_must_terms: list[str] = field(default_factory=list)
+    suggested_optional_terms: list[str] = field(default_factory=list)
+    suggested_exclude_terms: list[str] = field(default_factory=list)
+    note: str = ""
 
 
 @dataclass
@@ -126,6 +226,23 @@ class AspectCoverageRecord:
     covered_aspects: list[str] = field(default_factory=list)
     missing_aspects: list[str] = field(default_factory=list)
     aspect_coverage_score: float = 0.0
+
+
+@dataclass
+class ScreeningDecision:
+    """Human-readable screening recommendation for one ranked paper."""
+
+    paper_id: str
+    decision: str
+    decision_confidence: float
+    primary_reason: str
+    exclusion_reasons: list[str] = field(default_factory=list)
+    required_aspects_covered: list[str] = field(default_factory=list)
+    required_aspects_missing: list[str] = field(default_factory=list)
+    domain_match_score: float = 0.0
+    domain_decision: str = ""
+    reading_priority: str = ""
+    suggested_action: str = ""
 
 
 @dataclass
@@ -148,6 +265,8 @@ class RankedPaper:
     verification: VerificationResult
     scores: ScoreBreakdown
     feedback: FeedbackRecord | None = None
+    domain_assessment: DomainAssessment | None = None
+    screening_decision: ScreeningDecision | None = None
 
 
 @dataclass
@@ -177,6 +296,17 @@ class PipelineResult:
     translated_question: str = ""
     query_plan: QueryPlan | None = None
     search_brief: SearchBrief | None = None
+    search_contract: SearchContract | None = None
+    ambiguity_analysis: list[dict[str, Any]] = field(default_factory=list)
+    domain_assessments: list[DomainAssessment] = field(default_factory=list)
+    screening_decisions: list[ScreeningDecision] = field(default_factory=list)
+    seed_papers: list[SeedPaper] = field(default_factory=list)
+    retrieval_paths: list[RetrievalPath] = field(default_factory=list)
+    citation_expansion_papers: list[Paper] = field(default_factory=list)
+    preference_learning: PreferenceLearningResult | None = None
+    feedback_query_refinement: dict[str, Any] = field(default_factory=dict)
+    query_pilot_diagnostics: dict[str, Any] = field(default_factory=dict)
+    query_repair_suggestions: dict[str, Any] = field(default_factory=dict)
     question_refinement: dict[str, Any] = field(default_factory=dict)
     aspect_coverage_records: list[AspectCoverageRecord] = field(default_factory=list)
     result_groups: dict[str, Any] = field(default_factory=dict)

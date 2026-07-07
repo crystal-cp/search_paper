@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import math
 
-from .models import EvidenceRecord, Paper, QueryPlan, ScoreBreakdown, VerificationResult
+from .models import (
+    DomainAssessment,
+    EvidenceRecord,
+    Paper,
+    QueryPlan,
+    ScoreBreakdown,
+    VerificationResult,
+)
 from .reranking import compute_hybrid_relevance_features
 from .utils import clamp, current_year, keyword_overlap_score
 
@@ -152,6 +159,9 @@ def compute_final_score(
     weights: dict[str, float] | None = None,
     ranking_profile: str = "balanced",
     aspect_coverage_score: float = 0.0,
+    domain_penalty_multiplier: float = 1.0,
+    preference_score: float | None = None,
+    preference_weight: float = 0.10,
 ) -> ScoreBreakdown:
     """Low-level formula helper for combining already-computed score components."""
 
@@ -161,14 +171,23 @@ def compute_final_score(
     recency = clamp(recency_score)
     quality = clamp(quality_score)
     diversity = clamp(diversity_score)
-    final = (
+    preference = clamp(preference_score) if preference_score is not None else 0.0
+    preference_adjustment = (
+        preference_weight * (preference - 0.5)
+        if preference_score is not None
+        else 0.0
+    )
+    pre_domain_final = (
         score_weights["relevance"] * relevance
         + score_weights["evidence"] * evidence
         + score_weights["recency"] * recency
         + score_weights["quality"] * quality
         + score_weights["diversity"] * diversity
         + human_feedback_adjustment
+        + preference_adjustment
     )
+    penalty = clamp(domain_penalty_multiplier, 0.0, 1.0)
+    final = pre_domain_final * penalty
     return ScoreBreakdown(
         relevance_score=relevance,
         evidence_score=evidence,
@@ -178,6 +197,10 @@ def compute_final_score(
         human_feedback_adjustment=human_feedback_adjustment,
         final_score=final,
         aspect_coverage_score=clamp(aspect_coverage_score),
+        domain_penalty_multiplier=penalty,
+        pre_domain_final_score=pre_domain_final,
+        preference_score=preference,
+        preference_adjustment=preference_adjustment,
     )
 
 
@@ -192,6 +215,8 @@ def compute_score_breakdown(
     query_plan: QueryPlan | None = None,
     ranking_profile: str = "balanced",
     aspect_coverage_score: float = 0.0,
+    domain_assessment: DomainAssessment | None = None,
+    preference_score: float | None = None,
 ) -> ScoreBreakdown:
     """Main scoring entrypoint for one paper.
 
@@ -214,6 +239,8 @@ def compute_score_breakdown(
         weights=weights,
         ranking_profile=ranking_profile,
         aspect_coverage_score=aspect_coverage_score,
+        domain_penalty_multiplier=domain_penalty_multiplier(domain_assessment),
+        preference_score=preference_score,
     )
 
 
@@ -228,6 +255,8 @@ def score_paper(
     query_plan: QueryPlan | None = None,
     ranking_profile: str = "balanced",
     aspect_coverage_score: float = 0.0,
+    domain_assessment: DomainAssessment | None = None,
+    preference_score: float | None = None,
 ) -> ScoreBreakdown:
     """Backward-compatible alias for compute_score_breakdown().
 
@@ -246,4 +275,18 @@ def score_paper(
         query_plan=query_plan,
         ranking_profile=ranking_profile,
         aspect_coverage_score=aspect_coverage_score,
+        domain_assessment=domain_assessment,
+        preference_score=preference_score,
     )
+
+
+def domain_penalty_multiplier(domain_assessment: DomainAssessment | None) -> float:
+    """Return transparent hard-demotion multiplier for domain guardrails."""
+
+    if domain_assessment is None:
+        return 1.0
+    if domain_assessment.domain_decision == "out_of_scope":
+        return 0.3
+    if domain_assessment.domain_decision == "borderline":
+        return 0.7
+    return 1.0

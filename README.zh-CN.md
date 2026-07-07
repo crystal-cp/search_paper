@@ -15,13 +15,14 @@
 3. 对中文研究问题生成英文 planning question 和英文检索 query。
 4. 调用 OpenAlex 和 Semantic Scholar 检索论文元数据。
 5. 可导入已有 BibTeX、RIS 或 CSV 文献库导出文件。
-6. 规范化论文字段并按 DOI / 标题去重。
-7. 从摘要中抽取 claim-level evidence。
-8. 用 span validation 验证 evidence sentence 是否能在 abstract 中 exact match 或 high-confidence fuzzy match。
-9. 将 unsupported、weak_support、strict_support、missing_abstract、llm_invalid_evidence 区分开。
-10. 用混合相关性、证据质量、年份、引用质量、多样性和人工反馈计算排序。
-11. 输出 CSV、JSON、Markdown report、agent trace、run events 和 retrieval diagnostics。
-12. 在 Streamlit UI 中展示 query plan、ranking、evidence chain、反馈重排、run history 和项目输出。
+6. 可从已知种子论文出发，通过 references、citations 和 recommendations 做引用滚雪球扩展。
+7. 规范化论文字段并按 DOI / 标题去重。
+8. 从摘要中抽取 claim-level evidence。
+9. 用 span validation 验证 evidence sentence 是否能在 abstract 中 exact match 或 high-confidence fuzzy match。
+10. 将 unsupported、weak_support、strict_support、missing_abstract、llm_invalid_evidence 区分开。
+11. 用混合相关性、证据质量、年份、引用质量、多样性和人工反馈计算排序。
+12. 输出 CSV、JSON、Markdown report、agent trace、run events 和 retrieval diagnostics。
+13. 在 Streamlit UI 中展示 query plan、ranking、evidence chain、反馈重排、run history 和项目输出。
 
 ## 安装
 
@@ -95,6 +96,24 @@ python -m lit_screening.pipeline run \
 
 支持 BibTeX（`.bib` / `.bibtex`）、RIS（`.ris`）和 CSV（`.csv`）。CSV 常用列包括 `title`、`abstract`、`authors`、`year`、`venue`、`doi`、`url`、`citation_count`。
 
+也可以从已知论文开始检索。Seed Paper Mode 支持 DOI、Semantic Scholar paper ID、OpenAlex ID 或论文标题。引用滚雪球默认关闭，只有显式加入 `--enable-snowballing` 时才会通过 Semantic Scholar 查询 references、citations 和 recommendations。如果没有手动提供 seed，系统会尽量从高置信度 top ranked papers 里自动选 seed。
+
+功能性 citation snowballing 会使用 Semantic Scholar 的论文解析、references、citations 和 recommendations 接口。如果没有 `S2_API_KEY`，系统不会失败，而是保存 seed 记录用于审计，并安全跳过扩展。
+
+```bash
+python -m lit_screening.pipeline run \
+  --question "surface magnetization boundary spin signals" \
+  --providers openalex semantic_scholar \
+  --max-per-query 10 \
+  --seed-paper "10.48550/arXiv.2301.10140" \
+  --seed-file examples/seed_papers.csv \
+  --enable-snowballing \
+  --snowball-top-n 3 \
+  --output-dir outputs
+```
+
+Seed CSV 列为 `seed_id`、`seed_type`、`title`、`doi`、`note`。常用 `seed_type` 包括 `doi`、`semantic_scholar`、`openalex`、`title`。
+
 离线烟雾测试可以避免真实 API 调用：
 
 ```bash
@@ -118,13 +137,16 @@ UI 的推荐流程：
 3. 在主页面输入 research question。
 4. 点击 `Generate Query Plan`，先检查并可编辑 SearchBrief、core terms、must terms、exclude terms、OpenAlex queries 和 Semantic Scholar queries。
 5. 如已有文献库导出文件，可在 `Import Existing Literature Library` 上传 BibTeX、RIS 或 CSV。
-6. 确认 query 方向没偏后，再点击 `Run Retrieval`。
-7. 查看 ranked papers、evidence chain、result groups、paper cards、metrics 和 trace。
-8. 对论文标记 include / exclude / uncertain，导入或导出 feedback CSV，并在不重新调用 API 的情况下 rerank。
+6. 如果已有关键论文，可在 `Seed Paper Mode` 输入 DOI / 标题 / Semantic Scholar ID / OpenAlex ID，或上传 `seed_papers.csv`；是否执行引用滚雪球由侧边栏控制。
+7. 确认 query 方向没偏后，再点击 `Run Retrieval`。
+8. 查看 ranked papers、evidence chain、result groups、paper cards、metrics 和 trace。
+9. 对论文标记 include / exclude / uncertain，导入或导出 feedback CSV，并在不重新调用 API 的情况下 rerank。
 
 Step 3 是一个可折叠检查点，里面分为字段说明、研究意图、术语与 provider queries。第 4 步检索完成后，Step 3 会默认收起，但仍然可以展开查看本次实际使用的 query plan。
 
 注意：`From year` 只有在 `Apply year filter` 勾选后才生效。启用后，pipeline 会在 provider 返回结果之后再做一次本地硬过滤，早于该年份的论文不会进入 dedup、evidence extraction 或 ranking。缺少年份元数据的论文也会被排除，因为无法证明它满足年份条件。
+
+OpenAlex mode 中的 `keyword`、`exact`、`semantic` 会分别映射到 OpenAlex 请求参数 `search`、`search.exact`、`search.semantic`。`keyword+semantic` 会拆成两次独立检索，并在 diagnostics 里记录为不同 retrieval stage。
 
 ## Optional DeepSeek LLM
 
@@ -155,12 +177,28 @@ python -m lit_screening.pipeline run \
 outputs/
   planned_queries.json
   search_brief.json
+  search_contract.json
+  ambiguity_analysis.json
   question_refinement.json
   raw_openalex_results.json
   raw_semantic_scholar_results.json
   merged_papers.csv
   evidence_table.csv
   aspect_coverage.csv
+  domain_assessments.json
+  screening_decisions.csv
+  screening_decisions.json
+  preference_learning.json
+  feedback_query_refinement.json
+  seed_papers.json
+  citation_expansion.csv
+  retrieval_paths.csv
+  method_comparison_matrix.csv
+  method_comparison_matrix.md
+  research_gap_matrix.csv
+  research_gap_matrix.md
+  suggested_next_searches.json
+  suggested_next_searches.md
   ranked_papers_before_feedback.csv
   ranked_papers_after_feedback.csv
   ranked_papers.csv
@@ -170,6 +208,8 @@ outputs/
   imported_papers.csv
   import_diagnostics.json
   retrieval_diagnostics.json
+  query_pilot_diagnostics.json
+  query_repair_suggestions.json
   result_groups.json
   prisma_like_flow.json
   paper_cards.md
@@ -183,8 +223,15 @@ outputs/
 - `imported_papers.csv`：当导入外部文献库时，保存导入并规范化后的论文。
 - `import_diagnostics.json`：当导入外部文献库时，保存导入格式、数量、跳过记录和错误信息。
 - `retrieval_diagnostics.json`：记录 query plan、每个 provider 的 query、每个 query 返回多少、provider error、导入文献库数量、top titles、top score breakdown 和年份过滤审计。
+- `search_contract.json`：记录系统理解的领域边界、必须包含概念、必须排除概念和 field-of-study guardrails。
+- `ambiguity_analysis.json`：记录 `screening`、`agent`、`evidence` 等歧义词如何被解释，以及建议排除的错误含义。
+- `query_pilot_diagnostics.json`、`query_repair_suggestions.json`：当运行 Pilot Search 时，记录小样本检索漂移、修复建议，以及是否应用修复后的 queries。
 - `agent_trace.json`：记录 planner、retriever、extractor、verifier、ranker 的关键决策。
-- `ranked_papers.csv`：最终排序结果。
+- `screening_decisions.csv/json`：给每篇论文输出 include / maybe / exclude、置信度、阅读优先级、建议动作和排除原因。
+- `preference_learning.json`、`feedback_query_refinement.json`：记录从人工 include/exclude 反馈里学到的正/负 terms，以及下一轮检索建议。
+- `seed_papers.json`、`citation_expansion.csv`、`retrieval_paths.csv`：记录种子论文、引用扩展得到的候选论文，以及每篇扩展论文是通过 reference、citation 还是 recommendation 进入候选集。
+- `ranked_papers.csv`：最终排序结果，并包含 `retrieval_provider`、`retrieval_stage`、`retrieval_query`、`source_stage`、`seed_paper_id`、`seed_title`、`seed_reason` 等 provenance 字段。
+- `method_comparison_matrix.*`、`research_gap_matrix.*`、`suggested_next_searches.*`：把排序结果整理成方法比较、研究空白和下一步检索建议。
 - `report.md`：面向展示和复盘的 Markdown 报告。
 
 缓存文件写入 `data/cache/`，输出文件写入 `outputs/`。这些运行产物默认被 `.gitignore` 忽略。
@@ -278,4 +325,7 @@ pytest
 - provider 错误日志
 - 本地硬年份过滤
 - BibTeX / RIS / CSV 外部文献库导入
+- seed_papers.csv 解析
+- fake Semantic Scholar responses 下的 citation snowballing
+- Seed Paper Mode 输出 `citation_expansion.csv`、`retrieval_paths.csv`、`seed_papers.json`
 - scoring weights 和 ranking profile 确实改变排序

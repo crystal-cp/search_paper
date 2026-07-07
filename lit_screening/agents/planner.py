@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from lit_screening.llm_client import GenericLLMClient
-from lit_screening.models import QueryPlan, SearchBrief
+from lit_screening.models import QueryPlan, SearchBrief, SearchContract
 from lit_screening.utils import STOPWORDS, tokenize
 
 
@@ -379,6 +379,7 @@ class PlannerAgent:
         sort_preference: str = "relevance",
         ranking_profile: str = "balanced",
         search_brief: SearchBrief | None = None,
+        search_contract: SearchContract | None = None,
     ) -> QueryPlan:
         """Return a structured, provider-aware query plan."""
 
@@ -390,6 +391,7 @@ class PlannerAgent:
                 sort_preference=sort_preference,
                 ranking_profile=ranking_profile,
                 search_brief=search_brief,
+                search_contract=search_contract,
             )
         preprocessing = self._preprocess_question_rule(question)
         plan = self._plan_structured_rule(
@@ -400,6 +402,7 @@ class PlannerAgent:
             sort_preference=sort_preference,
             ranking_profile=ranking_profile,
             search_brief=search_brief,
+            search_contract=search_contract,
         )
         self.last_llm_metadata = self._metadata(
             preprocessing,
@@ -439,10 +442,17 @@ class PlannerAgent:
         sort_preference: str,
         ranking_profile: str,
         search_brief: SearchBrief | None = None,
+        search_contract: SearchContract | None = None,
     ) -> QueryPlan:
         """Build a topic-aware structured plan without requiring an LLM."""
 
-        planning_question = search_brief.refined_question if search_brief else preprocessing["planning_question"]
+        planning_question = (
+            search_contract.refined_question
+            if search_contract
+            else search_brief.refined_question
+            if search_brief
+            else preprocessing["planning_question"]
+        )
         detected_language = "zh" if preprocessing["question_language"] == "zh" else "en"
         tokens = tokenize(planning_question)
         candidate_phrases = _extract_candidate_phrases(planning_question)
@@ -450,6 +460,12 @@ class PlannerAgent:
         for token in tokens:
             if not _is_term_redundant(token, core_terms):
                 core_terms.append(token)
+        if search_contract:
+            core_terms = [
+                *search_contract.must_include_concepts[:6],
+                *search_contract.domain_profile.required_concepts[:4],
+                *core_terms,
+            ]
         core_terms = _unique(core_terms, 8)
         if not core_terms and planning_question:
             core_terms = [planning_question]
@@ -458,6 +474,14 @@ class PlannerAgent:
         if strictness == "broad":
             must_count = 1
         must_terms = _unique(core_terms[:must_count], 5)
+        if search_contract:
+            must_terms = _unique(
+                [
+                    *search_contract.must_include_concepts,
+                    *must_terms,
+                ],
+                10,
+            )
         if search_brief:
             must_terms = _unique(
                 [
@@ -488,6 +512,15 @@ class PlannerAgent:
                 ],
                 12,
             )
+        if search_contract:
+            optional_terms = _unique(
+                [
+                    *optional_terms,
+                    *search_contract.preferred_paper_types,
+                    *search_contract.required_aspects,
+                ],
+                14,
+            )
 
         if not (set(tokens) & LLM_RELATED_TERMS):
             optional_terms = [
@@ -507,15 +540,30 @@ class PlannerAgent:
                 [
                     *_extract_exclude_terms(planning_question),
                     *(search_brief.exclusion_criteria if search_brief else []),
+                    *(search_contract.must_exclude_concepts if search_contract else []),
+                    *(
+                        search_contract.domain_profile.forbidden_concepts
+                        if search_contract
+                        else []
+                    ),
                 ],
-                8,
+                16,
             ),
-            required_aspects=(search_brief.required_aspects if search_brief else []),
+            required_aspects=(
+                search_contract.required_aspects
+                if search_contract
+                else search_brief.required_aspects
+                if search_brief
+                else []
+            ),
             filters={
                 "strictness": strictness,
                 "openalex_mode": openalex_mode,
                 "sort_preference": sort_preference,
                 "ranking_profile": ranking_profile,
+                "search_contract_domain": search_contract.domain_profile.domain_name
+                if search_contract
+                else "",
             },
         )
         plan.openalex_queries = build_openalex_queries(plan)
@@ -599,6 +647,7 @@ class PlannerAgent:
         sort_preference: str,
         ranking_profile: str,
         search_brief: SearchBrief | None = None,
+        search_contract: SearchContract | None = None,
     ) -> QueryPlan:
         """Use an LLM to enrich structured query planning, falling back safely."""
 
@@ -639,6 +688,7 @@ class PlannerAgent:
             sort_preference=sort_preference,
             ranking_profile=ranking_profile,
             search_brief=search_brief,
+            search_contract=search_contract,
         )
         queries = result.data.get("queries")
 
@@ -661,6 +711,10 @@ class PlannerAgent:
         must_terms = _list_from_result("must_terms", rule_plan.must_terms)
         optional_terms = _list_from_result("optional_terms", rule_plan.optional_terms)
         exclude_terms = _list_from_result("exclude_terms", rule_plan.exclude_terms)
+        if search_contract:
+            core_terms = _unique([*search_contract.must_include_concepts[:6], *core_terms], 8)
+            must_terms = _unique([*search_contract.must_include_concepts, *must_terms], 10)
+            exclude_terms = _unique([*exclude_terms, *search_contract.must_exclude_concepts], 16)
 
         unique: list[str] = []
         for query in [preprocessing["planning_question"], *queries]:
@@ -687,12 +741,21 @@ class PlannerAgent:
             must_terms=must_terms,
             optional_terms=optional_terms,
             exclude_terms=exclude_terms,
-            required_aspects=search_brief.required_aspects if search_brief else rule_plan.required_aspects,
+            required_aspects=(
+                search_contract.required_aspects
+                if search_contract
+                else search_brief.required_aspects
+                if search_brief
+                else rule_plan.required_aspects
+            ),
             filters={
                 "strictness": strictness,
                 "openalex_mode": openalex_mode,
                 "sort_preference": sort_preference,
                 "ranking_profile": ranking_profile,
+                "search_contract_domain": search_contract.domain_profile.domain_name
+                if search_contract
+                else "",
             },
         )
         plan.openalex_queries = _unique([*unique, *build_openalex_queries(plan)], 6)

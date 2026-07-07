@@ -44,6 +44,18 @@ def _completeness_score(paper: Paper) -> float:
     return score
 
 
+def _merge_unique_text_values(*values: str) -> str:
+    """Merge semicolon-delimited provenance values without duplicates."""
+
+    merged: list[str] = []
+    for value in values:
+        for part in str(value or "").split(";"):
+            cleaned = part.strip()
+            if cleaned and cleaned not in merged:
+                merged.append(cleaned)
+    return ";".join(merged)
+
+
 def merge_papers(left: Paper, right: Paper) -> Paper:
     """Merge duplicate paper records, keeping the more complete base record."""
 
@@ -79,6 +91,34 @@ def merge_papers(left: Paper, right: Paper) -> Paper:
         doi=base.doi or other.doi,
         url=base.url or other.url,
         source_provider=";".join(providers),
+        retrieval_provider=_merge_unique_text_values(
+            base.retrieval_provider,
+            other.retrieval_provider,
+        ),
+        retrieval_stage=_merge_unique_text_values(
+            base.retrieval_stage,
+            other.retrieval_stage,
+        ),
+        retrieval_query=_merge_unique_text_values(
+            base.retrieval_query,
+            other.retrieval_query,
+        ),
+        source_stage=_merge_unique_text_values(
+            base.source_stage,
+            other.source_stage,
+        ),
+        seed_paper_id=_merge_unique_text_values(
+            base.seed_paper_id,
+            other.seed_paper_id,
+        ),
+        seed_title=_merge_unique_text_values(
+            base.seed_title,
+            other.seed_title,
+        ),
+        seed_reason=_merge_unique_text_values(
+            base.seed_reason,
+            other.seed_reason,
+        ),
         provider_ids=provider_ids,
         citation_count=max(base.citation_count, other.citation_count),
         api_relevance_score=max(base.api_relevance_score, other.api_relevance_score),

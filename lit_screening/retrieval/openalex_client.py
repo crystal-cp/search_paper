@@ -43,39 +43,62 @@ class OpenAlexClient:
         max_results: int,
         from_year: int | None = None,
         sort_mode: str = "relevance",
+        search_mode: str = "keyword",
     ) -> RetrievalResult:
         """Search OpenAlex and normalize results into Paper objects."""
 
+        search_mode = normalize_search_mode(search_mode)
+        retrieval_stage = f"{self.provider_name}_{search_mode}"
         if max_results <= 0:
-            return RetrievalResult(raw={"results": []}, papers=[])
+            raw = self._with_retrieval_metadata(
+                {"results": []},
+                query=query,
+                search_mode=search_mode,
+                retrieval_stage=retrieval_stage,
+            )
+            return RetrievalResult(raw=raw, papers=[])
 
         if self.use_cache:
             cached = load_cached_response(
                 self.cache_dir,
-                f"{self.provider_name}_{sort_mode}",
+                f"{self.provider_name}_{search_mode}_{sort_mode}",
                 query,
                 max_results,
                 from_year,
             )
             if cached is not None:
+                cached = self._with_retrieval_metadata(
+                    cached,
+                    query=query,
+                    search_mode=search_mode,
+                    retrieval_stage=retrieval_stage,
+                )
                 return RetrievalResult(raw=cached, papers=self._normalize_many(cached))
 
         if not self.api_key:
-            return RetrievalResult(
-                raw={
+            raw = self._with_retrieval_metadata(
+                {
                     "results": [],
                     "error": "missing_api_key",
                     "status_code": None,
                     "error_message": "OPENALEX_API_KEY is required by the current OpenAlex API.",
                     "provider": self.provider_name,
                 },
-                papers=[],
+                query=query,
+                search_mode=search_mode,
+                retrieval_stage=retrieval_stage,
             )
+            return RetrievalResult(raw=raw, papers=[])
 
         params: dict[str, Any] = {
-            "search": query,
             "per-page": max_results,
         }
+        if search_mode == "exact":
+            params["search.exact"] = query
+        elif search_mode == "semantic":
+            params["search.semantic"] = query
+        else:
+            params["search"] = query
         if from_year:
             params["filter"] = f"from_publication_date:{from_year}-01-01"
         if sort_mode in {"recent", "recent_then_relevant"}:
@@ -98,7 +121,7 @@ class OpenAlexClient:
                 if self.use_cache:
                     save_cached_response(
                         self.cache_dir,
-                        f"{self.provider_name}_{sort_mode}",
+                        f"{self.provider_name}_{search_mode}_{sort_mode}",
                         query,
                         max_results,
                         from_year,
@@ -117,16 +140,31 @@ class OpenAlexClient:
                     "provider": self.provider_name,
                 }
 
+        raw = self._with_retrieval_metadata(
+            raw,
+            query=query,
+            search_mode=search_mode,
+            retrieval_stage=retrieval_stage,
+        )
         return RetrievalResult(raw=raw, papers=self._normalize_many(raw))
 
     def _normalize_many(self, raw: dict[str, Any]) -> list[Paper]:
         return [
-            self._normalize_result(item)
+            self._normalize_result(
+                item,
+                retrieval_query=str(raw.get("retrieval_query") or ""),
+                retrieval_stage=str(raw.get("retrieval_stage") or ""),
+            )
             for item in as_list(raw.get("results"))
             if isinstance(item, dict)
         ]
 
-    def _normalize_result(self, item: dict[str, Any]) -> Paper:
+    def _normalize_result(
+        self,
+        item: dict[str, Any],
+        retrieval_query: str = "",
+        retrieval_stage: str = "",
+    ) -> Paper:
         title = item.get("title") or item.get("display_name") or ""
         doi = normalize_doi(item.get("doi"))
         openalex_id = item.get("id") or ""
@@ -178,6 +216,9 @@ class OpenAlexClient:
             doi=doi,
             url=url,
             source_provider=self.provider_name,
+            retrieval_provider=self.provider_name,
+            retrieval_stage=retrieval_stage,
+            retrieval_query=retrieval_query,
             provider_ids={"openalex": openalex_id} if openalex_id else {},
             citation_count=safe_int(item.get("cited_by_count"), default=0),
             api_relevance_score=relevance_score,
@@ -187,8 +228,33 @@ class OpenAlexClient:
             fields_of_study=list(dict.fromkeys([*concepts, *topics])),
             reference_count=safe_int(item.get("referenced_works_count"), default=0),
             open_access_pdf_url=open_access_pdf_url,
-            raw=item,
+            raw={
+                **item,
+                "_retrieval": {
+                    "retrieval_provider": self.provider_name,
+                    "retrieval_stage": retrieval_stage,
+                    "retrieval_query": retrieval_query,
+                },
+            },
         )
+
+    def _with_retrieval_metadata(
+        self,
+        raw: dict[str, Any],
+        query: str,
+        search_mode: str,
+        retrieval_stage: str,
+    ) -> dict[str, Any]:
+        """Attach auditable OpenAlex retrieval metadata to a raw response."""
+
+        return {
+            **raw,
+            "provider": raw.get("provider") or self.provider_name,
+            "search_mode": search_mode,
+            "retrieval_provider": self.provider_name,
+            "retrieval_stage": retrieval_stage,
+            "retrieval_query": query,
+        }
 
 
 def reconstruct_abstract(abstract_inverted_index: dict[str, list[int]] | None) -> str:
@@ -244,3 +310,12 @@ def request_error_details(exc: requests.RequestException) -> dict[str, Any]:
         "status_code": response.status_code,
         "error_message": response.text[:300],
     }
+
+
+def normalize_search_mode(search_mode: str) -> str:
+    """Return an OpenAlex search mode supported by the client."""
+
+    value = (search_mode or "keyword").strip().lower()
+    if value in {"keyword", "exact", "semantic"}:
+        return value
+    return "keyword"

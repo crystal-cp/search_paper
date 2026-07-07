@@ -1,3 +1,4 @@
+from lit_screening.agents.ambiguity_detector import AmbiguityDetectorAgent
 from lit_screening.agents.extractor import ExtractorAgent
 from lit_screening.agents.planner import (
     PlannerAgent,
@@ -5,8 +6,16 @@ from lit_screening.agents.planner import (
     build_semantic_scholar_queries,
 )
 from lit_screening.agents.research_intent import ResearchIntentAgent
+from lit_screening.agents.search_contract import SearchContractAgent
 from lit_screening.agents.verifier import VerifierAgent
-from lit_screening.models import EvidenceRecord, Paper, QueryPlan
+from lit_screening.models import (
+    DomainProfile,
+    EvidenceRecord,
+    Paper,
+    QueryPlan,
+    SearchBrief,
+    SearchContract,
+)
 
 
 def test_extractor_does_not_hallucinate_when_abstract_is_missing():
@@ -93,6 +102,96 @@ def test_structured_planner_includes_llm_terms_for_llm_agent_question():
     assert "human feedback" in joined
     assert "llm" in joined
     assert "literature screening" in joined
+
+
+def test_ambiguity_detector_distinguishes_literature_screening():
+    analysis = AmbiguityDetectorAgent().analyze(
+        "How can LLM agents improve literature screening?"
+    )
+    screening = next(record for record in analysis if record["term"] == "screening")
+
+    assert screening["selected_meaning"] == "literature screening"
+    assert "literature screening" in screening["recommended_must_terms"]
+    assert "patient screening" in screening["recommended_exclude_terms"]
+    assert "drug screening" in screening["recommended_exclude_terms"]
+
+
+def test_ambiguity_detector_distinguishes_llm_agent_from_biological_agent():
+    analysis = AmbiguityDetectorAgent().analyze(
+        "How should an LLM agent verify evidence?"
+    )
+    agent = next(record for record in analysis if record["term"] == "agent")
+
+    assert agent["selected_meaning"] == "software/LLM agent"
+    assert "LLM agent" in agent["recommended_must_terms"]
+    assert "biological agent" in agent["recommended_exclude_terms"]
+    assert "chemical agent" in agent["recommended_exclude_terms"]
+
+
+def test_search_contract_materials_question_does_not_inject_llm_terms():
+    question = "the significance of surface magnetization in antiferromagnets"
+    brief = ResearchIntentAgent().analyze(question)
+    contract = SearchContractAgent().build(
+        question,
+        search_brief=brief,
+        ambiguity_analysis=AmbiguityDetectorAgent().analyze(question),
+    )
+    joined_must = " ".join(contract.must_include_concepts).lower()
+
+    assert contract.domain_profile.domain_name == "materials_magnetism"
+    assert "surface magnetization" in joined_must
+    assert "llm" not in joined_must
+    assert "large language model" in contract.must_exclude_concepts
+
+
+def test_search_contract_ai_literature_screening_excludes_clinical_meanings():
+    question = "How can LLM agents improve scientific literature screening?"
+    brief = ResearchIntentAgent().analyze(question)
+    ambiguity = AmbiguityDetectorAgent().analyze(question)
+    contract = SearchContractAgent().build(
+        question,
+        search_brief=brief,
+        ambiguity_analysis=ambiguity,
+    )
+
+    assert contract.domain_profile.domain_name == "ai_literature_screening"
+    assert "literature screening" in contract.must_include_concepts
+    assert "patient screening" in contract.must_exclude_concepts
+    assert "drug screening" in contract.must_exclude_concepts
+
+
+def test_planner_uses_search_contract_must_and_exclude_concepts():
+    contract = SearchContract(
+        original_question="ranking papers",
+        refined_question="ranking papers for literature screening",
+        user_goal="Find relevant papers.",
+        search_intent="overview",
+        domain_profile=DomainProfile(
+            domain_name="ai_literature_screening",
+            forbidden_concepts=["patient screening"],
+        ),
+        must_include_concepts=["literature screening", "relevance ranking"],
+        must_exclude_concepts=["patient screening", "drug screening"],
+        inclusion_criteria=["literature screening"],
+        exclusion_criteria=["patient screening"],
+        required_aspects=["ranking", "screening"],
+        preferred_paper_types=["method paper"],
+        time_window="no strict time window",
+        success_definition="Relevant ranked papers.",
+    )
+
+    plan = PlannerAgent().plan_structured(
+        "ranking papers",
+        search_contract=contract,
+    )
+    joined_queries = " ".join([*plan.openalex_queries, *plan.semantic_scholar_queries])
+
+    assert "literature screening" in plan.must_terms
+    assert "relevance ranking" in plan.must_terms
+    assert "patient screening" in plan.exclude_terms
+    assert "drug screening" in plan.exclude_terms
+    assert "ranking" in plan.required_aspects
+    assert "patient screening" in joined_queries
 
 
 def test_openalex_query_builder_quotes_multi_word_core_terms():

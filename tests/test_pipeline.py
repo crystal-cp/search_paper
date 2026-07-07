@@ -62,6 +62,57 @@ class RecordingFakeClient(SurfaceMagnetizationFakeClient):
         return super().search(query, max_results, from_year)
 
 
+class RecordingOpenAlexModeClient:
+    provider_name = "openalex"
+
+    def __init__(self):
+        self.calls = []
+
+    def search(
+        self,
+        query,
+        max_results,
+        from_year=None,
+        sort_mode="relevance",
+        search_mode="keyword",
+    ):
+        self.calls.append(
+            {
+                "query": query,
+                "sort_mode": sort_mode,
+                "search_mode": search_mode,
+            }
+        )
+        stage = f"openalex_{search_mode}"
+        paper = Paper(
+            paper_id=f"{stage}-paper",
+            title=f"{stage} surface magnetization paper",
+            abstract=(
+                "Surface magnetization is important for boundary spin signals "
+                "in antiferromagnetic materials."
+            ),
+            authors=["A. Researcher"],
+            year=2024,
+            venue="Demo Journal",
+            doi=f"10.1234/{stage}",
+            url=f"https://example.test/{stage}",
+            source_provider="openalex",
+            retrieval_provider="openalex",
+            retrieval_stage=stage,
+            retrieval_query=query,
+            citation_count=7,
+        )
+        return RetrievalResult(
+            raw={
+                "search_mode": search_mode,
+                "retrieval_stage": stage,
+                "retrieval_query": query,
+                "results": [{"title": paper.title, "publication_year": paper.year}],
+            },
+            papers=[paper],
+        )
+
+
 class ExplodingClient:
     provider_name = "fake"
 
@@ -144,6 +195,20 @@ def test_pipeline_with_fake_retrievers_and_no_internet(tmp_path):
     assert (output_dir / "merged_papers.csv").exists()
     assert (output_dir / "evidence_table.csv").exists()
     assert (output_dir / "aspect_coverage.csv").exists()
+    assert (output_dir / "domain_assessments.json").exists()
+    assert (output_dir / "screening_decisions.csv").exists()
+    assert (output_dir / "screening_decisions.json").exists()
+    assert (output_dir / "preference_learning.json").exists()
+    assert (output_dir / "feedback_query_refinement.json").exists()
+    assert (output_dir / "seed_papers.json").exists()
+    assert (output_dir / "citation_expansion.csv").exists()
+    assert (output_dir / "retrieval_paths.csv").exists()
+    assert (output_dir / "method_comparison_matrix.csv").exists()
+    assert (output_dir / "method_comparison_matrix.md").exists()
+    assert (output_dir / "research_gap_matrix.csv").exists()
+    assert (output_dir / "research_gap_matrix.md").exists()
+    assert (output_dir / "suggested_next_searches.json").exists()
+    assert (output_dir / "suggested_next_searches.md").exists()
     assert (output_dir / "ranked_papers_before_feedback.csv").exists()
     assert (output_dir / "ranked_papers_after_feedback.csv").exists()
     assert (output_dir / "ranked_papers.csv").exists()
@@ -151,6 +216,8 @@ def test_pipeline_with_fake_retrievers_and_no_internet(tmp_path):
     assert (output_dir / "agent_trace.json").exists()
     assert (output_dir / "run_events.jsonl").exists()
     assert (output_dir / "search_brief.json").exists()
+    assert (output_dir / "search_contract.json").exists()
+    assert (output_dir / "ambiguity_analysis.json").exists()
     assert (output_dir / "question_refinement.json").exists()
     assert (output_dir / "result_groups.json").exists()
     assert (output_dir / "prisma_like_flow.json").exists()
@@ -161,14 +228,61 @@ def test_pipeline_with_fake_retrievers_and_no_internet(tmp_path):
     assert result.merged_paper_count == 1
     assert result.duplicate_count == result.raw_paper_count - result.merged_paper_count
     assert result.search_brief is not None
+    assert result.search_contract is not None
     assert result.aspect_coverage_records
+    assert result.screening_decisions
     assert result.result_groups
     assert "research_intent" in result.agent_trace
     assert "aspect_coverage" in result.agent_trace
+    assert "screening_decision" in result.agent_trace
     assert result.agent_trace["planner"]["queries"]
     events = (output_dir / "run_events.jsonl").read_text()
+    ranked_csv_header = (output_dir / "ranked_papers.csv").read_text().splitlines()[0]
+    prisma = json.loads((output_dir / "prisma_like_flow.json").read_text())
+    report = (output_dir / "report.md").read_text()
+    cards = (output_dir / "paper_cards.md").read_text()
     assert "Pipeline started" in events
     assert "Literature screening complete" in events
+    assert "domain_match_score" in ranked_csv_header
+    assert "domain_decision" in ranked_csv_header
+    assert "off_topic_reason" in ranked_csv_header
+    assert "decision" in ranked_csv_header
+    assert "decision_confidence" in ranked_csv_header
+    assert "primary_reason" in ranked_csv_header
+    assert "preference_score" in ranked_csv_header
+    assert "preference_adjustment" in ranked_csv_header
+    preference = json.loads((output_dir / "preference_learning.json").read_text())
+    query_refinement = json.loads((output_dir / "feedback_query_refinement.json").read_text())
+    assert preference["enabled"] is True
+    assert query_refinement["enabled"] is True
+    assert (
+        prisma["records_included"]
+        + prisma["records_maybe"]
+        + prisma["records_excluded"]
+        == result.merged_paper_count
+    )
+    assert "## Included Papers" in report
+    assert "## Maybe / Needs Human Inspection" in report
+    assert "## Excluded Papers And Reasons" in report
+    assert "## Common Exclusion Reasons" in report
+    assert "# Literature Screening Decision Report" in report
+    assert "## Search Contract" in report
+    assert "## What the System Thinks the User Is Looking For" in report
+    assert "## Ambiguity Handling" in report
+    assert "## Query Strategy" in report
+    assert "## Retrieval Summary" in report
+    assert "## PRISMA-like Screening Flow" in report
+    assert "## Recommended Reading Path" in report
+    assert "## Result Groups" in report
+    assert "## Method Comparison Matrix" in report
+    assert "## Research Gap Matrix" in report
+    assert "## Suggested Next Searches" in report
+    assert "## Human Feedback Preference Learning" in report
+    assert "## Suggested query refinements from feedback" in report
+    assert "## Seed Paper Expansion" in report
+    assert "## Agent Trace Summary" in report
+    assert "- Decision:" in cards
+    assert "- Reading priority:" in cards
 
 
 def test_pipeline_applies_hard_local_from_year_filter(tmp_path):
@@ -345,6 +459,66 @@ def test_retrieval_diagnostics_json_is_produced(tmp_path):
     assert diagnostics["top_10_score_breakdown"]
 
 
+def test_search_contract_and_ambiguity_outputs_are_produced(tmp_path):
+    retriever = RetrieverAgent(clients={"fake": FakeClient()})
+
+    run_pipeline(
+        question="How can LLM agents improve literature screening?",
+        providers=["fake"],
+        max_per_query=1,
+        output_dir=str(tmp_path / "outputs"),
+        retriever_agent=retriever,
+        planned_queries_override=["LLM agents literature screening"],
+    )
+
+    output_dir = tmp_path / "outputs"
+    contract = json.loads((output_dir / "search_contract.json").read_text())
+    ambiguity = json.loads((output_dir / "ambiguity_analysis.json").read_text())
+    report = (output_dir / "report.md").read_text()
+
+    assert contract["domain_profile"]["domain_name"] == "ai_literature_screening"
+    assert "literature screening" in contract["must_include_concepts"]
+    assert "patient screening" in contract["must_exclude_concepts"]
+    assert any(record["term"] == "screening" for record in ambiguity)
+    assert "## Search Contract" in report
+    assert "## Domain Guardrails" in report
+    assert "ai_literature_screening" in report
+
+
+def test_openalex_keyword_semantic_mode_runs_two_retrieval_stages(tmp_path):
+    client = RecordingOpenAlexModeClient()
+    retriever = RetrieverAgent(clients={"openalex": client})
+
+    result = run_pipeline(
+        question="surface magnetization",
+        providers=["openalex"],
+        max_per_query=1,
+        output_dir=str(tmp_path / "outputs"),
+        retriever_agent=retriever,
+        planned_queries_override=["surface magnetization"],
+        openalex_mode="keyword+semantic",
+    )
+
+    diagnostics = json.loads(
+        (tmp_path / "outputs" / "retrieval_diagnostics.json").read_text()
+    )
+    called_modes = [call["search_mode"] for call in client.calls]
+    paper_stages = {paper.retrieval_stage for paper in result.merged_papers}
+    diagnostic_stages = {
+        stage["retrieval_stage"]
+        for stage in diagnostics["retrieval_stages"]
+        if stage["provider"] == "openalex"
+    }
+
+    assert called_modes == ["keyword", "semantic"]
+    assert "openalex_keyword" in paper_stages
+    assert "openalex_semantic" in paper_stages
+    assert "openalex_keyword" in diagnostic_stages
+    assert "openalex_semantic" in diagnostic_stages
+    assert all(stage["raw_count"] == 1 for stage in diagnostics["retrieval_stages"])
+    assert all(stage["kept_count"] == 1 for stage in diagnostics["retrieval_stages"])
+
+
 def test_retriever_writes_raw_error_when_provider_raises(tmp_path):
     retriever = RetrieverAgent(clients={"fake": ExplodingClient()})
 
@@ -382,3 +556,7 @@ def test_fake_pipeline_produces_sensemaking_outputs(tmp_path):
     assert json.loads((output_dir / "prisma_like_flow.json").read_text())[
         "records_screened"
     ] == 1
+    assert (output_dir / "screening_decisions.csv").exists()
+    assert (output_dir / "method_comparison_matrix.csv").exists()
+    assert (output_dir / "research_gap_matrix.csv").exists()
+    assert (output_dir / "suggested_next_searches.json").exists()

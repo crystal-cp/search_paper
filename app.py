@@ -27,6 +27,7 @@ from lit_screening.pipeline import (
     apply_feedback_to_pipeline_result,
     plan_screening_queries,
     ranked_to_row,
+    run_query_pilot_workflow,
     run_pipeline,
 )
 from lit_screening.run_logging import ScreeningRunLogger
@@ -212,12 +213,14 @@ STEP3_FIELD_GUIDE = [
 ]
 PIPELINE_STAGE_PROGRESS = {
     "planning": 5,
+    "query_pilot": 16,
     "retrieval": 25,
     "dedup": 45,
     "extraction": 58,
     "verification": 72,
     "aspect_coverage": 78,
     "ranking": 84,
+    "snowballing": 86,
     "feedback": 88,
     "evaluation": 92,
     "artifacts": 96,
@@ -225,12 +228,14 @@ PIPELINE_STAGE_PROGRESS = {
 }
 PIPELINE_STAGE_LABELS = {
     "planning": "Query planning",
+    "query_pilot": "Query pilot",
     "retrieval": "Literature retrieval",
     "dedup": "Metadata merge",
     "extraction": "Evidence extraction",
     "verification": "Evidence grounding",
     "aspect_coverage": "Aspect coverage",
     "ranking": "Ranking",
+    "snowballing": "Seed expansion",
     "feedback": "Human feedback",
     "evaluation": "Evaluation",
     "artifacts": "Output artifacts",
@@ -324,6 +329,8 @@ def save_project_manifest(
         "openalex_mode": settings.get("openalex_mode", "keyword+semantic"),
         "sort_preference": settings.get("sort_preference", "relevance"),
         "ranking_profile": settings.get("ranking_profile", "balanced"),
+        "enable_snowballing": settings.get("enable_snowballing", False),
+        "snowball_top_n": settings.get("snowball_top_n", 3),
         "scoring_weights": result.scoring_weights,
         "merged_paper_count": result.merged_paper_count,
         "duplicate_count": result.duplicate_count,
@@ -334,6 +341,16 @@ def save_project_manifest(
         "search_brief_path": str(Path(result.output_dir) / "search_brief.json"),
         "question_refinement_path": str(Path(result.output_dir) / "question_refinement.json"),
         "aspect_coverage_path": str(Path(result.output_dir) / "aspect_coverage.csv"),
+        "domain_assessments_path": str(Path(result.output_dir) / "domain_assessments.json"),
+        "screening_decisions_path": str(Path(result.output_dir) / "screening_decisions.csv"),
+        "preference_learning_path": str(Path(result.output_dir) / "preference_learning.json"),
+        "feedback_query_refinement_path": str(Path(result.output_dir) / "feedback_query_refinement.json"),
+        "method_comparison_matrix_path": str(Path(result.output_dir) / "method_comparison_matrix.csv"),
+        "research_gap_matrix_path": str(Path(result.output_dir) / "research_gap_matrix.csv"),
+        "suggested_next_searches_path": str(Path(result.output_dir) / "suggested_next_searches.json"),
+        "seed_papers_path": str(Path(result.output_dir) / "seed_papers.json"),
+        "citation_expansion_path": str(Path(result.output_dir) / "citation_expansion.csv"),
+        "retrieval_paths_path": str(Path(result.output_dir) / "retrieval_paths.csv"),
         "retrieval_diagnostics_path": str(Path(result.output_dir) / "retrieval_diagnostics.json"),
         "result_groups_path": str(Path(result.output_dir) / "result_groups.json"),
         "prisma_like_flow_path": str(Path(result.output_dir) / "prisma_like_flow.json"),
@@ -380,6 +397,17 @@ def save_uploaded_library(uploaded_file: Any, output_dir: Path) -> tuple[str | N
     return str(destination), uploaded_library_format(uploaded_file.name)
 
 
+def save_uploaded_seed_file(uploaded_file: Any, output_dir: Path) -> str | None:
+    """Save an uploaded seed-paper CSV into the project folder."""
+
+    if uploaded_file is None:
+        return None
+    output_dir.mkdir(parents=True, exist_ok=True)
+    destination = output_dir / "seed_papers.csv"
+    destination.write_bytes(uploaded_file.getvalue())
+    return str(destination)
+
+
 def ranked_dataframe(ranked_papers: list[RankedPaper]) -> pd.DataFrame:
     """Convert ranked papers to a display-friendly dataframe."""
 
@@ -389,6 +417,16 @@ def ranked_dataframe(ranked_papers: list[RankedPaper]) -> pd.DataFrame:
     columns = [
         "rank",
         "final_score",
+        "decision",
+        "decision_confidence",
+        "primary_reason",
+        "reading_priority",
+        "suggested_action",
+        "preference_score",
+        "preference_adjustment",
+        "domain_decision",
+        "domain_match_score",
+        "off_topic_reason",
         "title",
         "year",
         "venue",
@@ -402,6 +440,9 @@ def ranked_dataframe(ranked_papers: list[RankedPaper]) -> pd.DataFrame:
         "missing_abstract",
         "confidence",
         "paper_id",
+        "source_stage",
+        "seed_title",
+        "seed_reason",
     ]
     return pd.DataFrame(rows)[columns]
 
@@ -651,6 +692,29 @@ def render_sidebar() -> dict[str, Any]:
             index=1,
         )
 
+    with st.sidebar.expander(ui_text(language, "Seed Paper Mode", "种子论文模式")):
+        enable_snowballing = st.checkbox(
+            ui_text(language, "Enable citation snowballing", "启用引用滚雪球扩展"),
+            value=False,
+            help=ui_text(
+                language,
+                "When enabled, Semantic Scholar references, citations, and recommendations are used to add related papers.",
+                "启用后会通过 Semantic Scholar 的 references、citations 和 recommendations 扩展相关论文。",
+            ),
+        )
+        snowball_top_n = st.number_input(
+            ui_text(language, "Snowball top N", "滚雪球 Top N"),
+            min_value=1,
+            max_value=20,
+            value=3,
+            step=1,
+            help=ui_text(
+                language,
+                "Controls how many seed papers and linked papers per stage are used. Keep this small to avoid many API calls.",
+                "控制使用多少种子论文，以及每个扩展阶段取多少篇相关论文。建议保持较小，避免 API 调用过多。",
+            ),
+        )
+
     with st.sidebar.expander(ui_text(language, "API Keys", "API 设置")):
         st.text_input(
             "OPENALEX_API_KEY",
@@ -749,6 +813,14 @@ def render_sidebar() -> dict[str, Any]:
 
     providers = PROVIDER_OPTIONS[provider_label]
     render_key_warnings(providers, llm_backend, language)
+    if enable_snowballing and not os.getenv("S2_API_KEY"):
+        st.sidebar.warning(
+            ui_text(
+                language,
+                "Citation snowballing is enabled, but S2_API_KEY is missing. Expansion will be skipped.",
+                "已启用引用滚雪球，但缺少 S2_API_KEY；扩展步骤会被跳过。",
+            )
+        )
     with st.sidebar.expander(ui_text(language, "Provider Connectivity", "数据源连通性")):
         if st.button(ui_text(language, "Check providers", "检查数据源")):
             st.session_state.provider_connectivity = check_provider_connectivity(providers)
@@ -770,6 +842,8 @@ def render_sidebar() -> dict[str, Any]:
         "openalex_mode": openalex_mode,
         "sort_preference": sort_preference,
         "ranking_profile": ranking_profile,
+        "enable_snowballing": bool(enable_snowballing),
+        "snowball_top_n": int(snowball_top_n),
     }
 
 
@@ -820,6 +894,8 @@ def ensure_state() -> None:
     st.session_state.setdefault("time_window_text", "")
     st.session_state.setdefault("success_definition_text", "")
     st.session_state.setdefault("provider_connectivity", None)
+    st.session_state.setdefault("query_pilot_diagnostics", None)
+    st.session_state.setdefault("query_repair_suggestions", None)
 
 
 def query_preview_signature(question: str, settings: dict[str, Any]) -> dict[str, Any]:
@@ -926,6 +1002,8 @@ def generate_query_preview(question: str, settings: dict[str, Any]) -> None:
     )
     st.session_state.pipeline_result = None
     st.session_state.saved_project = None
+    st.session_state.query_pilot_diagnostics = None
+    st.session_state.query_repair_suggestions = None
 
 
 def parse_query_editor_text(text: str) -> list[str]:
@@ -989,6 +1067,116 @@ def edited_query_plan(preview: dict[str, Any], settings: dict[str, Any]) -> Quer
     )
 
 
+def run_query_pilot_preview(
+    question: str,
+    settings: dict[str, Any],
+    query_plan: QueryPlan,
+    preview: dict[str, Any],
+) -> None:
+    """Run optional pilot search for the current query plan."""
+
+    search_contract = preview.get("search_contract")
+    if search_contract is None:
+        raise ValueError("SearchContract is missing. Regenerate the query plan first.")
+    workflow = run_query_pilot_workflow(
+        query_plan=query_plan,
+        search_contract=search_contract,
+        ambiguity_analysis=list(preview.get("ambiguity_analysis", [])),
+        providers=settings["providers"],
+        max_per_query=5,
+        from_year=settings["from_year"],
+        use_cache=settings["use_cache"],
+        openalex_mode=settings["openalex_mode"],
+        sort_preference=settings["sort_preference"],
+    )
+    st.session_state.query_pilot_diagnostics = workflow["diagnostics"]
+    st.session_state.query_repair_suggestions = workflow["repair_suggestions"]
+
+
+def accept_repaired_queries() -> None:
+    """Write repaired query suggestions back into the editable Step 3 fields."""
+
+    suggestions = st.session_state.query_repair_suggestions or {}
+    repaired_plan = suggestions.get("repaired_query_plan")
+    if isinstance(repaired_plan, QueryPlan):
+        query_plan = repaired_plan
+    else:
+        query_plan = preview_query_plan({"query_plan": repaired_plan or {}})
+    st.session_state.openalex_queries_text = "\n".join(query_plan.openalex_queries)
+    st.session_state.semantic_scholar_queries_text = "\n".join(
+        query_plan.semantic_scholar_queries
+    )
+    st.session_state.query_repair_suggestions = {
+        **suggestions,
+        "applied": True,
+    }
+
+
+def render_query_pilot_results(language: str) -> None:
+    """Show pilot-search drift diagnostics and repair suggestions."""
+
+    diagnostics = st.session_state.query_pilot_diagnostics
+    repairs = st.session_state.query_repair_suggestions
+    if not diagnostics:
+        return
+    with st.expander(
+        ui_text(language, "Query Pilot diagnostics", "Query Pilot 诊断"),
+        expanded=True,
+    ):
+        summary = diagnostics.get("summary", {})
+        cols = st.columns(3)
+        cols[0].metric("pilot records", len(diagnostics.get("results", [])))
+        cols[1].metric("mean off-topic", summary.get("mean_off_topic_rate", 0))
+        cols[2].metric(
+            "repairs",
+            len((repairs or {}).get("suggestions", [])),
+        )
+        rows = diagnostics.get("results", [])
+        if rows:
+            st.dataframe(
+                pd.DataFrame(rows)[
+                    [
+                        "provider",
+                        "retrieval_stage",
+                        "recommendation",
+                        "off_topic_rate_estimate",
+                        "query",
+                        "detected_drift",
+                        "pilot_top_titles",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+        suggestions = (repairs or {}).get("suggestions", [])
+        if suggestions:
+            st.subheader(ui_text(language, "Repair suggestions", "修复建议"))
+            st.dataframe(
+                pd.DataFrame(suggestions)[
+                    [
+                        "provider",
+                        "recommendation",
+                        "original_query",
+                        "repaired_query",
+                        "reason",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+            if st.button(
+                ui_text(language, "Accept repaired queries", "接受修复后的 queries")
+            ):
+                accept_repaired_queries()
+                st.success(
+                    ui_text(
+                        language,
+                        "Repaired queries were copied into Step 3.",
+                        "修复后的 queries 已写入第 3 步。",
+                    )
+                )
+
+
 def run_screening(
     question: str,
     settings: dict[str, Any],
@@ -997,12 +1185,16 @@ def run_screening(
     search_brief: SearchBrief | None = None,
     planner_metadata: dict[str, Any] | None = None,
     uploaded_library: Any = None,
+    seed_paper_text: str = "",
+    uploaded_seed_file: Any = None,
 ) -> None:
     """Run the core pipeline and store the result in session state."""
 
     output_dir = new_project_output_dir(question)
     language = settings["language"]
     input_file, input_format = save_uploaded_library(uploaded_library, output_dir)
+    seed_file = save_uploaded_seed_file(uploaded_seed_file, output_dir)
+    seed_values = parse_query_editor_text(seed_paper_text)
     connectivity = check_provider_connectivity(settings["providers"])
     st.session_state.provider_connectivity = connectivity
     if any(not row["reachable"] for row in connectivity):
@@ -1046,6 +1238,10 @@ def run_screening(
                 ranking_profile=settings["ranking_profile"],
                 input_file=input_file,
                 input_format=input_format,
+                seed_papers=seed_values,
+                seed_file=seed_file,
+                enable_snowballing=settings["enable_snowballing"],
+                snowball_top_n=settings["snowball_top_n"],
                 progress_callback=progress_callback,
             )
         except Exception as exc:
@@ -1228,6 +1424,78 @@ def render_manual_feedback(selected: RankedPaper, result: PipelineResult, langua
         updated_feedback[selected.paper.paper_id] = feedback_record
         apply_feedback_records(result, updated_feedback)
         st.success(ui_text(language, "Feedback applied without rerunning retrieval.", "反馈已应用，未重新请求 API。"))
+
+
+def append_unique_lines(existing_text: str, new_terms: list[str]) -> str:
+    """Append unique one-per-line terms to a Streamlit text area value."""
+
+    values = parse_query_editor_text(existing_text)
+    for term in new_terms:
+        cleaned = " ".join(str(term).split())
+        if cleaned and cleaned not in values:
+            values.append(cleaned)
+    return "\n".join(values)
+
+
+def render_preference_learning(result: PipelineResult, language: str) -> None:
+    """Show learned feedback preferences and query refinement suggestions."""
+
+    learning = result.preference_learning
+    refinement = result.feedback_query_refinement or {}
+    st.subheader(ui_text(language, "Preference learning", "偏好学习"))
+    if not learning or not learning.enabled:
+        note = learning.note if learning else "No feedback model has been learned yet."
+        st.caption(
+            ui_text(
+                language,
+                f"Inactive: {note}",
+                f"未启用：{note}",
+            )
+        )
+        return
+
+    cols = st.columns(2)
+    with cols[0]:
+        st.markdown("**Positive terms**")
+        st.write(", ".join(learning.positive_terms[:16]) or "-")
+    with cols[1]:
+        st.markdown("**Negative terms**")
+        st.write(", ".join(learning.negative_terms[:16]) or "-")
+
+    st.caption(
+        ui_text(
+            language,
+            f"Model: {learning.model_type} | labels: {learning.labeled_paper_count} | include: {learning.include_count} | exclude: {learning.exclude_count}",
+            f"模型：{learning.model_type} | 标签：{learning.labeled_paper_count} | include：{learning.include_count} | exclude：{learning.exclude_count}",
+        )
+    )
+    st.json(refinement)
+    if st.button(
+        ui_text(
+            language,
+            "Accept refinements for next retrieval",
+            "接受这些 refinement 用于下一次检索",
+        )
+    ):
+        st.session_state.must_terms_text = append_unique_lines(
+            st.session_state.must_terms_text,
+            refinement.get("suggested_must_terms", []),
+        )
+        st.session_state.optional_terms_text = append_unique_lines(
+            st.session_state.optional_terms_text,
+            refinement.get("suggested_optional_terms", []),
+        )
+        st.session_state.exclude_terms_text = append_unique_lines(
+            st.session_state.exclude_terms_text,
+            refinement.get("suggested_exclude_terms", []),
+        )
+        st.success(
+            ui_text(
+                language,
+                "Feedback-derived terms were added to the editable query plan fields.",
+                "反馈学习到的 terms 已加入可编辑 Query Plan 字段。",
+            )
+        )
 
 
 def render_planned_queries(queries: list[str]) -> None:
@@ -1894,6 +2162,41 @@ def render_result(result: PipelineResult, language: str) -> None:
         st.json(result.evaluation_metrics.get("year_filter", {}))
         st.subheader(ui_text(language, "Imported Library Audit", "导入文献库审计"))
         st.json(result.evaluation_metrics.get("imported_library", {}))
+        st.subheader(ui_text(language, "Seed Paper Expansion", "种子论文扩展"))
+        seed_rows = [
+            {
+                "seed_id": seed.seed_id,
+                "seed_type": seed.seed_type,
+                "title": seed.title,
+                "doi": seed.doi,
+                "note": seed.note,
+            }
+            for seed in result.seed_papers
+        ]
+        if seed_rows:
+            st.dataframe(pd.DataFrame(seed_rows), use_container_width=True, hide_index=True)
+        else:
+            st.caption(ui_text(language, "No seed papers were saved for this run.", "本次运行没有保存种子论文。"))
+        path_rows = [
+            {
+                "paper_id": path.paper_id,
+                "source_stage": path.source_stage,
+                "seed_paper_id": path.seed_paper_id,
+                "seed_title": path.seed_title,
+                "reason": path.reason,
+            }
+            for path in result.retrieval_paths
+        ]
+        if path_rows:
+            st.dataframe(pd.DataFrame(path_rows), use_container_width=True, hide_index=True)
+        else:
+            st.caption(
+                ui_text(
+                    language,
+                    "No reference/citation/recommendation retrieval paths were recorded.",
+                    "没有记录 reference/citation/recommendation 扩展路径。",
+                )
+            )
 
     with tabs[5]:
         st.subheader(ui_text(language, "Recommended Reading Path", "推荐阅读路径"))
@@ -1911,6 +2214,7 @@ def render_result(result: PipelineResult, language: str) -> None:
         render_feedback_tools(result, language)
         if selected is not None:
             render_manual_feedback(selected, result, language)
+        render_preference_learning(result, language)
 
     with tabs[7]:
         render_downloads(result.ranked_papers_path, result.report_path, language)
@@ -1918,7 +2222,12 @@ def render_result(result: PipelineResult, language: str) -> None:
             ("aspect_coverage.csv", Path(result.output_dir) / "aspect_coverage.csv", "text/csv"),
             ("imported_papers.csv", Path(result.output_dir) / "imported_papers.csv", "text/csv"),
             ("import_diagnostics.json", Path(result.output_dir) / "import_diagnostics.json", "application/json"),
+            ("seed_papers.json", Path(result.output_dir) / "seed_papers.json", "application/json"),
+            ("citation_expansion.csv", Path(result.output_dir) / "citation_expansion.csv", "text/csv"),
+            ("retrieval_paths.csv", Path(result.output_dir) / "retrieval_paths.csv", "text/csv"),
             ("retrieval_diagnostics.json", Path(result.output_dir) / "retrieval_diagnostics.json", "application/json"),
+            ("preference_learning.json", Path(result.output_dir) / "preference_learning.json", "application/json"),
+            ("feedback_query_refinement.json", Path(result.output_dir) / "feedback_query_refinement.json", "application/json"),
             ("run_events.jsonl", Path(result.output_dir) / "run_events.jsonl", "application/jsonl"),
             ("paper_cards.md", Path(result.output_dir) / "paper_cards.md", "text/markdown"),
             ("reading_path.md", Path(result.output_dir) / "reading_path.md", "text/markdown"),
@@ -1956,6 +2265,7 @@ def render_saved_project(manifest: dict[str, Any], language: str) -> None:
     question_refinement = read_json_file(output_dir / "question_refinement.json")
     result_groups = read_json_file(output_dir / "result_groups.json")
     prisma_flow = read_json_file(output_dir / "prisma_like_flow.json")
+    seed_papers = read_json_file(output_dir / "seed_papers.json")
 
     tabs = st.tabs(
         [
@@ -2015,6 +2325,12 @@ def render_saved_project(manifest: dict[str, Any], language: str) -> None:
         st.json(result_groups)
         st.subheader(ui_text(language, "PRISMA-like Screening Flow", "PRISMA-like 筛选流程"))
         st.json(prisma_flow)
+        st.subheader(ui_text(language, "Seed Paper Expansion", "种子论文扩展"))
+        if seed_papers:
+            st.dataframe(pd.DataFrame(seed_papers), use_container_width=True)
+        retrieval_paths_path = output_dir / "retrieval_paths.csv"
+        if retrieval_paths_path.exists():
+            st.dataframe(pd.read_csv(retrieval_paths_path), use_container_width=True)
     with tabs[4]:
         render_markdown_artifact(
             output_dir / "reading_path.md",
@@ -2096,8 +2412,57 @@ def main() -> None:
                 )
             )
 
+    with st.expander(
+        ui_text(language, "Seed Paper Mode", "种子论文模式"),
+        expanded=False,
+    ):
+        seed_paper_text = st.text_area(
+            ui_text(
+                language,
+                "Seed papers (one DOI, title, Semantic Scholar ID, or OpenAlex ID per line)",
+                "种子论文（每行一个 DOI、标题、Semantic Scholar ID 或 OpenAlex ID）",
+            ),
+            height=110,
+            help=ui_text(
+                language,
+                "Seed papers are saved with the project. Citation snowballing only runs when it is enabled in the sidebar.",
+                "种子论文会随项目保存。只有在侧边栏启用引用滚雪球时才会执行扩展。",
+            ),
+        )
+        uploaded_seed_file = st.file_uploader(
+            ui_text(language, "Upload seed_papers.csv", "上传 seed_papers.csv"),
+            type=["csv"],
+            help=ui_text(
+                language,
+                "Expected columns: seed_id,seed_type,title,doi,note.",
+                "需要列：seed_id,seed_type,title,doi,note。",
+            ),
+        )
+        seed_count = len(parse_query_editor_text(seed_paper_text))
+        st.caption(
+            ui_text(
+                language,
+                (
+                    f"{seed_count} typed seeds. Snowballing enabled: "
+                    f"{settings['enable_snowballing']}."
+                ),
+                (
+                    f"已输入 {seed_count} 个种子。引用滚雪球启用状态："
+                    f"{settings['enable_snowballing']}。"
+                ),
+            )
+        )
+        if uploaded_seed_file is not None:
+            st.success(
+                ui_text(
+                    language,
+                    f"Ready to use {uploaded_seed_file.name}.",
+                    f"已准备使用 {uploaded_seed_file.name}。",
+                )
+            )
+
     cleaned_question = question.strip()
-    action_cols = st.columns(2)
+    action_cols = st.columns(3)
     with action_cols[0]:
         if st.button(ui_text(language, "Step 2: Generate Query Plan", "第 2 步：生成 Query Plan"), type="primary"):
             if not cleaned_question:
@@ -2122,6 +2487,36 @@ def main() -> None:
         selected_query_count += len(semantic_queries)
     with action_cols[1]:
         if st.button(
+            ui_text(language, "Run Pilot Search", "运行 Pilot Search"),
+            disabled=not preview_ready or not preview_is_current or selected_query_count == 0,
+        ):
+            try:
+                preview = st.session_state.query_preview or {}
+                current_query_plan = edited_query_plan(preview, settings)
+                with st.spinner(
+                    ui_text(
+                        language,
+                        "Running small pilot search...",
+                        "正在运行小样本 pilot 检索...",
+                    )
+                ):
+                    run_query_pilot_preview(
+                        cleaned_question,
+                        settings,
+                        current_query_plan,
+                        preview,
+                    )
+            except Exception as exc:
+                st.error(
+                    ui_text(
+                        language,
+                        f"Pilot search failed: {exc}",
+                        f"Pilot Search 失败：{exc}",
+                    )
+                )
+
+    with action_cols[2]:
+        if st.button(
             ui_text(language, "Step 4: Run Retrieval", "第 4 步：开始检索"),
             disabled=not preview_ready or not preview_is_current or selected_query_count == 0,
         ):
@@ -2136,11 +2531,14 @@ def main() -> None:
                     search_brief=current_search_brief,
                     planner_metadata=preview.get("planner_metadata", {}),
                     uploaded_library=uploaded_library,
+                    seed_paper_text=seed_paper_text,
+                    uploaded_seed_file=uploaded_seed_file,
                 )
             except Exception as exc:
                 st.error(ui_text(language, f"Screening failed: {exc}", f"筛选失败：{exc}"))
 
     render_query_preview_editor(cleaned_question, settings, language)
+    render_query_pilot_results(language)
 
     result = st.session_state.pipeline_result
     saved_project = st.session_state.saved_project

@@ -9,6 +9,7 @@ from lit_screening.models import (
     Paper,
     RankedPaper,
     SearchBrief,
+    ScreeningDecision,
     VerificationResult,
 )
 from lit_screening.reading_path import generate_reading_path
@@ -133,10 +134,24 @@ def test_prisma_like_flow_counts_records_and_reasons():
         duplicate_count=0,
         verification_results=[verification],
         ranked_papers=[],
+        screening_decisions=[
+            ScreeningDecision(
+                paper_id="p1",
+                decision="exclude",
+                decision_confidence=0.8,
+                primary_reason="missing_abstract",
+                exclusion_reasons=["missing_abstract"],
+                domain_match_score=0.0,
+                domain_decision="unknown",
+                reading_priority="exclude",
+                suggested_action="exclude",
+            )
+        ],
     )
 
     assert flow["records_screened"] == 1
     assert flow["records_with_missing_abstracts"] == 1
+    assert flow["records_excluded"] == 1
     assert flow["common_exclusion_reasons"]["missing_abstract"] == 1
 
 

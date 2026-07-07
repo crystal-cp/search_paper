@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any, Callable
 
@@ -51,6 +52,7 @@ class RetrieverAgent:
         output_dir: str | Path | None = None,
         progress_callback: Callable[[str, str, dict[str, Any]], None] | None = None,
         sort_mode: str = "relevance",
+        openalex_mode: str = "keyword",
     ) -> tuple[list[Paper], dict[str, list[dict]], dict[str, int]]:
         """Retrieve papers and optionally save raw provider result bundles."""
 
@@ -69,38 +71,110 @@ class RetrieverAgent:
                 raise ValueError(f"Unknown provider: {provider}")
             client = self.clients[provider]
             provider_queries = queries.get(provider, []) if isinstance(queries, dict) else queries
+            search_stages = retrieval_stages_for_provider(provider, openalex_mode)
             for index, query in enumerate(provider_queries, start=1):
-                if progress_callback:
-                    progress_callback(
-                        "retrieval",
-                        f"Searching {provider} ({index}/{len(provider_queries)})",
-                        {
-                            "provider": provider,
-                            "query": query,
-                            "current_query": index,
-                            "total_queries": len(provider_queries),
-                        },
-                    )
-                try:
-                    if provider == "openalex":
-                        result = client.search(
-                            query,
-                            max_per_query,
-                            from_year,
-                            sort_mode=sort_mode,
+                stop_provider = False
+                for search_mode, retrieval_stage in search_stages:
+                    if progress_callback:
+                        progress_callback(
+                            "retrieval",
+                            f"Searching {provider} ({index}/{len(provider_queries)})",
+                            {
+                                "provider": provider,
+                                "query": query,
+                                "current_query": index,
+                                "total_queries": len(provider_queries),
+                                "search_mode": search_mode,
+                                "retrieval_stage": retrieval_stage,
+                            },
                         )
-                    else:
-                        result = client.search(query, max_per_query, from_year)
-                except Exception as exc:
-                    error_raw = {
-                        "error": exc.__class__.__name__,
-                        "error_message": str(exc)[:500],
-                        "provider": provider,
-                        "stage": "client_search",
-                    }
+                    try:
+                        if provider == "openalex":
+                            result = call_client_search(
+                                client,
+                                query,
+                                max_per_query,
+                                from_year,
+                                sort_mode=sort_mode,
+                                search_mode=search_mode,
+                            )
+                        else:
+                            result = client.search(query, max_per_query, from_year)
+                    except Exception as exc:
+                        error_raw = {
+                            "error": exc.__class__.__name__,
+                            "error_message": str(exc)[:500],
+                            "provider": provider,
+                            "stage": "client_search",
+                            "search_mode": search_mode,
+                            "retrieval_stage": retrieval_stage,
+                            "retrieval_query": query,
+                        }
+                        raw_by_provider[provider].append(
+                            {
+                                "query": query,
+                                "search_mode": search_mode,
+                                "retrieval_stage": retrieval_stage,
+                                "paper_count": 0,
+                                "missing_abstract_count": 0,
+                                "response": error_raw,
+                            }
+                        )
+                        if output_dir:
+                            write_json(
+                                Path(output_dir) / f"raw_{provider}_results.json",
+                                raw_by_provider[provider],
+                            )
+                        if progress_callback:
+                            progress_callback(
+                                "retrieval_error",
+                                f"{provider} failed while searching",
+                                {
+                                    "provider": provider,
+                                    "query": query,
+                                    "search_mode": search_mode,
+                                    "retrieval_stage": retrieval_stage,
+                                    "error": exc.__class__.__name__,
+                                    "message": str(exc)[:240],
+                                },
+                            )
+                        raise
+                    if not isinstance(result, RetrievalResult):
+                        result = RetrievalResult(raw=result[0], papers=result[1])
+                    for paper in result.papers:
+                        if not paper.retrieval_provider:
+                            paper.retrieval_provider = provider
+                        if not paper.retrieval_stage:
+                            paper.retrieval_stage = retrieval_stage
+                        if not paper.retrieval_query:
+                            paper.retrieval_query = query
+                        if not paper.source_stage:
+                            paper.source_stage = (
+                                "semantic"
+                                if search_mode == "semantic"
+                                else "keyword"
+                            )
+                    missing_abstract_count = sum(1 for paper in result.papers if not paper.abstract)
                     raw_by_provider[provider].append(
-                        {"query": query, "response": error_raw}
+                        {
+                            "query": query,
+                            "search_mode": search_mode,
+                            "retrieval_stage": retrieval_stage,
+                            "paper_count": len(result.papers),
+                            "paper_ids": [paper.paper_id for paper in result.papers],
+                            "missing_abstract_count": missing_abstract_count,
+                            "response": {
+                                **result.raw,
+                                "search_mode": result.raw.get("search_mode") or search_mode,
+                                "retrieval_stage": result.raw.get("retrieval_stage")
+                                or retrieval_stage,
+                                "retrieval_query": result.raw.get("retrieval_query")
+                                or query,
+                            },
+                        }
                     )
+                    all_papers.extend(result.papers)
+                    retrieval_counts[provider] += len(result.papers)
                     if output_dir:
                         write_json(
                             Path(output_dir) / f"raw_{provider}_results.json",
@@ -108,49 +182,35 @@ class RetrieverAgent:
                         )
                     if progress_callback:
                         progress_callback(
-                            "retrieval_error",
-                            f"{provider} failed while searching",
+                            "retrieval",
+                            f"{provider} returned {len(result.papers)} papers",
                             {
                                 "provider": provider,
                                 "query": query,
-                                "error": exc.__class__.__name__,
-                                "message": str(exc)[:240],
+                                "search_mode": search_mode,
+                                "retrieval_stage": retrieval_stage,
+                                "returned": len(result.papers),
+                                "missing_abstract_count": missing_abstract_count,
+                                "provider_total": retrieval_counts[provider],
                             },
                         )
-                    raise
-                if not isinstance(result, RetrievalResult):
-                    result = RetrievalResult(raw=result[0], papers=result[1])
-                raw_by_provider[provider].append({"query": query, "response": result.raw})
-                all_papers.extend(result.papers)
-                retrieval_counts[provider] += len(result.papers)
-                if output_dir:
-                    write_json(
-                        Path(output_dir) / f"raw_{provider}_results.json",
-                        raw_by_provider[provider],
-                    )
-                if progress_callback:
-                    progress_callback(
-                        "retrieval",
-                        f"{provider} returned {len(result.papers)} papers",
-                        {
-                            "provider": provider,
-                            "query": query,
-                            "returned": len(result.papers),
-                            "provider_total": retrieval_counts[provider],
-                        },
-                    )
-                if should_stop_provider_after_error(result.raw):
-                    if progress_callback:
-                        progress_callback(
-                            "retrieval",
-                            f"Stopping {provider} after provider rate-limit or budget error",
-                            {
-                                "provider": provider,
-                                "error": result.raw.get("error", ""),
-                                "status_code": result.raw.get("status_code", ""),
-                                "message": result.raw.get("error_message", "")[:180],
-                            },
-                        )
+                    if should_stop_provider_after_error(result.raw):
+                        stop_provider = True
+                        if progress_callback:
+                            progress_callback(
+                                "retrieval",
+                                f"Stopping {provider} after provider rate-limit or budget error",
+                                {
+                                    "provider": provider,
+                                    "error": result.raw.get("error", ""),
+                                    "status_code": result.raw.get("status_code", ""),
+                                    "message": result.raw.get("error_message", "")[:180],
+                                    "search_mode": search_mode,
+                                    "retrieval_stage": retrieval_stage,
+                                },
+                            )
+                        break
+                if stop_provider:
                     break
 
         if output_dir:
@@ -171,3 +231,43 @@ def should_stop_provider_after_error(raw: dict[str, Any]) -> bool:
         marker in message
         for marker in ["insufficient budget", "rate limit", "too many requests"]
     )
+
+
+def retrieval_stages_for_provider(
+    provider: str,
+    openalex_mode: str,
+) -> list[tuple[str, str]]:
+    """Return retrieval stages for a provider and OpenAlex mode."""
+
+    if provider != "openalex":
+        return [("keyword", provider)]
+    mode = (openalex_mode or "keyword").strip().lower()
+    if mode == "keyword+semantic":
+        return [("keyword", "openalex_keyword"), ("semantic", "openalex_semantic")]
+    if mode in {"keyword", "exact", "semantic"}:
+        return [(mode, f"openalex_{mode}")]
+    return [("keyword", "openalex_keyword")]
+
+
+def call_client_search(
+    client: RetrievalClient,
+    query: str,
+    max_results: int,
+    from_year: int | None,
+    sort_mode: str,
+    search_mode: str,
+) -> RetrievalResult:
+    """Call a retrieval client while preserving compatibility with simple fakes."""
+
+    search = client.search
+    signature = inspect.signature(search)
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    kwargs: dict[str, Any] = {}
+    if accepts_kwargs or "sort_mode" in signature.parameters:
+        kwargs["sort_mode"] = sort_mode
+    if accepts_kwargs or "search_mode" in signature.parameters:
+        kwargs["search_mode"] = search_mode
+    return search(query, max_results, from_year, **kwargs)

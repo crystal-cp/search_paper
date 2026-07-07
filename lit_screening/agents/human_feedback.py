@@ -61,25 +61,35 @@ class HumanFeedbackAgent:
         ranked_papers: list[RankedPaper],
         feedback_records: dict[str, FeedbackRecord],
         scoring_weights: dict[str, float] | None = None,
+        preference_scores: dict[str, float] | None = None,
     ) -> list[RankedPaper]:
         """Apply human feedback and return a newly sorted ranking."""
 
         adjusted: list[RankedPaper] = []
+        learned_scores = preference_scores or {}
         for item in ranked_papers:
             feedback = feedback_records.get(item.paper.paper_id)
-            if not feedback:
+            preference_score = learned_scores.get(item.paper.paper_id)
+            if not feedback and preference_score is None:
                 adjusted.append(item)
                 continue
 
+            human_adjustment = (
+                feedback.adjustment
+                if feedback
+                else item.scores.human_feedback_adjustment
+            )
             scores = compute_final_score(
                 item.scores.relevance_score,
                 item.scores.evidence_score,
                 item.scores.recency_score,
                 item.scores.quality_score,
                 item.scores.diversity_score,
-                feedback.adjustment,
+                human_adjustment,
                 weights=scoring_weights,
                 aspect_coverage_score=item.scores.aspect_coverage_score,
+                domain_penalty_multiplier=item.scores.domain_penalty_multiplier,
+                preference_score=preference_score,
             )
             adjusted.append(replace(item, scores=scores, feedback=feedback))
 

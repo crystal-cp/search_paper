@@ -8,28 +8,43 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .agents.aspect_classifier import AspectCoverageAgent
+from .agents.ambiguity_detector import AmbiguityDetectorAgent
+from .agents.domain_guardrail import DomainGuardrailAgent
 from .agents.extractor import ExtractorAgent
 from .agents.human_feedback import HumanFeedbackAgent
 from .agents.planner import PlannerAgent
+from .agents.preference_learning import PreferenceLearningAgent
+from .agents.query_pilot import QueryPilotAgent
+from .agents.query_repair import QueryRepairAgent
 from .agents.question_refiner import QuestionRefinementAgent
 from .agents.ranker import RankerAgent
 from .agents.research_intent import ResearchIntentAgent
 from .agents.retriever import RetrieverAgent
+from .agents.search_contract import SearchContractAgent
+from .agents.screening_decision import ScreeningDecisionAgent, summarize_screening_decisions
+from .agents.snowball import CitationSnowballAgent, parse_seed_file, parse_seed_values
 from .agents.verifier import VerifierAgent
 from .config import PipelineConfig
 from .dedup import deduplicate_with_stats
+from .decision_artifacts import write_decision_artifacts
 from .evaluation import compute_evaluation, save_evaluation
 from .importers import ImportResult, import_papers_from_file
 from .llm_client import GenericLLMClient
 from .models import (
     AspectCoverageRecord,
+    DomainAssessment,
     EvidenceRecord,
     FeedbackRecord,
     Paper,
     PipelineResult,
+    PreferenceLearningResult,
     QueryPlan,
     RankedPaper,
+    RetrievalPath,
     SearchBrief,
+    SearchContract,
+    SeedPaper,
+    ScreeningDecision,
     VerificationResult,
 )
 from .paper_cards import generate_paper_cards
@@ -51,6 +66,13 @@ PAPER_FIELDS = [
     "doi",
     "url",
     "source_provider",
+    "retrieval_provider",
+    "retrieval_stage",
+    "retrieval_query",
+    "source_stage",
+    "seed_paper_id",
+    "seed_title",
+    "seed_reason",
     "citation_count",
 ]
 
@@ -92,6 +114,13 @@ RANKED_FIELDS = [
     "doi",
     "url",
     "source_provider",
+    "retrieval_provider",
+    "retrieval_stage",
+    "retrieval_query",
+    "source_stage",
+    "seed_paper_id",
+    "seed_title",
+    "seed_reason",
     "citation_count",
     "relevance_score",
     "evidence_score",
@@ -99,8 +128,20 @@ RANKED_FIELDS = [
     "quality_score",
     "diversity_score",
     "aspect_coverage_score",
+    "domain_match_score",
+    "domain_decision",
+    "off_topic_reason",
+    "domain_penalty_multiplier",
+    "pre_domain_final_score",
     "human_feedback_adjustment",
+    "preference_score",
+    "preference_adjustment",
     "final_score",
+    "decision",
+    "decision_confidence",
+    "primary_reason",
+    "reading_priority",
+    "suggested_action",
     "supported",
     "confidence",
     "error_type",
@@ -133,6 +174,28 @@ ASPECT_COVERAGE_FIELDS = [
     "aspect_coverage_score",
 ]
 
+SCREENING_DECISION_FIELDS = [
+    "paper_id",
+    "decision",
+    "decision_confidence",
+    "primary_reason",
+    "exclusion_reasons",
+    "required_aspects_covered",
+    "required_aspects_missing",
+    "domain_match_score",
+    "domain_decision",
+    "reading_priority",
+    "suggested_action",
+]
+
+RETRIEVAL_PATH_FIELDS = [
+    "paper_id",
+    "source_stage",
+    "seed_paper_id",
+    "seed_title",
+    "reason",
+]
+
 
 def paper_to_row(paper: Paper) -> dict[str, Any]:
     """Convert a Paper into a flat CSV row."""
@@ -146,6 +209,13 @@ def paper_to_row(paper: Paper) -> dict[str, Any]:
         "doi": paper.doi,
         "url": paper.url,
         "source_provider": paper.source_provider,
+        "retrieval_provider": paper.retrieval_provider,
+        "retrieval_stage": paper.retrieval_stage,
+        "retrieval_query": paper.retrieval_query,
+        "source_stage": paper.source_stage,
+        "seed_paper_id": paper.seed_paper_id,
+        "seed_title": paper.seed_title,
+        "seed_reason": paper.seed_reason,
         "citation_count": paper.citation_count,
     }
 
@@ -190,6 +260,8 @@ def ranked_to_row(item: RankedPaper) -> dict[str, Any]:
     """Convert a RankedPaper into a flat CSV row."""
 
     feedback = item.feedback
+    domain = item.domain_assessment
+    decision = item.screening_decision
     return {
         "rank": item.rank,
         "paper_id": item.paper.paper_id,
@@ -199,6 +271,13 @@ def ranked_to_row(item: RankedPaper) -> dict[str, Any]:
         "doi": item.paper.doi,
         "url": item.paper.url,
         "source_provider": item.paper.source_provider,
+        "retrieval_provider": item.paper.retrieval_provider,
+        "retrieval_stage": item.paper.retrieval_stage,
+        "retrieval_query": item.paper.retrieval_query,
+        "source_stage": item.paper.source_stage,
+        "seed_paper_id": item.paper.seed_paper_id,
+        "seed_title": item.paper.seed_title,
+        "seed_reason": item.paper.seed_reason,
         "citation_count": item.paper.citation_count,
         "relevance_score": f"{item.scores.relevance_score:.4f}",
         "evidence_score": f"{item.scores.evidence_score:.4f}",
@@ -206,8 +285,20 @@ def ranked_to_row(item: RankedPaper) -> dict[str, Any]:
         "quality_score": f"{item.scores.quality_score:.4f}",
         "diversity_score": f"{item.scores.diversity_score:.4f}",
         "aspect_coverage_score": f"{item.scores.aspect_coverage_score:.4f}",
+        "domain_match_score": f"{domain.domain_match_score:.4f}" if domain else "",
+        "domain_decision": domain.domain_decision if domain else "",
+        "off_topic_reason": domain.off_topic_reason if domain else "",
+        "domain_penalty_multiplier": f"{item.scores.domain_penalty_multiplier:.4f}",
+        "pre_domain_final_score": f"{item.scores.pre_domain_final_score:.4f}",
         "human_feedback_adjustment": f"{item.scores.human_feedback_adjustment:.4f}",
+        "preference_score": f"{item.scores.preference_score:.4f}",
+        "preference_adjustment": f"{item.scores.preference_adjustment:.4f}",
         "final_score": f"{item.scores.final_score:.4f}",
+        "decision": decision.decision if decision else "",
+        "decision_confidence": f"{decision.decision_confidence:.4f}" if decision else "",
+        "primary_reason": decision.primary_reason if decision else "",
+        "reading_priority": decision.reading_priority if decision else "",
+        "suggested_action": decision.suggested_action if decision else "",
         "supported": item.verification.supported,
         "confidence": f"{item.verification.confidence:.4f}",
         "error_type": item.verification.error_type,
@@ -245,6 +336,67 @@ def aspect_coverage_to_row(record: AspectCoverageRecord) -> dict[str, Any]:
     }
 
 
+def screening_decision_to_row(record: ScreeningDecision) -> dict[str, Any]:
+    """Convert a ScreeningDecision into a flat CSV row."""
+
+    return {
+        "paper_id": record.paper_id,
+        "decision": record.decision,
+        "decision_confidence": f"{record.decision_confidence:.4f}",
+        "primary_reason": record.primary_reason,
+        "exclusion_reasons": "; ".join(record.exclusion_reasons),
+        "required_aspects_covered": "; ".join(record.required_aspects_covered),
+        "required_aspects_missing": "; ".join(record.required_aspects_missing),
+        "domain_match_score": f"{record.domain_match_score:.4f}",
+        "domain_decision": record.domain_decision,
+        "reading_priority": record.reading_priority,
+        "suggested_action": record.suggested_action,
+    }
+
+
+def retrieval_path_to_row(record: RetrievalPath) -> dict[str, Any]:
+    """Convert a RetrievalPath into a flat CSV row."""
+
+    return {
+        "paper_id": record.paper_id,
+        "source_stage": record.source_stage,
+        "seed_paper_id": record.seed_paper_id,
+        "seed_title": record.seed_title,
+        "reason": record.reason,
+    }
+
+
+def write_preference_learning_outputs(
+    output_dir: Path,
+    preference_learning: PreferenceLearningResult,
+    feedback_query_refinement: dict[str, Any],
+) -> None:
+    """Write learned preference and feedback query-refinement artifacts."""
+
+    write_json(output_dir / "preference_learning.json", preference_learning)
+    write_json(output_dir / "feedback_query_refinement.json", feedback_query_refinement)
+
+
+def preference_learning_metrics(
+    preference_learning: PreferenceLearningResult,
+) -> dict[str, Any]:
+    """Build compact metrics for learned feedback preferences."""
+
+    return {
+        "enabled": preference_learning.enabled,
+        "model_type": preference_learning.model_type,
+        "labeled_paper_count": preference_learning.labeled_paper_count,
+        "include_count": preference_learning.include_count,
+        "exclude_count": preference_learning.exclude_count,
+        "positive_terms": preference_learning.positive_terms,
+        "negative_terms": preference_learning.negative_terms,
+        "suggested_must_terms": preference_learning.suggested_must_terms,
+        "suggested_optional_terms": preference_learning.suggested_optional_terms,
+        "suggested_exclude_terms": preference_learning.suggested_exclude_terms,
+        "note": preference_learning.note,
+    }
+
+
 def build_llm_client(
     config: PipelineConfig,
     llm_backend: str,
@@ -274,6 +426,10 @@ def write_pipeline_csvs(
     evidence_records: list[EvidenceRecord],
     verification_results: list[VerificationResult],
     aspect_coverage_records: list[AspectCoverageRecord],
+    screening_decisions: list[ScreeningDecision],
+    seed_papers: list[SeedPaper],
+    citation_expansion_papers: list[Paper],
+    retrieval_paths: list[RetrievalPath],
     ranked_before_feedback: list[RankedPaper],
     ranked_final: list[RankedPaper],
     ranked_after_feedback: list[RankedPaper] | None,
@@ -299,6 +455,23 @@ def write_pipeline_csvs(
         output_dir / "aspect_coverage.csv",
         [aspect_coverage_to_row(record) for record in aspect_coverage_records],
         ASPECT_COVERAGE_FIELDS,
+    )
+    write_csv(
+        output_dir / "screening_decisions.csv",
+        [screening_decision_to_row(record) for record in screening_decisions],
+        SCREENING_DECISION_FIELDS,
+    )
+    write_json(output_dir / "screening_decisions.json", screening_decisions)
+    write_json(output_dir / "seed_papers.json", seed_papers)
+    write_csv(
+        output_dir / "citation_expansion.csv",
+        [paper_to_row(paper) for paper in citation_expansion_papers],
+        PAPER_FIELDS,
+    )
+    write_csv(
+        output_dir / "retrieval_paths.csv",
+        [retrieval_path_to_row(record) for record in retrieval_paths],
+        RETRIEVAL_PATH_FIELDS,
     )
     write_csv(
         output_dir / "ranked_papers_before_feedback.csv",
@@ -356,6 +529,8 @@ def build_agent_trace(
     queries: list[str],
     query_plan: QueryPlan | None,
     search_brief: SearchBrief | None,
+    search_contract: SearchContract | None,
+    ambiguity_analysis: list[dict[str, Any]] | None,
     question_refinement: dict[str, Any] | None,
     planner_metadata: dict[str, Any],
     retrieval_counts: dict[str, int],
@@ -365,6 +540,10 @@ def build_agent_trace(
     evidence_records: list[EvidenceRecord],
     verification_results: list[VerificationResult],
     aspect_coverage_records: list[AspectCoverageRecord],
+    domain_assessments: list[DomainAssessment],
+    screening_decisions: list[ScreeningDecision] | None,
+    preference_learning: PreferenceLearningResult | None,
+    feedback_query_refinement: dict[str, Any] | None,
     ranked_papers: list[RankedPaper],
     scoring_weights: dict[str, float],
     result_groups: dict[str, Any] | None = None,
@@ -374,6 +553,7 @@ def build_agent_trace(
     """Build an inspectable trace of agent decisions for demos and audits."""
 
     verification_by_id = {result.paper_id: result for result in verification_results}
+    domain_by_id = {result.paper_id: result for result in domain_assessments}
     return {
         "question": question,
         "planning_question": planning_question,
@@ -384,6 +564,14 @@ def build_agent_trace(
         "question_refiner": {
             "refinement": question_refinement or {},
             "decision": "Flagged broad or mixed questions and suggested subquestions.",
+        },
+        "ambiguity_detector": {
+            "analysis": ambiguity_analysis or [],
+            "decision": "Identified ambiguous terms before retrieval.",
+        },
+        "search_contract": {
+            "contract": search_contract,
+            "decision": "Bound retrieval to the intended domain, required concepts, and exclusions.",
         },
         "planner": {
             "queries": queries,
@@ -442,12 +630,53 @@ def build_agent_trace(
             }
             for record in aspect_coverage_records[:50]
         ],
+        "domain_guardrail": [
+            {
+                "paper_id": record.paper_id,
+                "domain_match_score": record.domain_match_score,
+                "domain_decision": record.domain_decision,
+                "off_topic_reason": record.off_topic_reason,
+                "positive_domain_matches": record.positive_domain_matches,
+                "negative_domain_matches": record.negative_domain_matches,
+                "missing_required_concepts": record.missing_required_concepts,
+                "forbidden_concepts_found": record.forbidden_concepts_found,
+            }
+            for record in domain_assessments[:50]
+        ],
+        "screening_decision": [
+            {
+                "paper_id": record.paper_id,
+                "decision": record.decision,
+                "decision_confidence": record.decision_confidence,
+                "primary_reason": record.primary_reason,
+                "exclusion_reasons": record.exclusion_reasons,
+                "required_aspects_covered": record.required_aspects_covered,
+                "required_aspects_missing": record.required_aspects_missing,
+                "domain_match_score": record.domain_match_score,
+                "domain_decision": record.domain_decision,
+                "reading_priority": record.reading_priority,
+                "suggested_action": record.suggested_action,
+            }
+            for record in (screening_decisions or [])[:50]
+        ],
+        "preference_learning": {
+            "learning": preference_learning,
+            "feedback_query_refinement": feedback_query_refinement or {},
+            "decision": "Learned positive and negative preference terms from human feedback.",
+        },
         "ranker": [
             {
                 "rank": item.rank,
                 "paper_id": item.paper.paper_id,
                 "title": item.paper.title,
                 "final_score": item.scores.final_score,
+                "pre_domain_final_score": item.scores.pre_domain_final_score,
+                "domain_penalty_multiplier": item.scores.domain_penalty_multiplier,
+                "preference_score": item.scores.preference_score,
+                "preference_adjustment": item.scores.preference_adjustment,
+                "domain_decision": domain_by_id[item.paper.paper_id].domain_decision
+                if item.paper.paper_id in domain_by_id
+                else "",
                 "support_level": verification_by_id[item.paper.paper_id].support_level
                 if item.paper.paper_id in verification_by_id
                 else "",
@@ -474,11 +703,32 @@ def apply_feedback_to_pipeline_result(
 ) -> PipelineResult:
     """Apply feedback to an in-memory pipeline result without rerunning retrieval."""
 
+    screening_decision_agent = ScreeningDecisionAgent()
+    _, ranked_before_feedback = screening_decision_agent.decide_many(
+        result.ranked_before_feedback,
+        result.aspect_coverage_records,
+    )
+    preference_agent = PreferenceLearningAgent()
+    preference_learning = preference_agent.learn(
+        ranked_before_feedback,
+        feedback_records,
+        result.search_contract,
+    )
+    feedback_query_refinement = preference_agent.query_refinement_payload(
+        preference_learning
+    )
     feedback_agent = HumanFeedbackAgent()
     ranked_after_feedback = feedback_agent.apply(
-        result.ranked_before_feedback,
+        ranked_before_feedback,
         feedback_records,
         scoring_weights=result.scoring_weights,
+        preference_scores=preference_learning.preference_scores
+        if preference_learning.enabled
+        else None,
+    )
+    screening_decisions, ranked_after_feedback = screening_decision_agent.decide_many(
+        ranked_after_feedback,
+        result.aspect_coverage_records,
     )
     metrics = compute_evaluation(
         retrieval_counts=result.retrieval_counts,
@@ -486,7 +736,7 @@ def apply_feedback_to_pipeline_result(
         merged_papers=result.merged_papers,
         evidence_records=result.evidence_records,
         verification_results=result.verification_results,
-        ranked_before_feedback=result.ranked_before_feedback,
+        ranked_before_feedback=ranked_before_feedback,
         ranked_after_feedback=ranked_after_feedback,
         gold_labels_path=gold_labels_path,
     )
@@ -508,6 +758,20 @@ def apply_feedback_to_pipeline_result(
     if "imported_library" in result.evaluation_metrics:
         metrics["imported_library"] = result.evaluation_metrics["imported_library"]
     metrics["scoring_weights"] = result.scoring_weights
+    metrics["domain_guardrails"] = build_domain_guardrail_summary(
+        result.domain_assessments,
+        ranked_after_feedback,
+    )
+    metrics["query_pilot"] = result.evaluation_metrics.get("query_pilot", {})
+    metrics["query_repair"] = result.evaluation_metrics.get("query_repair", {})
+    metrics["seed_paper_expansion"] = result.evaluation_metrics.get(
+        "seed_paper_expansion",
+        {},
+    )
+    metrics["screening_decisions"] = summarize_screening_decisions(
+        screening_decisions
+    )
+    metrics["preference_learning"] = preference_learning_metrics(preference_learning)
     result_groups = group_ranked_papers(
         ranked_after_feedback,
         result.aspect_coverage_records,
@@ -520,6 +784,7 @@ def apply_feedback_to_pipeline_result(
         duplicate_count=result.duplicate_count,
         verification_results=result.verification_results,
         ranked_papers=ranked_after_feedback,
+        screening_decisions=screening_decisions,
     )
     metrics["prisma_like_flow"] = prisma_like_flow
     trace = dict(result.agent_trace)
@@ -535,12 +800,39 @@ def apply_feedback_to_pipeline_result(
         }
         for record in feedback_records.values()
     ]
+    trace["preference_learning"] = {
+        "learning": preference_learning,
+        "feedback_query_refinement": feedback_query_refinement,
+        "decision": "Learned relevance preferences from human feedback without rerunning retrieval.",
+    }
+    trace["screening_decision"] = [
+        {
+            "paper_id": record.paper_id,
+            "decision": record.decision,
+            "decision_confidence": record.decision_confidence,
+            "primary_reason": record.primary_reason,
+            "exclusion_reasons": record.exclusion_reasons,
+            "required_aspects_covered": record.required_aspects_covered,
+            "required_aspects_missing": record.required_aspects_missing,
+            "domain_match_score": record.domain_match_score,
+            "domain_decision": record.domain_decision,
+            "reading_priority": record.reading_priority,
+            "suggested_action": record.suggested_action,
+        }
+        for record in screening_decisions[:50]
+    ]
 
     output_dir = Path(result.output_dir)
     save_evaluation(output_dir / "evaluation.json", metrics)
     write_json(output_dir / "agent_trace.json", trace)
     write_json(output_dir / "result_groups.json", result_groups)
     write_json(output_dir / "prisma_like_flow.json", prisma_like_flow)
+    write_json(output_dir / "domain_assessments.json", result.domain_assessments)
+    write_preference_learning_outputs(
+        output_dir,
+        preference_learning,
+        feedback_query_refinement,
+    )
     generate_paper_cards(
         output_dir / "paper_cards.md",
         ranked_after_feedback,
@@ -551,13 +843,32 @@ def apply_feedback_to_pipeline_result(
         ranked_after_feedback,
         result_groups,
     )
+    decision_artifacts = write_decision_artifacts(
+        output_dir,
+        ranked_after_feedback,
+        result.aspect_coverage_records,
+        search_contract=result.search_contract,
+        query_plan=result.query_plan,
+        query_pilot_diagnostics=result.query_pilot_diagnostics,
+        prisma_like_flow=prisma_like_flow,
+    )
+    metrics["decision_artifacts"] = {
+        "method_comparison_rows": len(decision_artifacts["method_comparison_matrix"]),
+        "research_gap_rows": len(decision_artifacts["research_gap_matrix"]),
+        "suggested_next_search_count": len(decision_artifacts["suggested_next_searches"]),
+    }
+    save_evaluation(output_dir / "evaluation.json", metrics)
     write_pipeline_csvs(
         output_dir,
         result.merged_papers,
         result.evidence_records,
         result.verification_results,
         result.aspect_coverage_records,
-        result.ranked_before_feedback,
+        screening_decisions,
+        result.seed_papers,
+        result.citation_expansion_papers,
+        result.retrieval_paths,
+        ranked_before_feedback,
         ranked_after_feedback,
         ranked_after_feedback,
     )
@@ -571,6 +882,11 @@ def apply_feedback_to_pipeline_result(
         evaluation_metrics=metrics,
         feedback_applied=bool(feedback_records),
         search_brief=result.search_brief,
+        search_contract=result.search_contract,
+        ambiguity_analysis=result.ambiguity_analysis,
+        domain_assessments=result.domain_assessments,
+        query_pilot_diagnostics=result.query_pilot_diagnostics,
+        query_repair_suggestions=result.query_repair_suggestions,
         question_refinement=result.question_refinement,
         query_plan=result.query_plan,
         aspect_coverage_records=result.aspect_coverage_records,
@@ -578,15 +894,28 @@ def apply_feedback_to_pipeline_result(
         reading_path_path=output_dir / "reading_path.md",
         paper_cards_path=output_dir / "paper_cards.md",
         prisma_like_flow=prisma_like_flow,
+        screening_decisions=screening_decisions,
+        method_comparison_matrix=decision_artifacts["method_comparison_matrix"],
+        research_gap_matrix=decision_artifacts["research_gap_matrix"],
+        suggested_next_searches=decision_artifacts["suggested_next_searches"],
+        preference_learning=preference_learning,
+        feedback_query_refinement=feedback_query_refinement,
+        seed_papers=result.seed_papers,
+        retrieval_paths=result.retrieval_paths,
+        citation_expansion_papers=result.citation_expansion_papers,
     )
 
     return replace(
         result,
+        ranked_before_feedback=ranked_before_feedback,
         ranked_after_feedback=ranked_after_feedback,
         ranked_final=ranked_after_feedback,
         evaluation_metrics=metrics,
         agent_trace=trace,
         result_groups=result_groups,
+        screening_decisions=screening_decisions,
+        preference_learning=preference_learning,
+        feedback_query_refinement=feedback_query_refinement,
     )
 
 
@@ -594,6 +923,7 @@ def _query_plan_payload(
     question: str,
     query_plan: QueryPlan,
     planner_metadata: dict[str, Any],
+    search_contract: SearchContract | None = None,
 ) -> dict[str, Any]:
     """Build the serializable query-plan payload used by CLI and UI."""
 
@@ -609,6 +939,7 @@ def _query_plan_payload(
             "semantic_scholar": query_plan.semantic_scholar_queries,
         },
         "query_plan": query_plan,
+        "search_contract": search_contract,
         "planner_metadata": planner_metadata,
         "llm": planner_metadata,
     }
@@ -726,6 +1057,7 @@ def _make_query_plan(
     sort_preference: str = "relevance",
     ranking_profile: str = "balanced",
     search_brief: Any | None = None,
+    search_contract: SearchContract | None = None,
 ) -> dict[str, Any]:
     """Run the planner and return a structured query plan."""
 
@@ -737,8 +1069,14 @@ def _make_query_plan(
         sort_preference=sort_preference,
         ranking_profile=ranking_profile,
         search_brief=search_brief,
+        search_contract=search_contract,
     )
-    return _query_plan_payload(question, query_plan, planner.last_llm_metadata)
+    return _query_plan_payload(
+        question,
+        query_plan,
+        planner.last_llm_metadata,
+        search_contract=search_contract,
+    )
 
 
 def plan_screening_queries(
@@ -764,6 +1102,15 @@ def plan_screening_queries(
         llm_client=active_llm_client,
     ).analyze(question)
     refinement = QuestionRefinementAgent().refine(question, search_brief)
+    ambiguity_analysis = AmbiguityDetectorAgent().analyze(question)
+    search_contract = SearchContractAgent(
+        mode=planner_mode,
+        llm_client=active_llm_client,
+    ).build(
+        question,
+        search_brief=search_brief,
+        ambiguity_analysis=ambiguity_analysis,
+    )
     payload = _make_query_plan(
         question,
         planner_mode,
@@ -773,8 +1120,11 @@ def plan_screening_queries(
         sort_preference=sort_preference,
         ranking_profile=ranking_profile,
         search_brief=search_brief,
+        search_contract=search_contract,
     )
     payload["search_brief"] = search_brief
+    payload["search_contract"] = search_contract
+    payload["ambiguity_analysis"] = ambiguity_analysis
     payload["question_refinement"] = refinement
     return payload
 
@@ -796,6 +1146,49 @@ def _queries_by_provider(
     return {
         provider: query_map.get(provider) or fallback_queries
         for provider in providers
+    }
+
+
+def run_query_pilot_workflow(
+    query_plan: QueryPlan,
+    search_contract: SearchContract,
+    ambiguity_analysis: list[dict[str, Any]],
+    providers: list[str],
+    max_per_query: int = 5,
+    from_year: int | None = None,
+    use_cache: bool = True,
+    cache_dir: str = "data/cache",
+    openalex_mode: str = "keyword+semantic",
+    sort_preference: str = "relevance",
+    retriever_agent: RetrieverAgent | None = None,
+    progress_callback: Callable[[str, str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Run the optional pilot-search and query-repair workflow."""
+
+    combined_queries = _combined_queries(query_plan)
+    queries_by_provider = _queries_by_provider(providers, query_plan, combined_queries)
+    diagnostics = QueryPilotAgent(retriever_agent=retriever_agent).run(
+        queries=queries_by_provider,
+        providers=providers,
+        search_contract=search_contract,
+        query_plan=query_plan,
+        max_per_query=max_per_query,
+        from_year=from_year,
+        use_cache=use_cache,
+        cache_dir=cache_dir,
+        openalex_mode=openalex_mode,
+        sort_mode=sort_preference,
+        progress_callback=progress_callback,
+    )
+    repair_suggestions = QueryRepairAgent().suggest(
+        query_plan=query_plan,
+        search_contract=search_contract,
+        ambiguity_analysis=ambiguity_analysis,
+        pilot_diagnostics=diagnostics,
+    )
+    return {
+        "diagnostics": diagnostics,
+        "repair_suggestions": repair_suggestions,
     }
 
 
@@ -831,24 +1224,48 @@ def build_retrieval_diagnostics(
     raw_count_per_query: dict[str, dict[str, int]] = {}
     top_titles_per_query: dict[str, dict[str, list[str]]] = {}
     provider_errors: dict[str, list[dict[str, Any]]] = {}
+    retrieval_stages: list[dict[str, Any]] = []
     for provider, bundles in raw_by_provider.items():
         raw_count_per_query[provider] = {}
         top_titles_per_query[provider] = {}
         provider_errors[provider] = []
         for bundle in bundles:
             query = str(bundle.get("query") or "")
+            search_mode = str(bundle.get("search_mode") or "")
+            retrieval_stage = str(bundle.get("retrieval_stage") or provider)
             response = bundle.get("response") or {}
             items = _raw_items_from_response(response)
-            raw_count_per_query[provider][query] = len(items)
-            top_titles_per_query[provider][query] = [
+            stage_key = query
+            if stage_key in raw_count_per_query[provider]:
+                stage_key = f"{retrieval_stage}:{query}"
+            top_titles = [
                 title
                 for title in [_raw_title(item) for item in items[:5]]
                 if title
             ]
+            raw_count_per_query[provider][stage_key] = len(items)
+            top_titles_per_query[provider][stage_key] = top_titles
+            retrieval_stages.append(
+                {
+                    "provider": provider,
+                    "query": query,
+                    "search_mode": search_mode or response.get("search_mode", ""),
+                    "retrieval_stage": retrieval_stage
+                    or response.get("retrieval_stage", provider),
+                    "raw_count": len(items),
+                    "kept_count": int(bundle.get("paper_count") or 0),
+                    "top_titles": top_titles,
+                    "missing_abstract_count": int(
+                        bundle.get("missing_abstract_count") or 0
+                    ),
+                }
+            )
             if response.get("error"):
                 provider_errors[provider].append(
                     {
                         "query": query,
+                        "search_mode": search_mode,
+                        "retrieval_stage": retrieval_stage,
                         "error": response.get("error"),
                         "status_code": response.get("status_code"),
                         "error_message": response.get("error_message", ""),
@@ -860,6 +1277,7 @@ def build_retrieval_diagnostics(
         "query_plan": query_plan,
         "queries_per_provider": queries_by_provider,
         "raw_count_per_query": raw_count_per_query,
+        "retrieval_stages": retrieval_stages,
         "provider_errors": provider_errors,
         "merged_count": len(merged_papers),
         "duplicate_count": duplicate_count,
@@ -884,6 +1302,52 @@ def build_retrieval_diagnostics(
             }
             for item in ranked_papers[:10]
         ],
+    }
+
+
+def build_domain_guardrail_summary(
+    assessments: list[DomainAssessment],
+    ranked_papers: list[RankedPaper],
+) -> dict[str, Any]:
+    """Summarize domain guardrail decisions for reporting."""
+
+    counts = {"in_scope": 0, "borderline": 0, "out_of_scope": 0}
+    reasons: dict[str, int] = {}
+    assessment_by_id = {item.paper_id: item for item in assessments}
+    for assessment in assessments:
+        counts[assessment.domain_decision] = counts.get(assessment.domain_decision, 0) + 1
+        if assessment.domain_decision != "in_scope":
+            reasons[assessment.off_topic_reason] = reasons.get(assessment.off_topic_reason, 0) + 1
+    examples = []
+    for item in ranked_papers:
+        assessment = assessment_by_id.get(item.paper.paper_id)
+        if not assessment or assessment.domain_decision == "in_scope":
+            continue
+        examples.append(
+            {
+                "rank": item.rank,
+                "paper_id": item.paper.paper_id,
+                "title": item.paper.title,
+                "domain_decision": assessment.domain_decision,
+                "domain_match_score": assessment.domain_match_score,
+                "domain_penalty_multiplier": item.scores.domain_penalty_multiplier,
+                "off_topic_reason": assessment.off_topic_reason,
+            }
+        )
+        if len(examples) >= 10:
+            break
+    common_reasons = [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(
+            reasons.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:10]
+    ]
+    return {
+        "counts": counts,
+        "demoted_examples": examples,
+        "common_off_topic_reasons": common_reasons,
     }
 
 
@@ -973,8 +1437,17 @@ def run_pipeline(
     ranking_profile: str = "balanced",
     input_file: str | None = None,
     input_format: str = "auto",
+    pilot_search: bool = False,
+    pilot_max_per_query: int = 5,
+    auto_repair_queries: bool = False,
+    skip_pilot_search: bool = False,
+    seed_papers: list[str] | None = None,
+    seed_file: str | None = None,
+    enable_snowballing: bool = False,
+    snowball_top_n: int = 3,
     llm_client: GenericLLMClient | None = None,
     retriever_agent: RetrieverAgent | None = None,
+    snowball_agent: CitationSnowballAgent | None = None,
     progress_callback: Callable[[str, str, dict[str, Any]], None] | None = None,
 ) -> PipelineResult:
     """Run the full MVP pipeline and write output artifacts."""
@@ -1005,6 +1478,13 @@ def run_pipeline(
             "use_cache": use_cache,
             "input_file": input_file or "",
             "input_format": input_format,
+            "pilot_search": pilot_search,
+            "pilot_max_per_query": pilot_max_per_query,
+            "auto_repair_queries": auto_repair_queries,
+            "enable_snowballing": enable_snowballing,
+            "snowball_top_n": snowball_top_n,
+            "seed_paper_count": len(seed_papers or []),
+            "seed_file": seed_file or "",
         },
     )
 
@@ -1029,8 +1509,19 @@ def run_pipeline(
             llm_client=active_llm_client,
         ).analyze(question)
     question_refinement = QuestionRefinementAgent().refine(question, search_brief)
+    ambiguity_analysis = AmbiguityDetectorAgent().analyze(question)
+    search_contract = SearchContractAgent(
+        mode=planner_mode,
+        llm_client=active_llm_client,
+    ).build(
+        question,
+        search_brief=search_brief,
+        ambiguity_analysis=ambiguity_analysis,
+    )
     write_json(out / "search_brief.json", search_brief)
     write_json(out / "question_refinement.json", question_refinement)
+    write_json(out / "ambiguity_analysis.json", ambiguity_analysis)
+    write_json(out / "search_contract.json", search_contract)
 
     if progress_callback:
         progress_callback(
@@ -1053,6 +1544,7 @@ def run_pipeline(
             sort_preference=sort_preference,
             ranking_profile=ranking_profile,
             search_brief=search_brief,
+            search_contract=search_contract,
         )
     else:
         planner_metadata = _manual_planner_metadata(
@@ -1073,7 +1565,9 @@ def run_pipeline(
                 if planner_metadata.get("question_language") == "zh"
                 else "en",
                 translated_question=str(planner_metadata.get("translated_question") or ""),
-                required_aspects=search_brief.required_aspects,
+                required_aspects=search_contract.required_aspects,
+                must_terms=search_contract.must_include_concepts,
+                exclude_terms=search_contract.must_exclude_concepts,
                 openalex_queries=cleaned_queries,
                 semantic_scholar_queries=cleaned_queries,
                 filters={
@@ -1088,7 +1582,19 @@ def run_pipeline(
                 structured_override.translated_question = search_brief.refined_question
         else:
             if not structured_override.required_aspects:
-                structured_override.required_aspects = search_brief.required_aspects
+                structured_override.required_aspects = search_contract.required_aspects
+            structured_override.must_terms = _unique_strings(
+                [
+                    *structured_override.must_terms,
+                    *search_contract.must_include_concepts,
+                ]
+            )
+            structured_override.exclude_terms = _unique_strings(
+                [
+                    *structured_override.exclude_terms,
+                    *search_contract.must_exclude_concepts,
+                ]
+            )
             if not structured_override.translated_question and search_brief.refined_question:
                 structured_override.translated_question = search_brief.refined_question
             structured_override.filters = {
@@ -1103,16 +1609,96 @@ def run_pipeline(
             question,
             structured_override,
             planner_metadata,
+            search_contract=search_contract,
         )
 
     query_plan = query_plan_payload["query_plan"]
     query_plan_payload["search_brief"] = search_brief
+    query_plan_payload["search_contract"] = search_contract
+    query_plan_payload["ambiguity_analysis"] = ambiguity_analysis
     query_plan_payload["question_refinement"] = question_refinement
     queries = query_plan_payload["queries"]
     planner_metadata = query_plan_payload["planner_metadata"]
     planning_question = str(query_plan_payload.get("planning_question") or question)
     queries_by_provider = _queries_by_provider(providers, query_plan, queries)
+    retriever = retriever_agent or RetrieverAgent(config=config)
+    query_pilot_diagnostics: dict[str, Any] = {
+        "enabled": False,
+        "reason": "pilot_search_not_requested",
+        "results": [],
+        "summary": {},
+    }
+    query_repair_suggestions: dict[str, Any] = {
+        "enabled": False,
+        "applied": False,
+        "suggestions": [],
+        "repaired_query_plan": None,
+    }
+    if pilot_search and not skip_pilot_search:
+        if progress_callback:
+            progress_callback(
+                "query_pilot",
+                "Running low-volume pilot search before full retrieval",
+                {
+                    "pilot_max_per_query": pilot_max_per_query,
+                    "providers": providers,
+                },
+            )
+        pilot_workflow = run_query_pilot_workflow(
+            query_plan=query_plan,
+            search_contract=search_contract,
+            ambiguity_analysis=ambiguity_analysis,
+            providers=providers,
+            max_per_query=pilot_max_per_query,
+            from_year=from_year,
+            use_cache=use_cache,
+            cache_dir=config.cache_dir,
+            openalex_mode=openalex_mode,
+            sort_preference=sort_preference,
+            retriever_agent=retriever,
+            progress_callback=progress_callback,
+        )
+        query_pilot_diagnostics = pilot_workflow["diagnostics"]
+        query_repair_suggestions = pilot_workflow["repair_suggestions"]
+        if auto_repair_queries:
+            repaired_plan = query_repair_suggestions.get("repaired_query_plan")
+            if isinstance(repaired_plan, QueryPlan):
+                query_plan = repaired_plan
+            else:
+                coerced = _coerce_query_plan(repaired_plan)
+                if coerced is not None:
+                    query_plan = coerced
+            queries = _combined_queries(query_plan)
+            queries_by_provider = _queries_by_provider(providers, query_plan, queries)
+            query_repair_suggestions["applied"] = True
+            query_plan_payload = _query_plan_payload(
+                question,
+                query_plan,
+                planner_metadata,
+                search_contract=search_contract,
+            )
+            query_plan_payload["search_brief"] = search_brief
+            query_plan_payload["search_contract"] = search_contract
+            query_plan_payload["ambiguity_analysis"] = ambiguity_analysis
+            query_plan_payload["question_refinement"] = question_refinement
+            planning_question = str(query_plan_payload.get("planning_question") or question)
+        if progress_callback:
+            progress_callback(
+                "query_pilot",
+                "Pilot search diagnostics ready",
+                {
+                    "summary": query_pilot_diagnostics.get("summary", {}),
+                    "repair_suggestion_count": len(
+                        query_repair_suggestions.get("suggestions", [])
+                    ),
+                    "auto_repair_applied": auto_repair_queries,
+                },
+            )
+    elif skip_pilot_search:
+        query_pilot_diagnostics["reason"] = "pilot_search_skipped"
     write_json(out / "planned_queries.json", query_plan_payload)
+    write_json(out / "query_pilot_diagnostics.json", query_pilot_diagnostics)
+    write_json(out / "query_repair_suggestions.json", query_repair_suggestions)
     if progress_callback:
         progress_callback(
             "planning",
@@ -1128,7 +1714,6 @@ def run_pipeline(
             },
         )
 
-    retriever = retriever_agent or RetrieverAgent(config=config)
     if progress_callback:
         progress_callback(
             "retrieval",
@@ -1139,8 +1724,14 @@ def run_pipeline(
                 "max_per_query": max_per_query,
                 "from_year": from_year,
                 "use_cache": use_cache,
+                "enable_snowballing": enable_snowballing,
+                "snowball_top_n": snowball_top_n,
             },
         )
+    user_seed_papers = [
+        *parse_seed_values(seed_papers),
+        *parse_seed_file(seed_file),
+    ]
     raw_papers, raw_by_provider, retrieval_counts = retriever.retrieve(
         queries=queries_by_provider,
         providers=providers,
@@ -1149,6 +1740,7 @@ def run_pipeline(
         output_dir=out,
         progress_callback=progress_callback,
         sort_mode=sort_preference,
+        openalex_mode=openalex_mode,
     )
     import_result = empty_import_result()
     if input_file:
@@ -1285,6 +1877,35 @@ def run_pipeline(
             },
         )
 
+    domain_guardrail = DomainGuardrailAgent()
+    if progress_callback:
+        progress_callback(
+            "domain_guardrail",
+            "Assessing paper domain fit against the Search Contract",
+            {
+                "paper_count": len(merged_papers),
+                "domain": search_contract.domain_profile.domain_name
+                if search_contract
+                else "",
+            },
+        )
+    domain_assessments = domain_guardrail.assess_many(
+        merged_papers,
+        search_contract,
+        query_plan=query_plan,
+    )
+    if progress_callback:
+        domain_counts: dict[str, int] = {}
+        for assessment in domain_assessments:
+            domain_counts[assessment.domain_decision] = (
+                domain_counts.get(assessment.domain_decision, 0) + 1
+            )
+        progress_callback(
+            "domain_guardrail",
+            "Domain guardrail assessment finished",
+            {"domain_decision_counts": domain_counts},
+        )
+
     ranker = RankerAgent()
     if progress_callback:
         progress_callback(
@@ -1301,6 +1922,7 @@ def run_pipeline(
         query_plan=query_plan,
         ranking_profile=ranking_profile,
         aspect_coverage_records=aspect_coverage_records,
+        domain_assessments=domain_assessments,
     )
     if progress_callback:
         progress_callback(
@@ -1309,9 +1931,109 @@ def run_pipeline(
             {"ranked_paper_count": len(ranked_before_feedback)},
         )
 
+    citation_expansion_papers: list[Paper] = []
+    retrieval_paths: list[RetrievalPath] = []
+    resolved_seed_papers = user_seed_papers
+    if enable_snowballing:
+        if progress_callback:
+            progress_callback(
+                "snowballing",
+                "Starting seed-paper citation expansion",
+                {
+                    "provided_seed_count": len(user_seed_papers),
+                    "snowball_top_n": snowball_top_n,
+                },
+            )
+        active_snowball_agent = snowball_agent or CitationSnowballAgent(
+            semantic_scholar_client=retriever.clients.get("semantic_scholar"),
+            enabled=True,
+        )
+        citation_expansion_papers, retrieval_paths, resolved_seed_papers = (
+            active_snowball_agent.expand(
+                existing_papers=merged_papers,
+                ranked_papers=ranked_before_feedback,
+                seed_papers=user_seed_papers or None,
+                top_n=snowball_top_n,
+            )
+        )
+        raw_paper_count_before_year_filter += len(citation_expansion_papers)
+        retrieval_counts["citation_snowball"] = len(citation_expansion_papers)
+        if citation_expansion_papers:
+            citation_expansion_papers, expansion_year_filter = filter_papers_by_from_year(
+                citation_expansion_papers,
+                from_year,
+            )
+            kept_expanded_ids = {paper.paper_id for paper in citation_expansion_papers}
+            retrieval_paths = [
+                path for path in retrieval_paths if path.paper_id in kept_expanded_ids
+            ]
+            year_filter_stats["citation_expansion"] = expansion_year_filter
+            retrieval_counts["citation_snowball"] = len(citation_expansion_papers)
+            merged_papers, expansion_duplicate_count = deduplicate_with_stats(
+                [*merged_papers, *citation_expansion_papers]
+            )
+            duplicate_count += expansion_duplicate_count
+            evidence_records = extractor.extract_many(merged_papers, planning_question)
+            verification_results = verifier.verify_many(merged_papers, evidence_records)
+            aspect_coverage_records = aspect_agent.classify_many(
+                merged_papers,
+                evidence_records,
+                required_aspects,
+            )
+            domain_assessments = domain_guardrail.assess_many(
+                merged_papers,
+                search_contract,
+                query_plan=query_plan,
+            )
+            ranked_before_feedback = ranker.rank(
+                merged_papers,
+                evidence_records,
+                verification_results,
+                planning_question,
+                scoring_weights=active_scoring_weights,
+                query_plan=query_plan,
+                ranking_profile=ranking_profile,
+                aspect_coverage_records=aspect_coverage_records,
+                domain_assessments=domain_assessments,
+            )
+        if progress_callback:
+            progress_callback(
+                "snowballing",
+                "Seed-paper citation expansion finished",
+                {
+                    "seed_count": len(resolved_seed_papers),
+                    "expanded_paper_count": len(citation_expansion_papers),
+                    "retrieval_path_count": len(retrieval_paths),
+                },
+            )
+
+    screening_decision_agent = ScreeningDecisionAgent()
+    before_screening_decisions, ranked_before_feedback = (
+        screening_decision_agent.decide_many(
+            ranked_before_feedback,
+            aspect_coverage_records,
+        )
+    )
+    if progress_callback:
+        progress_callback(
+            "screening_decision",
+            "Initial include/maybe/exclude decisions ready",
+            summarize_screening_decisions(before_screening_decisions),
+        )
+
     feedback_agent = HumanFeedbackAgent()
+    preference_agent = PreferenceLearningAgent()
     ranked_after_feedback: list[RankedPaper] | None = None
     ranked_final = ranked_before_feedback
+    screening_decisions = before_screening_decisions
+    preference_learning = preference_agent.learn(
+        ranked_before_feedback,
+        {},
+        search_contract,
+    )
+    feedback_query_refinement = preference_agent.query_refinement_payload(
+        preference_learning
+    )
     feedback_applied = False
     if feedback_path:
         if progress_callback:
@@ -1319,12 +2041,29 @@ def run_pipeline(
                 "feedback",
                 "Applying human feedback and reranking",
                 {"feedback_path": feedback_path},
-            )
+        )
         feedback_records = feedback_agent.read_feedback(feedback_path)
+        preference_learning = preference_agent.learn(
+            ranked_before_feedback,
+            feedback_records,
+            search_contract,
+        )
+        feedback_query_refinement = preference_agent.query_refinement_payload(
+            preference_learning
+        )
         ranked_after_feedback = feedback_agent.apply(
             ranked_before_feedback,
             feedback_records,
             scoring_weights=active_scoring_weights,
+            preference_scores=preference_learning.preference_scores
+            if preference_learning.enabled
+            else None,
+        )
+        screening_decisions, ranked_after_feedback = (
+            screening_decision_agent.decide_many(
+                ranked_after_feedback,
+                aspect_coverage_records,
+            )
         )
         ranked_final = ranked_after_feedback
         feedback_applied = bool(feedback_records)
@@ -1347,6 +2086,7 @@ def run_pipeline(
         duplicate_count=duplicate_count,
         verification_results=verification_results,
         ranked_papers=ranked_final,
+        screening_decisions=screening_decisions,
     )
 
     if progress_callback:
@@ -1369,6 +2109,34 @@ def run_pipeline(
     metrics["year_filter"] = year_filter_stats
     metrics["imported_library"] = import_result.diagnostics()
     metrics["scoring_weights"] = active_scoring_weights
+    metrics["domain_guardrails"] = build_domain_guardrail_summary(
+        domain_assessments,
+        ranked_final,
+    )
+    metrics["query_pilot"] = {
+        "enabled": bool(query_pilot_diagnostics.get("enabled")),
+        "summary": query_pilot_diagnostics.get("summary", {}),
+        "result_count": len(query_pilot_diagnostics.get("results", [])),
+    }
+    metrics["query_repair"] = {
+        "enabled": bool(query_repair_suggestions.get("enabled")),
+        "applied": bool(query_repair_suggestions.get("applied")),
+        "suggestion_count": len(query_repair_suggestions.get("suggestions", [])),
+    }
+    metrics["seed_paper_expansion"] = {
+        "enabled": enable_snowballing,
+        "seed_count": len(resolved_seed_papers),
+        "expanded_paper_count": len(citation_expansion_papers),
+        "retrieval_path_count": len(retrieval_paths),
+        "source_stage_counts": {
+            stage: sum(1 for path in retrieval_paths if path.source_stage == stage)
+            for stage in ["reference", "citation", "recommendation"]
+        },
+    }
+    metrics["screening_decisions"] = summarize_screening_decisions(
+        screening_decisions
+    )
+    metrics["preference_learning"] = preference_learning_metrics(preference_learning)
     metrics["query_controls"] = {
         "strictness": strictness,
         "openalex_mode": openalex_mode,
@@ -1406,6 +2174,8 @@ def run_pipeline(
         queries=queries,
         query_plan=query_plan,
         search_brief=search_brief,
+        search_contract=search_contract,
+        ambiguity_analysis=ambiguity_analysis,
         question_refinement=question_refinement,
         planner_metadata=planner_metadata,
         retrieval_counts=retrieval_counts,
@@ -1415,15 +2185,34 @@ def run_pipeline(
         evidence_records=evidence_records,
         verification_results=verification_results,
         aspect_coverage_records=aspect_coverage_records,
+        domain_assessments=domain_assessments,
+        screening_decisions=screening_decisions,
+        preference_learning=preference_learning,
+        feedback_query_refinement=feedback_query_refinement,
         ranked_papers=ranked_final,
         scoring_weights=active_scoring_weights,
         result_groups=result_groups,
         year_filter_stats=year_filter_stats,
         import_diagnostics=import_result.diagnostics(),
     )
+    trace["query_pilot"] = query_pilot_diagnostics
+    trace["query_repair"] = query_repair_suggestions
+    trace["seed_paper_expansion"] = {
+        "enabled": enable_snowballing,
+        "seed_papers": resolved_seed_papers,
+        "retrieval_paths": retrieval_paths,
+        "expanded_paper_count": len(citation_expansion_papers),
+        "decision": "Expanded from user-provided or high-confidence seed papers when enabled.",
+    }
     write_json(out / "agent_trace.json", trace)
     write_json(out / "result_groups.json", result_groups)
     write_json(out / "prisma_like_flow.json", prisma_like_flow)
+    write_json(out / "domain_assessments.json", domain_assessments)
+    write_preference_learning_outputs(
+        out,
+        preference_learning,
+        feedback_query_refinement,
+    )
     retrieval_diagnostics = build_retrieval_diagnostics(
         question=question,
         query_plan=query_plan,
@@ -1446,6 +2235,21 @@ def run_pipeline(
         ranked_final,
         result_groups,
     )
+    decision_artifacts = write_decision_artifacts(
+        out,
+        ranked_final,
+        aspect_coverage_records,
+        search_contract=search_contract,
+        query_plan=query_plan,
+        query_pilot_diagnostics=query_pilot_diagnostics,
+        prisma_like_flow=prisma_like_flow,
+    )
+    metrics["decision_artifacts"] = {
+        "method_comparison_rows": len(decision_artifacts["method_comparison_matrix"]),
+        "research_gap_rows": len(decision_artifacts["research_gap_matrix"]),
+        "suggested_next_search_count": len(decision_artifacts["suggested_next_searches"]),
+    }
+    save_evaluation(out / "evaluation.json", metrics)
 
     write_pipeline_csvs(
         out,
@@ -1453,6 +2257,10 @@ def run_pipeline(
         evidence_records,
         verification_results,
         aspect_coverage_records,
+        screening_decisions,
+        resolved_seed_papers,
+        citation_expansion_papers,
+        retrieval_paths,
         ranked_before_feedback,
         ranked_final,
         ranked_after_feedback,
@@ -1468,13 +2276,27 @@ def run_pipeline(
         evaluation_metrics=metrics,
         feedback_applied=feedback_applied,
         search_brief=search_brief,
+        search_contract=search_contract,
+        ambiguity_analysis=ambiguity_analysis,
         question_refinement=question_refinement,
         query_plan=query_plan,
         aspect_coverage_records=aspect_coverage_records,
+        domain_assessments=domain_assessments,
+        query_pilot_diagnostics=query_pilot_diagnostics,
+        query_repair_suggestions=query_repair_suggestions,
         result_groups=result_groups,
         reading_path_path=out / "reading_path.md",
         paper_cards_path=out / "paper_cards.md",
         prisma_like_flow=prisma_like_flow,
+        screening_decisions=screening_decisions,
+        method_comparison_matrix=decision_artifacts["method_comparison_matrix"],
+        research_gap_matrix=decision_artifacts["research_gap_matrix"],
+        suggested_next_searches=decision_artifacts["suggested_next_searches"],
+        preference_learning=preference_learning,
+        feedback_query_refinement=feedback_query_refinement,
+        seed_papers=resolved_seed_papers,
+        retrieval_paths=retrieval_paths,
+        citation_expansion_papers=citation_expansion_papers,
     )
     if progress_callback:
         progress_callback(
@@ -1511,6 +2333,17 @@ def run_pipeline(
         scoring_weights=active_scoring_weights,
         query_plan=query_plan,
         search_brief=search_brief,
+        search_contract=search_contract,
+        ambiguity_analysis=ambiguity_analysis,
+        domain_assessments=domain_assessments,
+        screening_decisions=screening_decisions,
+        seed_papers=resolved_seed_papers,
+        retrieval_paths=retrieval_paths,
+        citation_expansion_papers=citation_expansion_papers,
+        preference_learning=preference_learning,
+        feedback_query_refinement=feedback_query_refinement,
+        query_pilot_diagnostics=query_pilot_diagnostics,
+        query_repair_suggestions=query_repair_suggestions,
         question_refinement=question_refinement,
         aspect_coverage_records=aspect_coverage_records,
         result_groups=result_groups,
@@ -1602,6 +2435,49 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable local API response cache.",
     )
+    run.add_argument(
+        "--pilot-search",
+        action="store_true",
+        help="Run a small pilot retrieval before full retrieval.",
+    )
+    run.add_argument(
+        "--pilot-max-per-query",
+        type=int,
+        default=5,
+        help="Maximum pilot papers per provider query.",
+    )
+    run.add_argument(
+        "--auto-repair-queries",
+        action="store_true",
+        help="Apply repaired queries from pilot diagnostics before full retrieval.",
+    )
+    run.add_argument(
+        "--skip-pilot-search",
+        action="store_true",
+        help="Explicitly skip pilot search even if pilot settings are present.",
+    )
+    run.add_argument(
+        "--seed-paper",
+        action="append",
+        default=[],
+        help="Seed paper DOI, Semantic Scholar paper ID, OpenAlex ID, or title. Repeat for multiple seeds.",
+    )
+    run.add_argument(
+        "--seed-file",
+        default=None,
+        help="CSV seed file with columns: seed_id,seed_type,title,doi,note.",
+    )
+    run.add_argument(
+        "--enable-snowballing",
+        action="store_true",
+        help="Expand candidates through Semantic Scholar references, citations, and recommendations.",
+    )
+    run.add_argument(
+        "--snowball-top-n",
+        type=int,
+        default=3,
+        help="Maximum seed papers and linked papers per snowballing stage.",
+    )
     return parser
 
 
@@ -1643,6 +2519,14 @@ def main(argv: list[str] | None = None) -> int:
                 ranking_profile=args.ranking_profile,
                 input_file=args.input_file,
                 input_format=args.input_format,
+                pilot_search=args.pilot_search,
+                pilot_max_per_query=args.pilot_max_per_query,
+                auto_repair_queries=args.auto_repair_queries,
+                skip_pilot_search=args.skip_pilot_search,
+                seed_papers=args.seed_paper,
+                seed_file=args.seed_file,
+                enable_snowballing=args.enable_snowballing,
+                snowball_top_n=args.snowball_top_n,
             )
         except Exception as exc:
             ScreeningRunLogger(args.output_dir).log_exception(

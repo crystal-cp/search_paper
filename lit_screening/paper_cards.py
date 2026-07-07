@@ -27,15 +27,20 @@ def generate_paper_cards(
             item,
             aspect.aspect_coverage_score if aspect else 0.0,
         )
-        action = suggested_action(item, aspect)
+        decision = item.screening_decision
+        domain = item.domain_assessment
+        action = decision.suggested_action if decision else suggested_action(item, aspect)
         lines.extend(
             [
                 f"## {item.rank}. {item.paper.title or 'Untitled'}",
                 "",
                 f"- Year / venue / citations: {item.paper.year or ''} | {item.paper.venue or ''} | {item.paper.citation_count}",
                 f"- DOI or URL: {item.paper.doi or item.paper.url or ''}",
+                f"- Decision: {decision.decision if decision else ''}",
+                f"- Reading priority: {decision.reading_priority if decision else ''}",
                 f"- Recommended role: {role}",
                 f"- Why relevant: score={item.scores.final_score:.3f}, relevance={item.scores.relevance_score:.3f}, evidence={item.scores.evidence_score:.3f}",
+                f"- Domain decision: {domain.domain_decision if domain else ''}",
                 f"- Covered aspects: {covered}",
                 f"- Missing aspects: {missing}",
                 f"- Claim: {item.evidence.claim}",

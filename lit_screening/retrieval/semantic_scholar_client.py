@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -16,7 +17,7 @@ from lit_screening.utils import safe_int, stable_id
 
 
 DEFAULT_SEMANTIC_SCHOLAR_FIELDS = (
-    "title,abstract,authors,year,publicationDate,publicationTypes,venue,"
+    "paperId,title,abstract,authors,year,publicationDate,publicationTypes,venue,"
     "citationCount,influentialCitationCount,referenceCount,externalIds,url,"
     "openAccessPdf,fieldsOfStudy,s2FieldsOfStudy,tldr"
 )
@@ -26,7 +27,9 @@ class SemanticScholarClient:
     """Small Semantic Scholar search client with optional API-key header."""
 
     provider_name = "semantic_scholar"
-    base_url = "https://api.semanticscholar.org/graph/v1/paper/search"
+    api_base_url = "https://api.semanticscholar.org/graph/v1"
+    recommendations_base_url = "https://api.semanticscholar.org/recommendations/v1"
+    base_url = f"{api_base_url}/paper/search"
 
     def __init__(
         self,
@@ -111,6 +114,112 @@ class SemanticScholarClient:
                 }
 
         return RetrievalResult(raw=raw, papers=self._normalize_many(raw))
+
+    def get_paper(self, paper_id: str) -> RetrievalResult:
+        """Fetch one paper by Semantic Scholar ID or prefixed external ID."""
+
+        if not paper_id:
+            return RetrievalResult(raw={"data": []}, papers=[])
+        raw = self._get_json(
+            f"{self.api_base_url}/paper/{quote(paper_id, safe=':')}",
+            {"fields": self.fields},
+        )
+        papers = [] if raw.get("error") else [self._normalize_result(raw, rank=1)]
+        return RetrievalResult(raw=raw, papers=papers)
+
+    def get_references(self, paper_id: str, limit: int = 10) -> RetrievalResult:
+        """Fetch papers referenced by a seed paper."""
+
+        return self._paper_links(
+            paper_id,
+            endpoint="references",
+            nested_key="citedPaper",
+            limit=limit,
+        )
+
+    def get_citations(self, paper_id: str, limit: int = 10) -> RetrievalResult:
+        """Fetch papers that cite a seed paper."""
+
+        return self._paper_links(
+            paper_id,
+            endpoint="citations",
+            nested_key="citingPaper",
+            limit=limit,
+        )
+
+    def get_recommendations(self, paper_id: str, limit: int = 10) -> RetrievalResult:
+        """Fetch recommended papers for a seed paper."""
+
+        if not paper_id:
+            return RetrievalResult(raw={"data": []}, papers=[])
+        raw = self._get_json(
+            f"{self.recommendations_base_url}/papers/forpaper/{quote(paper_id, safe=':')}",
+            {"limit": limit, "fields": self.fields},
+        )
+        items = as_list(raw.get("recommendedPapers")) or as_list(raw.get("data"))
+        papers = [
+            self._normalize_result(item, rank=index)
+            for index, item in enumerate(items, start=1)
+            if isinstance(item, dict)
+        ]
+        return RetrievalResult(raw=raw, papers=papers)
+
+    def _paper_links(
+        self,
+        paper_id: str,
+        endpoint: str,
+        nested_key: str,
+        limit: int,
+    ) -> RetrievalResult:
+        """Fetch nested citation/reference records and normalize child papers."""
+
+        if not paper_id:
+            return RetrievalResult(raw={"data": []}, papers=[])
+        nested_fields = ",".join(
+            f"{nested_key}.{field.strip()}"
+            for field in self.fields.split(",")
+            if field.strip()
+        )
+        raw = self._get_json(
+            f"{self.api_base_url}/paper/{quote(paper_id, safe=':')}/{endpoint}",
+            {"limit": limit, "fields": nested_fields},
+        )
+        papers = []
+        for index, item in enumerate(as_list(raw.get("data")), start=1):
+            child = as_dict(item).get(nested_key)
+            if isinstance(child, dict):
+                papers.append(self._normalize_result(child, rank=index))
+        return RetrievalResult(raw=raw, papers=papers)
+
+    def _get_json(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
+        """GET JSON with retry handling and no API-key leakage."""
+
+        headers = {"x-api-key": self.api_key} if self.api_key else None
+        last_error = ""
+        for attempt in range(self.retries + 1):
+            try:
+                response = requests.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=self.timeout,
+                )
+                if response.status_code in {429, 500, 502, 503, 504} and attempt < self.retries:
+                    time.sleep(self.sleep_seconds * (attempt + 1))
+                    continue
+                response.raise_for_status()
+                return response.json()
+            except requests.RequestException as exc:
+                last_error = exc.__class__.__name__
+                if attempt < self.retries:
+                    time.sleep(self.sleep_seconds * (attempt + 1))
+                    continue
+                return {
+                    "data": [],
+                    "error": last_error,
+                    **request_error_details(exc),
+                    "provider": self.provider_name,
+                }
 
     def _normalize_many(self, raw: dict[str, Any]) -> list[Paper]:
         return [
