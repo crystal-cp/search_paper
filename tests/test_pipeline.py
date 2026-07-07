@@ -187,6 +187,7 @@ def test_pipeline_with_fake_retrievers_and_no_internet(tmp_path):
         gold_labels_path=None,
         output_dir=str(tmp_path / "outputs"),
         retriever_agent=retriever,
+        legacy_query_planning=True,
     )
 
     output_dir = tmp_path / "outputs"
@@ -296,6 +297,7 @@ def test_pipeline_applies_hard_local_from_year_filter(tmp_path):
         output_dir=str(tmp_path / "outputs"),
         retriever_agent=retriever,
         planned_queries_override=["surface magnetization"],
+        use_query_families=False,
     )
 
     output_dir = tmp_path / "outputs"
@@ -359,6 +361,7 @@ def test_pipeline_uses_english_planning_question_for_chinese_input(tmp_path):
         from_year=2020,
         output_dir=str(tmp_path / "outputs"),
         retriever_agent=retriever,
+        legacy_query_planning=True,
     )
 
     planned = json.loads((tmp_path / "outputs" / "planned_queries.json").read_text())
@@ -375,6 +378,7 @@ def test_plan_screening_queries_runs_without_retrieval():
         question="表面磁化的重要性",
         llm_backend="none",
         planner_mode="rule",
+        legacy_query_planning=True,
     )
 
     assert plan["queries"][0] == "surface magnetization importance"
@@ -407,6 +411,7 @@ def test_pipeline_uses_user_confirmed_query_override(tmp_path):
         retriever_agent=retriever,
         planned_queries_override=["surface magnetization antiferromagnetic boundary"],
         planner_metadata_override=metadata,
+        use_query_families=False,
     )
 
     assert client.seen_queries == ["surface magnetization antiferromagnetic boundary"]
@@ -497,6 +502,7 @@ def test_openalex_keyword_semantic_mode_runs_two_retrieval_stages(tmp_path):
         retriever_agent=retriever,
         planned_queries_override=["surface magnetization"],
         openalex_mode="keyword+semantic",
+        use_query_families=False,
     )
 
     diagnostics = json.loads(
@@ -545,6 +551,7 @@ def test_fake_pipeline_produces_sensemaking_outputs(tmp_path):
         max_per_query=1,
         output_dir=str(tmp_path / "outputs"),
         retriever_agent=retriever,
+        legacy_query_planning=True,
     )
 
     output_dir = tmp_path / "outputs"

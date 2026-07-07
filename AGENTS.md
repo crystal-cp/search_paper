@@ -42,6 +42,9 @@ accept human feedback, and write auditable outputs.
   citation/snowballing artifacts, mark it as not verified.
 - Do not commit `.env`, raw cache files, generated outputs, or local runtime
   artifacts except placeholder `.gitkeep` files.
+- User question is not a search query.
+- User question is noisy evidence of research intent.
+- The system must infer, repair, and operationalize that intent.
 
 ## API Keys
 

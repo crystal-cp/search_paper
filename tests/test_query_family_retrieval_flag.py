@@ -52,6 +52,7 @@ def test_query_families_disabled_keeps_retrieval_queries_unchanged(tmp_path):
         max_per_query=1,
         output_dir=str(output_dir),
         planned_queries_override=["surface magnetization importance"],
+        use_query_families=False,
         retriever_agent=RetrieverAgent(clients={"fake": client}),
     )
     provenance = json.loads((output_dir / "query_provenance.json").read_text())

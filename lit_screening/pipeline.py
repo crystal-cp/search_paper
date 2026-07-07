@@ -15,6 +15,7 @@ from .agents.domain_guardrail import DomainGuardrailAgent
 from .agents.evidence_function_classifier import classify_evidence_function
 from .agents.extractor import ExtractorAgent
 from .agents.human_feedback import HumanFeedbackAgent
+from .agents.intent_repair import NoviceIntentInterpreter
 from .agents.planner import PlannerAgent
 from .agents.paper_role_classifier import PaperRoleClassifier
 from .agents.preference_learning import PreferenceLearningAgent
@@ -50,6 +51,7 @@ from .models import (
     AspectCoverageRecord,
     DomainAssessment,
     EvidenceRecord,
+    ExpertResearchIntent,
     FeedbackRecord,
     Paper,
     PaperRoleRecord,
@@ -984,6 +986,7 @@ def _query_plan_payload(
     query_plan: QueryPlan,
     planner_metadata: dict[str, Any],
     search_contract: SearchContract | None = None,
+    expert_research_intent: ExpertResearchIntent | None = None,
 ) -> dict[str, Any]:
     """Build the serializable query-plan payload used by CLI and UI."""
 
@@ -1000,6 +1003,10 @@ def _query_plan_payload(
         },
         "query_plan": query_plan,
         "search_contract": search_contract,
+        "expert_research_intent": expert_research_intent,
+        "expert_rewritten_question": query_plan.expert_rewritten_question,
+        "intent_assumptions": query_plan.intent_assumptions,
+        "downweighted_user_terms": query_plan.downweighted_user_terms,
         "planner_metadata": planner_metadata,
         "llm": planner_metadata,
     }
@@ -1048,6 +1055,10 @@ def _coerce_query_plan(value: QueryPlan | dict[str, Any] | None) -> QueryPlan | 
         openalex_queries=list(data.get("openalex_queries", [])),
         semantic_scholar_queries=list(data.get("semantic_scholar_queries", [])),
         filters=dict(data.get("filters", {})),
+        expert_rewritten_question=str(data.get("expert_rewritten_question") or ""),
+        intent_assumptions=list(data.get("intent_assumptions", [])),
+        downweighted_user_terms=list(data.get("downweighted_user_terms", [])),
+        query_families_applied=bool(data.get("query_families_applied", False)),
     )
 
 
@@ -1106,6 +1117,77 @@ def _manual_planner_metadata(
         }
     metadata["query_source"] = "user_confirmed"
     return metadata
+
+
+def _apply_expert_intent_to_search_brief(
+    search_brief: SearchBrief,
+    expert_research_intent: ExpertResearchIntent | None,
+) -> SearchBrief:
+    """Use repaired intent as the planning-facing brief while preserving provenance."""
+
+    if expert_research_intent is None:
+        return search_brief
+    structured_concepts = expert_research_intent.structured_concepts
+    concept_terms = {
+        concept.term.lower()
+        for concept in structured_concepts
+        if concept.should_use_in_provider_query
+    }
+    is_materials_magnetism = bool(
+        concept_terms
+        & {
+            "surface magnetization",
+            "boundary magnetization",
+            "antiferromagnet",
+            "magnetoelectric antiferromagnet",
+            "local magnetoelectric response",
+            "altermagnetism",
+        }
+    )
+    inclusion = _unique_strings(
+        [
+            *search_brief.inclusion_criteria,
+            *expert_research_intent.target_objects[:4],
+            *expert_research_intent.mechanisms[:4],
+            *expert_research_intent.methods[:4],
+        ]
+    )
+    required_aspects = list(search_brief.required_aspects)
+    preferred_types = list(search_brief.preferred_paper_types)
+    success_definition = search_brief.success_definition
+    if is_materials_magnetism:
+        required_aspects = _unique_strings(
+            [
+                *required_aspects,
+                "surface magnetization theory",
+                "direct surface-sensitive detection",
+                "local magnetoelectric predictor",
+                "materials case coverage",
+            ]
+        )
+        preferred_types = _unique_strings(
+            [
+                *preferred_types,
+                "theoretical paper",
+                "experimental paper",
+                "methodological paper",
+            ]
+        )
+        success_definition = (
+            "A useful result set should cover theory, direct surface probes, "
+            "local magnetoelectric predictors, representative materials, and "
+            "limitations without treating broad motivation words as hard query terms."
+        )
+    return replace(
+        search_brief,
+        refined_question=expert_research_intent.expert_rewritten_question
+        or search_brief.refined_question,
+        user_goal=expert_research_intent.inferred_goal or search_brief.user_goal,
+        inclusion_criteria=inclusion,
+        required_aspects=required_aspects,
+        preferred_paper_types=preferred_types,
+        success_definition=success_definition,
+    )
 
 
 SUPPORTED_RESEARCH_LENS_DOMAINS = {"materials_magnetism"}
@@ -1216,6 +1298,7 @@ def _make_query_plan(
     ranking_profile: str = "balanced",
     search_brief: Any | None = None,
     search_contract: SearchContract | None = None,
+    expert_research_intent: ExpertResearchIntent | None = None,
 ) -> dict[str, Any]:
     """Run the planner and return a structured query plan."""
 
@@ -1228,12 +1311,14 @@ def _make_query_plan(
         ranking_profile=ranking_profile,
         search_brief=search_brief,
         search_contract=search_contract,
+        expert_intent=expert_research_intent,
     )
     return _query_plan_payload(
         question,
         query_plan,
         planner.last_llm_metadata,
         search_contract=search_contract,
+        expert_research_intent=expert_research_intent,
     )
 
 
@@ -1246,6 +1331,8 @@ def plan_screening_queries(
     sort_preference: str = "relevance",
     ranking_profile: str = "balanced",
     llm_client: GenericLLMClient | None = None,
+    intent_repair: bool = True,
+    legacy_query_planning: bool = False,
 ) -> dict[str, Any]:
     """Plan English scholarly queries without running retrieval.
 
@@ -1259,6 +1346,19 @@ def plan_screening_queries(
         mode=planner_mode,
         llm_client=active_llm_client,
     ).analyze(question)
+    seed_hints = SeedExtractionAgent().extract(question)
+    expert_research_intent = None
+    if intent_repair and not legacy_query_planning:
+        expert_research_intent = NoviceIntentInterpreter().repair(
+            question,
+            seed_hints=seed_hints,
+            llm_client=active_llm_client,
+            use_llm=True,
+        )
+        search_brief = _apply_expert_intent_to_search_brief(
+            search_brief,
+            expert_research_intent,
+        )
     refinement = QuestionRefinementAgent().refine(question, search_brief)
     ambiguity_analysis = AmbiguityDetectorAgent().analyze(question)
     search_contract = SearchContractAgent(
@@ -1279,11 +1379,14 @@ def plan_screening_queries(
         ranking_profile=ranking_profile,
         search_brief=search_brief,
         search_contract=search_contract,
+        expert_research_intent=expert_research_intent,
     )
     payload["search_brief"] = search_brief
     payload["search_contract"] = search_contract
     payload["ambiguity_analysis"] = ambiguity_analysis
     payload["question_refinement"] = refinement
+    payload["seed_hints"] = seed_hints
+    payload["expert_research_intent"] = expert_research_intent
     return payload
 
 
@@ -1347,6 +1450,7 @@ def build_query_provenance(
     queries_by_provider: dict[str, list[str]],
     query_family_plan: QueryFamilyPlan | None,
     use_query_families: bool = False,
+    max_family_queries_per_provider: int | None = 18,
 ) -> tuple[dict[str, list[str]], dict[str, Any]]:
     """Merge optional query-family queries and record retrieval provenance."""
 
@@ -1370,6 +1474,8 @@ def build_query_provenance(
 
     family_candidate_count = 0
     family_added_count = 0
+    family_skipped_by_cap_count = 0
+    family_added_by_provider = {provider: 0 for provider in providers}
     reason = "disabled"
     if use_query_families:
         if query_family_plan is None:
@@ -1380,6 +1486,14 @@ def build_query_provenance(
                 for provider in providers:
                     for query in _family_queries_for_provider(family, provider):
                         family_candidate_count += 1
+                        if (
+                            max_family_queries_per_provider is not None
+                            and max_family_queries_per_provider >= 0
+                            and family_added_by_provider.get(provider, 0)
+                            >= max_family_queries_per_provider
+                        ):
+                            family_skipped_by_cap_count += 1
+                            continue
                         key = (provider, query)
                         family_record = _query_provenance_record(
                             provider=provider,
@@ -1396,10 +1510,17 @@ def build_query_provenance(
                         merged_queries.setdefault(provider, []).append(query)
                         records.append(family_record)
                         family_added_count += 1
+                        family_added_by_provider[provider] = (
+                            family_added_by_provider.get(provider, 0) + 1
+                        )
             if family_candidate_count == 0:
                 reason = "no_family_queries"
             elif family_added_count == 0:
-                reason = "all_family_queries_already_present"
+                reason = (
+                    "family_query_cap_reached"
+                    if family_skipped_by_cap_count
+                    else "all_family_queries_already_present"
+                )
 
     payload = {
         "enabled": bool(use_query_families),
@@ -1417,6 +1538,8 @@ def build_query_provenance(
         "family_candidate_query_count": family_candidate_count,
         "family_query_count": family_added_count,
         "duplicate_family_query_count": len(duplicate_family_records),
+        "family_query_cap_per_provider": max_family_queries_per_provider,
+        "family_queries_skipped_by_cap_count": family_skipped_by_cap_count,
     }
     return merged_queries, payload
 
@@ -1878,7 +2001,10 @@ def run_pipeline(
     seed_file: str | None = None,
     enable_snowballing: bool = False,
     snowball_top_n: int = 3,
-    use_query_families: bool = False,
+    use_query_families: bool | None = None,
+    intent_repair: bool = True,
+    legacy_query_planning: bool = False,
+    query_family_provider_cap: int = 18,
     llm_client: GenericLLMClient | None = None,
     retriever_agent: RetrieverAgent | None = None,
     snowball_agent: CitationSnowballAgent | None = None,
@@ -1888,6 +2014,14 @@ def run_pipeline(
 
     out = ensure_dir(output_dir)
     ensure_dir("data/cache")
+    effective_intent_repair = bool(intent_repair and not legacy_query_planning)
+    effective_use_query_families = (
+        bool(use_query_families)
+        if use_query_families is not None
+        else not legacy_query_planning
+    )
+    if legacy_query_planning:
+        effective_use_query_families = False
     run_logger = ScreeningRunLogger(out)
     external_progress_callback = progress_callback
 
@@ -1919,7 +2053,10 @@ def run_pipeline(
             "snowball_top_n": snowball_top_n,
             "seed_paper_count": len(seed_papers or []),
             "seed_file": seed_file or "",
-            "use_query_families": use_query_families,
+            "intent_repair": effective_intent_repair,
+            "legacy_query_planning": legacy_query_planning,
+            "use_query_families": effective_use_query_families,
+            "query_family_provider_cap": query_family_provider_cap,
         },
     )
 
@@ -1930,7 +2067,10 @@ def run_pipeline(
         output_dir=str(out),
         use_cache=use_cache,
         llm_backend=llm_backend,
-        use_query_families=use_query_families,
+        use_query_families=effective_use_query_families,
+        intent_repair=effective_intent_repair,
+        legacy_query_planning=legacy_query_planning,
+        query_family_provider_cap=query_family_provider_cap,
     )
 
     seed_extraction_warning = ""
@@ -1970,13 +2110,77 @@ def run_pipeline(
             mode=planner_mode,
             llm_client=active_llm_client,
         ).analyze(question)
+    expert_research_intent: ExpertResearchIntent | None = None
+    intent_repair_warning = ""
+    if effective_intent_repair:
+        try:
+            expert_research_intent = NoviceIntentInterpreter().repair(
+                question,
+                seed_hints=seed_hints,
+                llm_client=active_llm_client,
+                use_llm=True,
+            )
+            search_brief = _apply_expert_intent_to_search_brief(
+                search_brief,
+                expert_research_intent,
+            )
+            write_json(out / "expert_research_intent.json", expert_research_intent)
+        except Exception as exc:
+            intent_repair_warning = str(exc)[:240]
+            expert_research_intent = None
+            if progress_callback:
+                progress_callback(
+                    "intent_repair",
+                    "Novice intent repair failed; continuing with legacy planning input",
+                    {"warning": intent_repair_warning},
+                )
+    else:
+        intent_repair_warning = "disabled_by_legacy_mode" if legacy_query_planning else "disabled"
+    if progress_callback:
+        intent_llm_metadata = (
+            expert_research_intent.llm_metadata if expert_research_intent else {}
+        )
+        progress_callback(
+            "intent_repair",
+            "Repaired novice research intent"
+            if expert_research_intent
+            else "Novice intent repair skipped",
+            {
+                "enabled": effective_intent_repair,
+                "executed": expert_research_intent is not None,
+                "domain": "materials_magnetism"
+                if expert_research_intent and expert_research_intent.materials
+                else "",
+                "user_is_novice": expert_research_intent.user_is_novice
+                if expert_research_intent
+                else False,
+                "downweighted_user_terms": expert_research_intent.ignored_or_downweighted_terms
+                if expert_research_intent
+                else [],
+                "llm_metadata": expert_research_intent.llm_metadata
+                if expert_research_intent
+                else {},
+                "llm_used": intent_llm_metadata.get("llm_used", False),
+                "fallback_used": intent_llm_metadata.get("fallback_used", False),
+                "invalid_json_count": intent_llm_metadata.get("invalid_json_count", 0),
+                "schema_validation_errors": intent_llm_metadata.get(
+                    "schema_validation_errors",
+                    [],
+                ),
+                "llm_confidence": intent_llm_metadata.get("llm_confidence", 0.0),
+                "fallback_reason": intent_llm_metadata.get("fallback_reason", ""),
+                "warning": intent_repair_warning,
+            },
+        )
     question_refinement = QuestionRefinementAgent().refine(question, search_brief)
     ambiguity_analysis = AmbiguityDetectorAgent().analyze(question)
     search_contract = SearchContractAgent(
         mode=planner_mode,
         llm_client=active_llm_client,
     ).build(
-        question,
+        expert_research_intent.expert_rewritten_question
+        if expert_research_intent
+        else question,
         search_brief=search_brief,
         ambiguity_analysis=ambiguity_analysis,
     )
@@ -1984,8 +2188,13 @@ def run_pipeline(
     write_json(out / "question_refinement.json", question_refinement)
     write_json(out / "ambiguity_analysis.json", ambiguity_analysis)
     write_json(out / "search_contract.json", search_contract)
+    concept_mapping_question = (
+        f"{question} {expert_research_intent.expert_rewritten_question}"
+        if expert_research_intent
+        else question
+    )
     concept_map, query_family_plan, research_lens_trace = build_research_lens_artifacts(
-        question=question,
+        question=concept_mapping_question,
         search_brief=search_brief,
         search_contract=search_contract,
         output_dir=out,
@@ -2015,6 +2224,7 @@ def run_pipeline(
             ranking_profile=ranking_profile,
             search_brief=search_brief,
             search_contract=search_contract,
+            expert_research_intent=expert_research_intent,
         )
     else:
         planner_metadata = _manual_planner_metadata(
@@ -2080,6 +2290,7 @@ def run_pipeline(
             structured_override,
             planner_metadata,
             search_contract=search_contract,
+            expert_research_intent=expert_research_intent,
         )
 
     query_plan = query_plan_payload["query_plan"]
@@ -2146,6 +2357,7 @@ def run_pipeline(
                 query_plan,
                 planner_metadata,
                 search_contract=search_contract,
+                expert_research_intent=expert_research_intent,
             )
             query_plan_payload["search_brief"] = search_brief
             query_plan_payload["search_contract"] = search_contract
@@ -2170,8 +2382,12 @@ def run_pipeline(
         providers=providers,
         queries_by_provider=queries_by_provider,
         query_family_plan=query_family_plan,
-        use_query_families=use_query_families,
+        use_query_families=effective_use_query_families,
+        max_family_queries_per_provider=query_family_provider_cap,
     )
+    query_plan.query_families_applied = bool(query_provenance.get("applied"))
+    query_plan_payload["query_plan"] = query_plan
+    query_plan_payload["query_families_applied"] = query_plan.query_families_applied
     write_json(out / "planned_queries.json", query_plan_payload)
     write_json(out / "query_provenance.json", query_provenance)
     write_json(out / "query_pilot_diagnostics.json", query_pilot_diagnostics)
@@ -2186,11 +2402,12 @@ def run_pipeline(
                     len(provider_queries)
                     for provider_queries in queries_by_provider.values()
                 ),
-                "use_query_families": use_query_families,
+                "use_query_families": effective_use_query_families,
                 "query_family_query_count": query_provenance.get(
                     "family_query_count",
                     0,
                 ),
+                "query_family_cap_per_provider": query_family_provider_cap,
                 "planning_question": planning_question,
                 "translation_mode": planner_metadata.get("translation_mode", "none"),
                 "queries_by_provider": {
@@ -2802,7 +3019,10 @@ def run_pipeline(
         "openalex_mode": openalex_mode,
         "sort_preference": sort_preference,
         "ranking_profile": ranking_profile,
-        "use_query_families": use_query_families,
+        "intent_repair": effective_intent_repair,
+        "legacy_query_planning": legacy_query_planning,
+        "use_query_families": effective_use_query_families,
+        "query_family_provider_cap": query_family_provider_cap,
     }
     metrics["search_intent"] = search_brief.search_intent
     metrics["average_aspect_coverage"] = (
@@ -2865,6 +3085,42 @@ def run_pipeline(
         **research_lens_trace.get("query_family_planner", {}),
         "domain": research_lens_trace.get("domain", ""),
         "reason": research_lens_trace.get("reason", ""),
+    }
+    intent_llm_metadata = (
+        expert_research_intent.llm_metadata if expert_research_intent else {}
+    )
+    trace["intent_repair"] = {
+        "enabled": effective_intent_repair,
+        "executed": expert_research_intent is not None,
+        "artifact": "expert_research_intent.json"
+        if expert_research_intent
+        else "",
+        "user_is_novice": expert_research_intent.user_is_novice
+        if expert_research_intent
+        else False,
+        "expert_rewritten_question": expert_research_intent.expert_rewritten_question
+        if expert_research_intent
+        else "",
+        "downweighted_user_terms": expert_research_intent.ignored_or_downweighted_terms
+        if expert_research_intent
+        else [],
+        "llm_metadata": expert_research_intent.llm_metadata
+        if expert_research_intent
+        else {},
+        "llm_used": intent_llm_metadata.get("llm_used", False),
+        "fallback_used": intent_llm_metadata.get("fallback_used", False),
+        "invalid_json_count": intent_llm_metadata.get("invalid_json_count", 0),
+        "schema_validation_errors": intent_llm_metadata.get(
+            "schema_validation_errors",
+            [],
+        ),
+        "llm_confidence": intent_llm_metadata.get("llm_confidence", 0.0),
+        "fallback_reason": intent_llm_metadata.get("fallback_reason", ""),
+        "assumptions": expert_research_intent.assumptions
+        if expert_research_intent
+        else [],
+        "warning": intent_repair_warning,
+        "legacy_query_planning": legacy_query_planning,
     }
     trace["query_family_retrieval"] = {
         "enabled": query_provenance.get("enabled", False),
@@ -3081,6 +3337,7 @@ def run_pipeline(
         concept_map=concept_map,
         query_family_plan=query_family_plan,
         query_provenance=query_provenance,
+        expert_research_intent=expert_research_intent,
     )
 
 
@@ -3215,7 +3472,32 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--use-query-families",
         action="store_true",
+        default=None,
         help="Include optional QueryFamilyPlan queries in retrieval.",
+    )
+    run.add_argument(
+        "--skip-query-families",
+        dest="use_query_families",
+        action="store_false",
+        help="Do not include QueryFamilyPlan queries in retrieval.",
+    )
+    run.add_argument(
+        "--legacy-query-planning",
+        action="store_true",
+        help="Disable novice intent repair and QueryFamily retrieval for old planner behavior.",
+    )
+    run.add_argument(
+        "--disable-intent-repair",
+        dest="intent_repair",
+        action="store_false",
+        default=True,
+        help="Disable novice-aware research intent repair.",
+    )
+    run.add_argument(
+        "--query-family-provider-cap",
+        type=int,
+        default=18,
+        help="Maximum QueryFamily queries added per provider when enabled.",
     )
     return parser
 
@@ -3267,6 +3549,9 @@ def main(argv: list[str] | None = None) -> int:
                 enable_snowballing=args.enable_snowballing,
                 snowball_top_n=args.snowball_top_n,
                 use_query_families=args.use_query_families,
+                intent_repair=args.intent_repair,
+                legacy_query_planning=args.legacy_query_planning,
+                query_family_provider_cap=args.query_family_provider_cap,
             )
         except Exception as exc:
             ScreeningRunLogger(args.output_dir).log_exception(

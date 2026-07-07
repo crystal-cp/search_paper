@@ -250,6 +250,175 @@ def _append_research_process_section(
     )
 
 
+def _append_intent_repair_section(lines: list[str], artifact_dir: Path) -> None:
+    lines.extend(["## How the system corrected the user’s question", ""])
+    intent, generated = _artifact_payload(artifact_dir, "expert_research_intent.json")
+    if not generated:
+        _append_missing(lines)
+        lines.append("")
+        return
+    payload = _as_dict(intent)
+    lines.append(f"- User original wording: {payload.get('original_question', '')}")
+    lines.append(
+        f"- Expert rewritten question: {payload.get('expert_rewritten_question', '')}"
+    )
+    lines.append(
+        f"- Downweighted user terms: {_join(payload.get('ignored_or_downweighted_terms'), 12)}"
+    )
+    supplemented = _unique(
+        [
+            *[str(item) for item in _as_list(payload.get("target_objects"))],
+            *[str(item) for item in _as_list(payload.get("mechanisms"))],
+            *[str(item) for item in _as_list(payload.get("materials"))],
+            *[str(item) for item in _as_list(payload.get("methods"))],
+        ]
+    )
+    lines.append(f"- Expert concepts added: {', '.join(supplemented[:24])}")
+    lines.extend(["", "## Intent assumptions and possible misreadings", ""])
+    ambiguity_points = _as_list(payload.get("ambiguity_points"))
+    possible_interpretations = _as_list(payload.get("possible_interpretations"))
+    selected_interpretation = payload.get("selected_interpretation", "")
+    selected_reason = payload.get("selected_interpretation_reason", "")
+    needs_confirmation_report = _as_list(payload.get("needs_user_confirmation"))
+    unsafe_assumptions = _as_list(payload.get("unsafe_or_overbroad_assumptions"))
+    if possible_interpretations:
+        lines.append("- Possible interpretations of the user's wording:")
+        for item in possible_interpretations[:10]:
+            lines.append(f"  - {item}")
+    else:
+        lines.append("- Possible interpretations of the user's wording: none recorded")
+    lines.append(f"- Selected interpretation: {selected_interpretation or 'Not explicitly selected.'}")
+    lines.append(f"- Why this interpretation: {selected_reason or 'Not generated in this run.'}")
+    if ambiguity_points:
+        lines.append("- Ambiguity points:")
+        for item in ambiguity_points[:8]:
+            lines.append(f"  - {item}")
+    if needs_confirmation_report:
+        lines.append("- Needs user confirmation:")
+        for item in needs_confirmation_report[:8]:
+            lines.append(f"  - {item}")
+    if unsafe_assumptions:
+        lines.append("- Unsafe or overbroad assumptions avoided:")
+        for item in unsafe_assumptions[:8]:
+            lines.append(f"  - {item}")
+    downweighted_for_report = _join(
+        payload.get("ignored_or_downweighted_terms"),
+        16,
+    )
+    lines.append(
+        "- User words not mechanically used as hard query terms: "
+        + (downweighted_for_report or "none recorded")
+    )
+    llm_metadata = _as_dict(payload.get("llm_metadata"))
+    if llm_metadata:
+        lines.extend(
+            [
+                "",
+                "LLM-assisted intent repair:",
+                f"- LLM attempted: {bool(llm_metadata.get('llm_attempted'))}",
+                f"- LLM used: {bool(llm_metadata.get('llm_used'))}",
+                f"- Fallback used: {bool(llm_metadata.get('fallback_used'))}",
+                f"- LLM confidence: {llm_metadata.get('llm_confidence', 0)}",
+                f"- Fallback reason: {llm_metadata.get('fallback_reason', '')}",
+            ]
+        )
+        validation_events = _as_list(llm_metadata.get("domain_validation_events"))
+        if validation_events:
+            lines.extend(
+                [
+                    "",
+                    "Concepts downgraded by domain-pack validation:",
+                    "",
+                    "| Concept | Source | Reason | New role |",
+                    "| --- | --- | --- | --- |",
+                ]
+            )
+            for event in validation_events[:12]:
+                event_dict = _as_dict(event)
+                lines.append(
+                    "| "
+                    f"{_escape_table(event_dict.get('term'))} | "
+                    f"{_escape_table(event_dict.get('source'))} | "
+                    f"{_escape_table(event_dict.get('reason'))} | "
+                    f"{_escape_table(event_dict.get('new_query_role'))} |"
+                )
+        schema_errors = _as_list(llm_metadata.get("schema_validation_errors"))
+        if schema_errors:
+            lines.append("")
+            lines.append(f"- Schema validation errors: {_join(schema_errors, 8)}")
+    structured_concepts = [
+        _as_dict(item) for item in _as_list(payload.get("structured_concepts"))
+    ]
+    used_concepts = [
+        item
+        for item in structured_concepts
+        if item.get("should_use_in_provider_query")
+        and str(item.get("query_role") or "") in {"must", "optional"}
+    ]
+    if used_concepts:
+        lines.extend(
+            [
+                "",
+                "Concepts supplemented for expert-style planning:",
+                "",
+                "| Concept | Category | Source | Role | Used in provider query | Activation reason |",
+                "| --- | --- | --- | --- | ---: | --- |",
+            ]
+        )
+        for item in used_concepts[:20]:
+            lines.append(
+                "| "
+                f"{_escape_table(item.get('term'))} | "
+                f"{_escape_table(item.get('category'))} | "
+                f"{_escape_table(item.get('source'))} | "
+                f"{_escape_table(item.get('query_role'))} | "
+                f"{'yes' if item.get('should_use_in_provider_query') else 'no'} | "
+                f"{_escape_table(item.get('activation_reason'))} |"
+            )
+    downweighted_concepts = [
+        item
+        for item in structured_concepts
+        if str(item.get("query_role") or "") == "downweighted"
+    ]
+    if downweighted_concepts:
+        lines.append("")
+        lines.append(
+            "Downweighted terms: "
+            + ", ".join(_escape_table(item.get("term")) for item in downweighted_concepts[:16])
+        )
+    optional_or_uncertain = [
+        item
+        for item in structured_concepts
+        if str(item.get("query_role") or "") in {"optional", "uncertain"}
+    ]
+    if optional_or_uncertain:
+        lines.append("")
+        lines.append(
+            "Optional or uncertain concepts: "
+            + ", ".join(_escape_table(item.get("term")) for item in optional_or_uncertain[:16])
+        )
+    needs_confirmation = _as_list(payload.get("needs_user_confirmation"))
+    if needs_confirmation:
+        lines.append("")
+        lines.append(
+            "Needs user confirmation: "
+            + ", ".join(_escape_table(item) for item in needs_confirmation[:12])
+        )
+    assumptions = _as_list(payload.get("assumptions"))
+    if assumptions:
+        lines.append("- Assumptions needing confirmation or verification:")
+        for assumption in assumptions[:8]:
+            lines.append(f"  - {assumption}")
+    else:
+        lines.append("- Assumptions needing confirmation or verification: none recorded")
+    must_not = _as_list(payload.get("must_not_overinterpret"))
+    if must_not:
+        lines.append("- Conservative boundaries:")
+        for item in must_not[:6]:
+            lines.append(f"  - {item}")
+    lines.append("")
+
+
 def _append_research_question_interpretation(
     lines: list[str],
     research_question: str,
@@ -277,6 +446,11 @@ def _append_research_question_interpretation(
         )
     if query_plan:
         lines.append(f"- Core terms: {_join(query_plan.core_terms)}")
+        if query_plan.expert_rewritten_question:
+            lines.append(f"- Expert rewrite: {query_plan.expert_rewritten_question}")
+            lines.append(
+                f"- Downweighted user terms: {_join(query_plan.downweighted_user_terms)}"
+            )
     lines.append("")
 
 
@@ -681,6 +855,7 @@ def generate_report(
                 "",
             ]
         )
+    _append_intent_repair_section(lines, destination.parent)
     if search_brief:
         lines.extend(
             [

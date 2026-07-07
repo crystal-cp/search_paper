@@ -56,6 +56,7 @@ def test_pipeline_writes_research_lens_artifacts_without_changing_query_plan(tmp
     concept_map = json.loads(concept_map_path.read_text())
     query_families = json.loads(query_families_path.read_text())
     trace = json.loads((output_dir / "agent_trace.json").read_text())
+    provenance = json.loads((output_dir / "query_provenance.json").read_text())
 
     assert concept_map_path.exists()
     assert query_families_path.exists()
@@ -66,8 +67,10 @@ def test_pipeline_writes_research_lens_artifacts_without_changing_query_plan(tmp
     assert result.query_plan is not None
     assert result.planned_queries
     assert client.seen_queries
-    assert all(query in result.planned_queries for query in client.seen_queries)
-    assert all("SPLEEM" not in query for query in client.seen_queries)
+    assert any(query in result.planned_queries for query in client.seen_queries)
+    assert any("SPLEEM" in query or "XMCD" in query for query in client.seen_queries)
+    assert provenance["enabled"] is True
+    assert provenance["applied"] is True
     assert trace["concept_mapper"]["executed"] is True
     assert trace["concept_mapper"]["lens_count"] >= 1
     assert trace["query_family_planner"]["executed"] is True

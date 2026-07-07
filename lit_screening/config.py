@@ -23,4 +23,7 @@ class PipelineConfig:
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
     llm_timeout: float = 30.0
-    use_query_families: bool = False
+    use_query_families: bool = True
+    intent_repair: bool = True
+    legacy_query_planning: bool = False
+    query_family_provider_cap: int = 18

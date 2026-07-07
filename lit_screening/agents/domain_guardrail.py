@@ -45,14 +45,39 @@ class DomainGuardrailAgent:
             else contract_or_profile
         )
         text = paper_domain_text(paper)
-        required = _unique(
-            [
-                *(contract.must_include_concepts if contract else []),
-                *profile.required_concepts,
-                *(query_plan.must_terms if query_plan else []),
-            ],
-            limit=14,
-        )
+        must_groups = _must_term_groups(query_plan, profile.domain_name)
+        if must_groups:
+            required = [
+                "any of: " + " OR ".join(group)
+                for group in must_groups
+                if group
+            ]
+            required_match_flags = [
+                any(concept_matches(term, text) for term in group)
+                for group in must_groups
+                if group
+            ]
+            missing_required = [
+                required[index]
+                for index, matched in enumerate(required_match_flags)
+                if not matched
+            ]
+            flattened_group_terms = [
+                term for group in must_groups for term in group
+            ]
+        else:
+            required = _unique(
+                [
+                    *(contract.must_include_concepts if contract else []),
+                    *profile.required_concepts,
+                    *(query_plan.must_terms if query_plan else []),
+                ],
+                limit=14,
+            )
+            missing_required = [
+                item for item in required if not concept_matches(item, text)
+            ]
+            flattened_group_terms = []
         forbidden = _unique(
             [
                 *(contract.must_exclude_concepts if contract else []),
@@ -68,6 +93,7 @@ class DomainGuardrailAgent:
                 *profile.field_of_study_whitelist,
                 *profile.preferred_venues,
                 *required,
+                *flattened_group_terms,
                 *terminology_synonyms(profile),
             ],
             limit=40,
@@ -89,9 +115,6 @@ class DomainGuardrailAgent:
         ]
         forbidden_found = [
             item for item in forbidden if concept_matches(item, text)
-        ]
-        missing_required = [
-            item for item in required if not concept_matches(item, text)
         ]
         required_coverage = (
             (len(required) - len(missing_required)) / len(required)
@@ -196,6 +219,24 @@ def terminology_synonyms(profile: DomainProfile) -> list[str]:
         values.append(term)
         values.extend(synonyms)
     return _unique(values, limit=40)
+
+
+def _must_term_groups(query_plan: QueryPlan | None, domain_name: str) -> list[list[str]]:
+    """Return any-of required term groups for domains that support them."""
+
+    if not query_plan or domain_name != "materials_magnetism":
+        return []
+    raw_groups = query_plan.filters.get("must_term_groups", [])
+    groups: list[list[str]] = []
+    if not isinstance(raw_groups, list):
+        return []
+    for group in raw_groups:
+        if not isinstance(group, list):
+            continue
+        cleaned = _unique([str(item) for item in group], limit=12)
+        if cleaned:
+            groups.append(cleaned)
+    return groups
 
 
 def off_topic_reason(

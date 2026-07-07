@@ -60,6 +60,48 @@ class DomainPack:
 
 
 @dataclass
+class IntentConcept:
+    """One concept activated while repairing a novice research intent."""
+
+    term: str
+    category: str
+    source: str
+    confidence: float
+    activation_reason: str
+    query_role: str
+    should_use_in_provider_query: bool
+
+
+@dataclass
+class ExpertResearchIntent:
+    """Expert-level repair of a novice or underspecified research question."""
+
+    original_question: str
+    user_is_novice: bool
+    inferred_goal: str
+    expert_rewritten_question: str
+    structured_concepts: list[IntentConcept] = field(default_factory=list)
+    target_objects: list[str] = field(default_factory=list)
+    target_properties: list[str] = field(default_factory=list)
+    mechanisms: list[str] = field(default_factory=list)
+    materials: list[str] = field(default_factory=list)
+    methods: list[str] = field(default_factory=list)
+    applications: list[str] = field(default_factory=list)
+    likely_user_misconceptions: list[str] = field(default_factory=list)
+    ignored_or_downweighted_terms: list[str] = field(default_factory=list)
+    must_not_overinterpret: list[str] = field(default_factory=list)
+    ambiguity_points: list[str] = field(default_factory=list)
+    possible_interpretations: list[str] = field(default_factory=list)
+    selected_interpretation: str = ""
+    selected_interpretation_reason: str = ""
+    needs_user_confirmation: list[str] = field(default_factory=list)
+    unsafe_or_overbroad_assumptions: list[str] = field(default_factory=list)
+    llm_metadata: dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+    assumptions: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ResearchLens:
     """A researcher-style viewpoint for exploring a central question."""
 
@@ -144,6 +186,10 @@ class QueryPlan:
     openalex_queries: list[str] = field(default_factory=list)
     semantic_scholar_queries: list[str] = field(default_factory=list)
     filters: dict[str, Any] = field(default_factory=dict)
+    expert_rewritten_question: str = ""
+    intent_assumptions: list[str] = field(default_factory=list)
+    downweighted_user_terms: list[str] = field(default_factory=list)
+    query_families_applied: bool = False
 
 
 @dataclass
@@ -482,3 +528,4 @@ class PipelineResult:
     concept_map: ResearchLensPlan | None = None
     query_family_plan: QueryFamilyPlan | None = None
     query_provenance: dict[str, Any] = field(default_factory=dict)
+    expert_research_intent: ExpertResearchIntent | None = None
