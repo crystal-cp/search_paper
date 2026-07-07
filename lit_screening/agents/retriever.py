@@ -40,6 +40,7 @@ class RetrieverAgent:
                 timeout=self.config.request_timeout,
                 retries=self.config.request_retries,
                 sleep_seconds=self.config.rate_limit_sleep,
+                min_interval_seconds=self.config.semantic_scholar_min_interval_seconds,
             ),
         }
 

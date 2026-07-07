@@ -108,6 +108,57 @@ def test_query_provenance_links_lenses_and_families():
     assert "spaldin_framework" in record.linked_lenses
     assert "spaldin_framework" in record.linked_query_families
     assert "conceptual_framework" in record.roles
+    assert "spaldin_framework" in record.retrieval_lanes
+
+
+def test_query_family_alone_does_not_assign_content_role():
+    paper = Paper(
+        paper_id="generic",
+        title="A general overview of research methods",
+        abstract="This article gives a broad overview without reporting direct evidence.",
+        source_provider="fake",
+        retrieval_provider="fake",
+        retrieval_query="direct surface detection query",
+        raw={
+            "matched_query": "direct surface detection query",
+            "matched_query_family": "direct_surface_detection",
+            "matched_lens": "direct_surface_detection",
+            "matched_query_source": "query_family",
+        },
+    )
+    provenance = {
+        "records": [
+            {
+                "provider": "fake",
+                "raw_query": "direct surface detection query",
+                "source": "query_family",
+                "family_name": "direct_surface_detection",
+                "lens_name": "direct_surface_detection",
+                "purpose": "retrieve direct detection papers",
+            }
+        ]
+    }
+
+    record = PaperRoleClassifier().classify(paper, query_provenance=provenance)
+
+    assert "direct_surface_detection" in record.retrieval_lanes
+    assert "experimental_proof" not in record.roles
+    assert "surface_probe_method" not in record.roles
+
+
+def test_overbroad_role_warning_is_set_for_common_roles():
+    papers = [
+        Paper(
+            paper_id=f"theory-{index}",
+            title=f"Equilibrium magnetization of magnetoelectric antiferromagnets {index}",
+            abstract="Boundary magnetization appears in a magnetoelectric antiferromagnet.",
+        )
+        for index in range(4)
+    ]
+
+    records = PaperRoleClassifier().classify_many(papers)
+
+    assert all(record.overbroad_role_warning for record in records)
 
 
 class RoleFakeClient:

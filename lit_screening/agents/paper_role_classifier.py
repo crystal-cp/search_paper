@@ -12,8 +12,11 @@ ROLE_PRIORITY = [
     "conceptual_framework",
     "nanoscale_readout",
     "experimental_proof",
+    "direct_probe_method",
     "surface_probe_method",
+    "interface_screening",
     "material_case",
+    "device_application",
     "application_bridge",
     "frontier_extension",
     "limitation_or_challenge",
@@ -27,6 +30,9 @@ TEXT_RULES = [
             "boundary magnetization",
             "equilibrium magnetization",
             "magnetoelectric antiferromagnet",
+            "modern theory of polarization",
+            "electric polarization as a bulk quantity",
+            "electric polarization",
         ],
     ),
     (
@@ -47,6 +53,21 @@ TEXT_RULES = [
             "spin polarization asymmetry",
             "magnetic domain",
             "domain imaging",
+        ],
+    ),
+    (
+        "direct_probe_method",
+        [
+            "piezoresponse force microscopy",
+            "pfm",
+            "second harmonic generation",
+            "shg",
+            "kelvin probe force microscopy",
+            "kpfm",
+            "xps",
+            "photoemission",
+            "tem",
+            "stem",
         ],
     ),
     (
@@ -73,6 +94,18 @@ TEXT_RULES = [
         ],
     ),
     (
+        "interface_screening",
+        [
+            "depolarization field",
+            "screening charge",
+            "interface screening",
+            "surface screening",
+            "surface charge",
+            "electrode screening",
+            "imprint",
+        ],
+    ),
+    (
         "material_case",
         [
             "cr2o3",
@@ -83,6 +116,24 @@ TEXT_RULES = [
             "cumnas",
             "mn2au",
             "fesn",
+            "batio3",
+            "pzt",
+            "pbtio3",
+            "bifeo3",
+            "hfo2",
+            "hfzro2",
+            "linbo3",
+            "pvdf",
+        ],
+    ),
+    (
+        "device_application",
+        [
+            "ferroelectric memory",
+            "ferroelectric tunnel junction",
+            "fefet",
+            "nonvolatile memory",
+            "oxide electronics",
         ],
     ),
     (
@@ -112,6 +163,9 @@ TEXT_RULES = [
             "defects",
             "paramagnetism",
             "parasitic magnetization",
+            "dead layer",
+            "domain pinning",
+            "leakage",
         ],
     ),
     (
@@ -121,6 +175,11 @@ TEXT_RULES = [
             "rev. mod. phys.",
             "reviews of modern physics",
             "survey",
+            "perspective",
+            "roadmap",
+            "overview",
+            "annual review",
+            "reports on progress",
         ],
     ),
 ]
@@ -150,10 +209,12 @@ class PaperRoleClassifier:
     ) -> list[PaperRoleRecord]:
         """Classify a list of papers without changing ranking."""
 
-        return [
+        records = [
             self.classify(paper, query_provenance=query_provenance)
             for paper in papers
         ]
+        _mark_overbroad_roles(records)
+        return records
 
     def classify(
         self,
@@ -178,20 +239,11 @@ class PaperRoleClassifier:
                     f"{role}: matched " + ", ".join(matches[:3])
                 )
 
-        for family in linked_query_families:
-            for role in QUERY_FAMILY_ROLE_MAP.get(family, []):
-                roles.append(role)
-                reasons.append(f"{role}: linked query family {family}")
-
-        for lens in linked_lenses:
-            for role in QUERY_FAMILY_ROLE_MAP.get(lens, []):
-                roles.append(role)
-                reasons.append(f"{role}: linked lens {lens}")
-
         roles = _unique_role_order(roles)
-        if not roles:
-            roles = ["review_background"]
-            reasons.append("review_background: no stronger role markers found")
+        if linked_query_families or linked_lenses:
+            reasons.append(
+                "retrieval_lane: linked query family/lens recorded as provenance only"
+            )
 
         primary_role = _primary_role(roles)
         confidence = _confidence(roles, reasons, linked_lenses, linked_query_families)
@@ -204,6 +256,8 @@ class PaperRoleClassifier:
             reasons=_unique_strings(reasons),
             linked_lenses=linked_lenses,
             linked_query_families=linked_query_families,
+            content_roles=list(roles),
+            retrieval_lanes=_unique_strings([*linked_query_families, *linked_lenses]),
         )
 
 
@@ -213,10 +267,6 @@ def _paper_text(paper: Paper) -> str:
         paper.abstract,
         paper.venue,
         str(paper.year or ""),
-        paper.retrieval_query,
-        paper.source_stage,
-        str(paper.raw.get("matched_query") or ""),
-        str(paper.raw.get("matched_query_purpose") or ""),
     ]
     return " ".join(fields).lower()
 
@@ -284,7 +334,7 @@ def _primary_role(roles: list[str]) -> str:
     for role in ROLE_PRIORITY:
         if role in roles:
             return role
-    return roles[0] if roles else "review_background"
+    return roles[0] if roles else "unclassified"
 
 
 def _confidence(
@@ -293,16 +343,42 @@ def _confidence(
     linked_lenses: list[str],
     linked_query_families: list[str],
 ) -> float:
-    if roles == ["review_background"] and len(reasons) == 1:
-        return 0.2
+    if not roles:
+        return 0.1
     score = 0.42
     score += min(len(roles), 4) * 0.08
     score += min(len(reasons), 5) * 0.04
     if linked_lenses:
-        score += 0.06
+        score += 0.02
     if linked_query_families:
-        score += 0.06
+        score += 0.02
     return round(min(score, 0.95), 3)
+
+
+def _mark_overbroad_roles(records: list[PaperRoleRecord]) -> None:
+    """Flag roles that appear on more than 30 percent of records."""
+
+    if not records:
+        return
+    role_counts: dict[str, int] = {}
+    for record in records:
+        for role in record.roles:
+            role_counts[role] = role_counts.get(role, 0) + 1
+    total = len(records)
+    overbroad_roles = {
+        role
+        for role, count in role_counts.items()
+        if total > 1 and (count / total) > 0.30
+    }
+    if not overbroad_roles:
+        return
+    for record in records:
+        matched = [role for role in record.roles if role in overbroad_roles]
+        if matched:
+            record.overbroad_role_warning = (
+                "Role appears on more than 30% of papers; treat as broad context, not a decisive role: "
+                + ", ".join(matched)
+            )
 
 
 def _unique_strings(values: list[str]) -> list[str]:

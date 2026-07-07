@@ -1,0 +1,17 @@
+{
+  "user_question": "我想调研铁电薄膜表面极化为什么重要，以及怎么探测",
+  "expected_concepts": [
+    "ferroelectric polarization",
+    "surface polarization"
+  ],
+  "excluded_concepts": [
+    "boundary magnetization",
+    "Cr2O3",
+    "SPLEEM"
+  ],
+  "expected_query_phrases": [
+    "ferroelectric polarization",
+    "surface polarization",
+    "PFM"
+  ]
+}

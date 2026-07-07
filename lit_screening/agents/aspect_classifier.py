@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from lit_screening.models import AspectCoverageRecord, EvidenceRecord, Paper
 from lit_screening.reranking import tfidf_cosine_similarity
 from lit_screening.utils import tokenize
@@ -61,13 +63,17 @@ class AspectCoverageAgent:
         missing: list[str] = []
         paper_tokens = set(tokenize(paper_text))
         for aspect in aspects:
-            aspect_tokens = set(tokenize(aspect))
-            overlap = bool(aspect_tokens and aspect_tokens <= paper_tokens)
-            similarity = tfidf_cosine_similarity(aspect, paper_text)
+            label, synonyms = _parse_aspect(aspect)
+            candidates = synonyms or [label]
+            overlap = any(_term_matches(candidate, paper_text, paper_tokens) for candidate in candidates)
+            similarity = max(
+                [tfidf_cosine_similarity(candidate, paper_text) for candidate in candidates]
+                or [0.0]
+            )
             if overlap or similarity >= 0.18:
-                covered.append(aspect)
+                covered.append(label)
             else:
-                missing.append(aspect)
+                missing.append(label)
         return AspectCoverageRecord(
             paper_id=paper.paper_id,
             title=paper.title,
@@ -75,3 +81,32 @@ class AspectCoverageAgent:
             missing_aspects=missing,
             aspect_coverage_score=len(covered) / len(aspects) if aspects else 0.0,
         )
+
+
+def _parse_aspect(aspect: str) -> tuple[str, list[str]]:
+    """Parse optional 'label: synonym; synonym' aspect groups."""
+
+    cleaned = " ".join(str(aspect or "").split())
+    if not cleaned:
+        return "", []
+    if ":" not in cleaned:
+        return cleaned, [cleaned]
+    label, raw_terms = cleaned.split(":", 1)
+    terms = [
+        " ".join(term.split())
+        for term in re.split(r"[;,|]", raw_terms)
+        if " ".join(term.split())
+    ]
+    return " ".join(label.split()), terms
+
+
+def _term_matches(term: str, paper_text: str, paper_tokens: set[str]) -> bool:
+    """Return True when a term or all its tokens are present in paper text."""
+
+    cleaned = " ".join(str(term or "").lower().split())
+    if not cleaned:
+        return False
+    if cleaned in paper_text.lower():
+        return True
+    term_tokens = set(tokenize(cleaned))
+    return bool(term_tokens and term_tokens <= paper_tokens)

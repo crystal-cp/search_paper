@@ -52,11 +52,16 @@ class DomainPack:
     """Externalized domain knowledge for future query-planning extensions."""
 
     domain_name: str
+    domain_anchors: list[str] = field(default_factory=list)
     concepts: dict[str, DomainConcept] = field(default_factory=dict)
+    mechanisms: list[str] = field(default_factory=list)
     materials: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=list)
     applications: list[str] = field(default_factory=list)
     false_positive_terms: list[str] = field(default_factory=list)
+    constraint_groups: list[dict[str, Any]] = field(default_factory=list)
+    aspect_groups: dict[str, list[str]] = field(default_factory=dict)
+    query_expansions: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -130,6 +135,8 @@ class QueryFamily:
     expected_evidence_types: list[str] = field(default_factory=list)
     exclusion_terms: list[str] = field(default_factory=list)
     stop_condition: str | None = None
+    priority: int = 50
+    budget: int = 3
     linked_seed_titles: list[str] = field(default_factory=list)
     seed_hint_confidence: float = 0.0
 
@@ -153,6 +160,17 @@ class QueryFamilyPlan:
 
 
 @dataclass
+class SearchConstraintGroup:
+    """A group of search constraints derived from structured intent concepts."""
+
+    group_name: str
+    operator: str
+    terms: list[str] = field(default_factory=list)
+    source: str = ""
+    required: bool = False
+
+
+@dataclass
 class SearchContract:
     """Explicit retrieval contract derived from a user question and search brief."""
 
@@ -163,6 +181,11 @@ class SearchContract:
     domain_profile: DomainProfile
     must_include_concepts: list[str] = field(default_factory=list)
     must_exclude_concepts: list[str] = field(default_factory=list)
+    optional_concepts: list[str] = field(default_factory=list)
+    uncertain_concepts: list[str] = field(default_factory=list)
+    dropped_downweighted_terms: list[str] = field(default_factory=list)
+    constraint_groups: list[SearchConstraintGroup] = field(default_factory=list)
+    assumptions: list[str] = field(default_factory=list)
     inclusion_criteria: list[str] = field(default_factory=list)
     exclusion_criteria: list[str] = field(default_factory=list)
     required_aspects: list[str] = field(default_factory=list)
@@ -381,6 +404,10 @@ class ScoreBreakdown:
     pre_domain_final_score: float = 0.0
     preference_score: float = 0.0
     preference_adjustment: float = 0.0
+    role_adjustment: float = 0.0
+    lane_adjustment: float = 0.0
+    seed_or_title_mention_boost: float = 0.0
+    false_positive_penalty: float = 0.0
 
 
 @dataclass
@@ -441,6 +468,9 @@ class PaperRoleRecord:
     reasons: list[str] = field(default_factory=list)
     linked_lenses: list[str] = field(default_factory=list)
     linked_query_families: list[str] = field(default_factory=list)
+    content_roles: list[str] = field(default_factory=list)
+    retrieval_lanes: list[str] = field(default_factory=list)
+    overbroad_role_warning: str = ""
 
 
 @dataclass

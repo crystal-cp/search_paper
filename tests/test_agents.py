@@ -190,7 +190,7 @@ def test_planner_uses_search_contract_must_and_exclude_concepts():
     assert "patient screening" in plan.exclude_terms
     assert "drug screening" in plan.exclude_terms
     assert "ranking" in plan.required_aspects
-    assert "patient screening" in joined_queries
+    assert "patient screening" not in joined_queries
 
 
 def test_openalex_query_builder_quotes_multi_word_core_terms():
@@ -206,7 +206,7 @@ def test_openalex_query_builder_quotes_multi_word_core_terms():
     assert any('"surface magnetization"' in query for query in queries)
 
 
-def test_semantic_scholar_query_builder_uses_required_and_excluded_terms():
+def test_semantic_scholar_query_builder_keeps_excluded_terms_out_of_provider_query():
     plan = QueryPlan(
         original_question="surface magnetization",
         core_terms=["surface magnetization"],
@@ -218,7 +218,7 @@ def test_semantic_scholar_query_builder_uses_required_and_excluded_terms():
     queries = build_semantic_scholar_queries(plan)
 
     assert any('+"surface magnetization"' in query for query in queries)
-    assert any('-"device noise"' in query for query in queries)
+    assert not any('-"device noise"' in query for query in queries)
 
 
 def test_planner_translates_common_chinese_terms_without_llm():

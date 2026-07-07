@@ -45,7 +45,7 @@ class DomainGuardrailAgent:
             else contract_or_profile
         )
         text = paper_domain_text(paper)
-        must_groups = _must_term_groups(query_plan, profile.domain_name)
+        must_groups = _must_term_groups(contract, query_plan)
         if must_groups:
             required = [
                 "any of: " + " OR ".join(group)
@@ -78,12 +78,18 @@ class DomainGuardrailAgent:
                 item for item in required if not concept_matches(item, text)
             ]
             flattened_group_terms = []
-        forbidden = _unique(
+        hard_forbidden = _unique(
             [
                 *(contract.must_exclude_concepts if contract else []),
                 *profile.forbidden_concepts,
+            ],
+            limit=20,
+        )
+        weak_negative_candidates = _unique(
+            [
                 *profile.negative_domains,
                 *profile.field_of_study_blacklist,
+                *profile.excluded_venues,
             ],
             limit=20,
         )
@@ -98,23 +104,14 @@ class DomainGuardrailAgent:
             ],
             limit=40,
         )
-        negative_candidates = _unique(
-            [
-                *profile.negative_domains,
-                *profile.field_of_study_blacklist,
-                *profile.excluded_venues,
-                *forbidden,
-            ],
-            limit=40,
-        )
         positive_matches = [
             item for item in positive_candidates if concept_matches(item, text)
         ]
-        negative_matches = [
-            item for item in negative_candidates if concept_matches(item, text)
+        weak_negative_matches = [
+            item for item in weak_negative_candidates if concept_matches(item, text)
         ]
         forbidden_found = [
-            item for item in forbidden if concept_matches(item, text)
+            item for item in hard_forbidden if concept_matches(item, text)
         ]
         required_coverage = (
             (len(required) - len(missing_required)) / len(required)
@@ -122,15 +119,26 @@ class DomainGuardrailAgent:
             else 0.5
         )
         positive_signal = min(1.0, len(positive_matches) / max(3, len(required) or 3))
-        negative_penalty = min(1.0, (len(negative_matches) + len(forbidden_found)) / 3)
+        strong_positive_evidence = bool(positive_matches) and (
+            required_coverage >= 0.5 or len(positive_matches) >= 2
+        )
+        weak_negative_penalty = 0.0 if strong_positive_evidence else min(
+            0.35,
+            len(weak_negative_matches) * 0.12,
+        )
+        hard_negative_penalty = min(0.75, len(forbidden_found) * 0.35)
+        negative_penalty = weak_negative_penalty + hard_negative_penalty
         score = clamp(0.75 * required_coverage + 0.25 * positive_signal - 0.55 * negative_penalty)
 
         if forbidden_found:
             score = min(score, 0.29)
             decision = "out_of_scope"
-        elif negative_matches and score < 0.75:
-            score = min(score, 0.34)
-            decision = "out_of_scope"
+        elif must_groups and missing_required:
+            score = min(score, 0.64)
+            decision = "borderline" if positive_matches else "out_of_scope"
+        elif weak_negative_matches and not strong_positive_evidence and score < 0.40:
+            score = min(score, 0.44)
+            decision = "borderline" if positive_matches else "out_of_scope"
         elif score >= 0.75:
             decision = "in_scope"
         elif score >= 0.65 and not missing_required:
@@ -146,7 +154,7 @@ class DomainGuardrailAgent:
             decision,
             missing_required,
             forbidden_found,
-            negative_matches,
+            weak_negative_matches,
             profile.domain_name,
         )
         return DomainAssessment(
@@ -155,7 +163,7 @@ class DomainGuardrailAgent:
             domain_decision=decision,
             off_topic_reason=reason,
             positive_domain_matches=positive_matches,
-            negative_domain_matches=negative_matches,
+            negative_domain_matches=weak_negative_matches,
             missing_required_concepts=missing_required,
             forbidden_concepts_found=forbidden_found,
         )
@@ -177,9 +185,6 @@ class DomainGuardrailAgent:
 def paper_domain_text(paper: Paper) -> str:
     """Build searchable text for domain matching."""
 
-    raw_text = ""
-    if isinstance(paper.raw, dict):
-        raw_text = " ".join(str(value) for value in paper.raw.values() if isinstance(value, str))
     return " ".join(
         [
             paper.title,
@@ -189,7 +194,6 @@ def paper_domain_text(paper: Paper) -> str:
             " ".join(paper.publication_types),
             paper.tldr,
             paper.source_provider,
-            raw_text,
         ]
     ).lower()
 
@@ -221,15 +225,22 @@ def terminology_synonyms(profile: DomainProfile) -> list[str]:
     return _unique(values, limit=40)
 
 
-def _must_term_groups(query_plan: QueryPlan | None, domain_name: str) -> list[list[str]]:
-    """Return any-of required term groups for domains that support them."""
+def _must_term_groups(
+    contract: SearchContract | None,
+    query_plan: QueryPlan | None,
+) -> list[list[str]]:
+    """Return generic any-of required term groups from contract/query metadata."""
 
-    if not query_plan or domain_name != "materials_magnetism":
-        return []
-    raw_groups = query_plan.filters.get("must_term_groups", [])
+    raw_groups = []
+    if contract:
+        raw_groups.extend(
+            group.terms
+            for group in contract.constraint_groups
+            if group.required and group.terms
+        )
+    if query_plan:
+        raw_groups.extend(query_plan.filters.get("must_term_groups", []))
     groups: list[list[str]] = []
-    if not isinstance(raw_groups, list):
-        return []
     for group in raw_groups:
         if not isinstance(group, list):
             continue

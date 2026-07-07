@@ -1128,22 +1128,6 @@ def _apply_expert_intent_to_search_brief(
     if expert_research_intent is None:
         return search_brief
     structured_concepts = expert_research_intent.structured_concepts
-    concept_terms = {
-        concept.term.lower()
-        for concept in structured_concepts
-        if concept.should_use_in_provider_query
-    }
-    is_materials_magnetism = bool(
-        concept_terms
-        & {
-            "surface magnetization",
-            "boundary magnetization",
-            "antiferromagnet",
-            "magnetoelectric antiferromagnet",
-            "local magnetoelectric response",
-            "altermagnetism",
-        }
-    )
     inclusion = _unique_strings(
         [
             *search_brief.inclusion_criteria,
@@ -1152,32 +1136,43 @@ def _apply_expert_intent_to_search_brief(
             *expert_research_intent.methods[:4],
         ]
     )
-    required_aspects = list(search_brief.required_aspects)
-    preferred_types = list(search_brief.preferred_paper_types)
-    success_definition = search_brief.success_definition
-    if is_materials_magnetism:
-        required_aspects = _unique_strings(
-            [
-                *required_aspects,
-                "surface magnetization theory",
-                "direct surface-sensitive detection",
-                "local magnetoelectric predictor",
-                "materials case coverage",
-            ]
-        )
-        preferred_types = _unique_strings(
-            [
-                *preferred_types,
-                "theoretical paper",
-                "experimental paper",
-                "methodological paper",
-            ]
-        )
-        success_definition = (
-            "A useful result set should cover theory, direct surface probes, "
-            "local magnetoelectric predictors, representative materials, and "
-            "limitations without treating broad motivation words as hard query terms."
-        )
+    active_categories = {
+        concept.category
+        for concept in structured_concepts
+        if concept.should_use_in_provider_query
+        and concept.query_role in {"must", "optional"}
+    }
+    generic_aspects = []
+    if {"object", "property", "mechanism"} & active_categories:
+        generic_aspects.append("core concept coverage")
+    if "method" in active_categories:
+        generic_aspects.append("method or measurement evidence")
+    if "material" in active_categories:
+        generic_aspects.append("representative case coverage")
+    if "application" in active_categories:
+        generic_aspects.append("application or motivation bridge")
+    required_aspects = _unique_strings(
+        [*search_brief.required_aspects, *generic_aspects]
+    )
+    preferred_types = _unique_strings(
+        [
+            *search_brief.preferred_paper_types,
+            *(
+                ["methodological paper"]
+                if "method" in active_categories
+                else []
+            ),
+            *(
+                ["theoretical paper"]
+                if {"mechanism", "property"} & active_categories
+                else []
+            ),
+        ]
+    )
+    success_definition = (
+        search_brief.success_definition
+        or "A useful result set should cover the selected concept groups while treating uncertain or broad motivation terms as assumptions, not hard query constraints."
+    )
     return replace(
         search_brief,
         refined_question=expert_research_intent.expert_rewritten_question
@@ -1190,7 +1185,10 @@ def _apply_expert_intent_to_search_brief(
     )
 
 
-SUPPORTED_RESEARCH_LENS_DOMAINS = {"materials_magnetism"}
+SUPPORTED_RESEARCH_LENS_DOMAINS = {
+    "materials_magnetism",
+    "ferroelectric_polarization",
+}
 
 
 def build_research_lens_artifacts(
@@ -1368,6 +1366,7 @@ def plan_screening_queries(
         question,
         search_brief=search_brief,
         ambiguity_analysis=ambiguity_analysis,
+        expert_intent=expert_research_intent,
     )
     payload = _make_query_plan(
         question,
@@ -1417,10 +1416,12 @@ def _query_provenance_record(
     family_name: str = "",
     lens_name: str = "",
     purpose: str = "",
+    priority: int | None = None,
+    budget: int | None = None,
 ) -> dict[str, Any]:
     """Return one serializable query provenance record."""
 
-    return {
+    record = {
         "provider": provider,
         "raw_query": " ".join(str(raw_query).split()),
         "source": source,
@@ -1428,6 +1429,11 @@ def _query_provenance_record(
         "lens_name": lens_name,
         "purpose": purpose,
     }
+    if priority is not None:
+        record["priority"] = priority
+    if budget is not None:
+        record["budget"] = budget
+    return record
 
 
 def _family_queries_for_provider(family: QueryFamily, provider: str) -> list[str]:
@@ -1457,11 +1463,17 @@ def build_query_provenance(
     merged_queries: dict[str, list[str]] = {}
     records: list[dict[str, Any]] = []
     duplicate_family_records: list[dict[str, Any]] = []
+    query_family_queries: list[dict[str, Any]] = []
+    provider_queries_by_family: dict[str, dict[str, list[str]]] = {}
     seen: set[tuple[str, str]] = set()
+    old_planner_queries = {
+        provider: _unique_strings(queries_by_provider.get(provider, []))
+        for provider in providers
+    }
 
     for provider in providers:
-        provider_queries = _unique_strings(queries_by_provider.get(provider, []))
-        merged_queries[provider] = provider_queries
+        provider_queries = list(old_planner_queries.get(provider, []))
+        merged_queries[provider] = list(provider_queries)
         for query in provider_queries:
             seen.add((provider, query))
             records.append(
@@ -1482,9 +1494,20 @@ def build_query_provenance(
             reason = "no_query_family_plan"
         else:
             reason = ""
-            for family in query_family_plan.families:
+            sorted_families = sorted(
+                query_family_plan.families,
+                key=lambda item: (-int(getattr(item, "priority", 50)), item.name),
+            )
+            for family in sorted_families:
+                family_budget = max(0, int(getattr(family, "budget", 0) or 0))
                 for provider in providers:
-                    for query in _family_queries_for_provider(family, provider):
+                    family_provider_queries = _family_queries_for_provider(family, provider)
+                    if family_budget:
+                        family_provider_queries = family_provider_queries[:family_budget]
+                    provider_queries_by_family.setdefault(family.name, {})[
+                        provider
+                    ] = list(family_provider_queries)
+                    for query in family_provider_queries:
                         family_candidate_count += 1
                         if (
                             max_family_queries_per_provider is not None
@@ -1502,7 +1525,10 @@ def build_query_provenance(
                             family_name=family.name,
                             lens_name=family.lens_name,
                             purpose=family.purpose,
+                            priority=family.priority,
+                            budget=family.budget,
                         )
+                        query_family_queries.append(family_record)
                         if key in seen:
                             duplicate_family_records.append(family_record)
                             continue
@@ -1527,6 +1553,11 @@ def build_query_provenance(
         "applied": bool(use_query_families and family_added_count > 0),
         "reason": reason,
         "domain": query_family_plan.domain if query_family_plan else "",
+        "old_planner_queries": old_planner_queries,
+        "query_family_queries": query_family_queries,
+        "final_openalex_queries": merged_queries.get("openalex", []),
+        "final_semantic_scholar_queries": merged_queries.get("semantic_scholar", []),
+        "provider_queries_by_family": provider_queries_by_family,
         "records": records,
         "duplicate_family_records": duplicate_family_records,
         "provider_query_counts": {
@@ -1850,6 +1881,279 @@ def summarize_paper_roles(records: list[PaperRoleRecord]) -> dict[str, Any]:
     }
 
 
+def apply_research_engine_ranking_adjustments(
+    ranked_papers: list[RankedPaper],
+    paper_roles: list[PaperRoleRecord],
+    query_provenance: dict[str, Any],
+    seed_hints: list[SeedHint],
+    search_contract: SearchContract | None = None,
+    aspect_coverage_records: list[AspectCoverageRecord] | None = None,
+) -> tuple[list[RankedPaper], dict[str, Any]]:
+    """Apply small transparent research-process adjustments after base scoring."""
+
+    domain = search_contract.domain_profile.domain_name if search_contract else ""
+    role_by_id = {record.paper_id: record for record in paper_roles}
+    adjusted: list[RankedPaper] = []
+    role_adjustments: dict[str, float] = {}
+    lane_adjustments: dict[str, float] = {}
+    seed_boosts: dict[str, float] = {}
+    false_positive_penalties: dict[str, float] = {}
+    for item in ranked_papers:
+        role_record = role_by_id.get(item.paper.paper_id)
+        role_adjustment = _role_adjustment(role_record, domain)
+        lane_adjustment = _lane_adjustment(item.paper, query_provenance, domain)
+        seed_boost = _seed_or_title_mention_boost(item.paper, seed_hints)
+        false_positive_penalty = _false_positive_penalty(item, domain)
+        final_score = _bounded_score(
+            item.scores.final_score
+            + role_adjustment
+            + lane_adjustment
+            + seed_boost
+            - false_positive_penalty
+        )
+        scores = replace(
+            item.scores,
+            final_score=final_score,
+            role_adjustment=role_adjustment,
+            lane_adjustment=lane_adjustment,
+            seed_or_title_mention_boost=seed_boost,
+            false_positive_penalty=false_positive_penalty,
+        )
+        role_adjustments[item.paper.paper_id] = role_adjustment
+        lane_adjustments[item.paper.paper_id] = lane_adjustment
+        seed_boosts[item.paper.paper_id] = seed_boost
+        false_positive_penalties[item.paper.paper_id] = false_positive_penalty
+        adjusted.append(replace(item, scores=scores))
+    adjusted.sort(key=lambda item: item.scores.final_score, reverse=True)
+    adjusted = [replace(item, rank=index + 1) for index, item in enumerate(adjusted)]
+    diagnostics = build_ranking_diagnostics(
+        adjusted,
+        paper_roles,
+        query_provenance,
+        seed_hints,
+        role_adjustments,
+        lane_adjustments,
+        seed_boosts,
+        false_positive_penalties,
+        domain=domain,
+        aspect_coverage_records=aspect_coverage_records or [],
+    )
+    return adjusted, diagnostics
+
+
+def build_ranking_diagnostics(
+    ranked_papers: list[RankedPaper],
+    paper_roles: list[PaperRoleRecord],
+    query_provenance: dict[str, Any],
+    seed_hints: list[SeedHint],
+    role_adjustments: dict[str, float],
+    lane_adjustments: dict[str, float],
+    seed_boosts: dict[str, float],
+    false_positive_penalties: dict[str, float],
+    domain: str = "",
+    aspect_coverage_records: list[AspectCoverageRecord] | None = None,
+) -> dict[str, Any]:
+    """Return diagnostics for research-engine ranking adjustments."""
+
+    role_summary = summarize_paper_roles(paper_roles)
+    aspect_records = aspect_coverage_records or []
+    aspect_scores = [record.aspect_coverage_score for record in aspect_records]
+    overbroad_warnings = [
+        {
+            "paper_id": record.paper_id,
+            "title": record.title,
+            "warning": record.overbroad_role_warning,
+        }
+        for record in paper_roles
+        if record.overbroad_role_warning
+    ]
+    top20 = ranked_papers[:20]
+    top20_by_lane: dict[str, list[dict[str, Any]]] = {}
+    for item in top20:
+        lane = _paper_lane(item.paper, query_provenance)
+        top20_by_lane.setdefault(lane, []).append(
+            {
+                "rank": item.rank,
+                "paper_id": item.paper.paper_id,
+                "title": item.paper.title,
+                "final_score": item.scores.final_score,
+            }
+        )
+    seed_titles = [str(hint.title or "") for hint in seed_hints if hint.title]
+    gold_paper_ranks: dict[str, int] = {}
+    for title in seed_titles:
+        normalized_title = _normalize_for_match(title)
+        for item in ranked_papers:
+            if normalized_title and normalized_title in _normalize_for_match(item.paper.title):
+                gold_paper_ranks[title] = item.rank
+                break
+    return {
+        "domain_pack_used": domain,
+        "query_family_applied": bool(query_provenance.get("applied")),
+        "semantic_scholar_zero_result_warning": _semantic_scholar_zero_result_warning(query_provenance),
+        "role_counts": role_summary["role_counts"],
+        "primary_role_counts": role_summary["primary_role_counts"],
+        "overbroad_role_warnings": overbroad_warnings,
+        "role_adjustments": role_adjustments,
+        "lane_adjustments": lane_adjustments,
+        "seed_or_title_mention_boosts": seed_boosts,
+        "false_positive_penalties": false_positive_penalties,
+        "gold_paper_ranks": gold_paper_ranks,
+        "top20_by_lane": top20_by_lane,
+        "false_positive_top20_count": sum(
+            1 for item in top20 if _false_positive_penalty(item, domain) > 0
+        ),
+        "top20_false_positive_count": sum(
+            1 for item in top20 if _false_positive_penalty(item, domain) > 0
+        ),
+        "aspect_coverage_distribution": {
+            "record_count": len(aspect_records),
+            "zero_count": sum(1 for score in aspect_scores if score == 0),
+            "nonzero_count": sum(1 for score in aspect_scores if score > 0),
+            "average": (
+                round(sum(aspect_scores) / len(aspect_scores), 4)
+                if aspect_scores
+                else 0.0
+            ),
+            "max": round(max(aspect_scores), 4) if aspect_scores else 0.0,
+        },
+    }
+
+
+def _role_adjustment(record: PaperRoleRecord | None, domain: str = "") -> float:
+    if record is None:
+        return 0.0
+    if domain == "ferroelectric_polarization":
+        role_values = {
+            "theory_origin": 0.10,
+            "direct_probe_method": 0.12,
+            "surface_probe_method": 0.12,
+            "experimental_proof": 0.10,
+            "interface_screening": 0.12,
+            "material_case": 0.08,
+            "device_application": 0.05,
+            "application_bridge": 0.05,
+            "review_background": 0.04,
+            "limitation_or_challenge": 0.04,
+        }
+        value = max((role_values.get(role, 0.0) for role in record.roles), default=0.0)
+        return round(value * 0.4, 4) if record.overbroad_role_warning else value
+    if record.overbroad_role_warning:
+        return 0.0
+    if record.primary_role == "review_background":
+        return 0.003
+    if record.primary_role in {"material_case", "limitation_or_challenge"}:
+        return 0.008
+    return 0.015
+
+
+def _lane_adjustment(
+    paper: Paper,
+    query_provenance: dict[str, Any],
+    domain: str = "",
+) -> float:
+    lane = _paper_lane(paper, query_provenance)
+    if lane == "seed":
+        return 0.03
+    if lane.startswith("query_family"):
+        if domain == "ferroelectric_polarization":
+            if any(
+                marker in lane
+                for marker in [
+                    "direct_probe_methods",
+                    "interface_screening",
+                    "theory_origin",
+                ]
+            ):
+                return 0.04
+            return 0.025
+        return 0.012
+    return 0.0
+
+
+def _seed_or_title_mention_boost(paper: Paper, seed_hints: list[SeedHint]) -> float:
+    if is_user_seed_paper(paper):
+        return 0.05
+    paper_title = _normalize_for_match(paper.title)
+    for hint in seed_hints:
+        hint_title = _normalize_for_match(hint.title or "")
+        if hint_title and hint_title in paper_title:
+            return 0.035
+    return 0.0
+
+
+def _false_positive_penalty(item: RankedPaper, domain: str = "") -> float:
+    text = " ".join(
+        [
+            item.paper.title,
+            item.paper.abstract,
+            item.paper.venue,
+            " ".join(item.paper.fields_of_study),
+        ]
+    ).lower()
+    if domain == "ferroelectric_polarization":
+        if any(
+            term in text
+            for term in [
+                "drug screening",
+                "clinical screening",
+                "cognitive screening",
+                "cell surface polarization",
+                "generic solvent screening",
+                "cosmo solvent",
+            ]
+        ):
+            return 0.20
+        if "surface plasmon polariton" in text and "ferroelectric" not in text:
+            return 0.10
+        if "thin film deposition" in text and "ferroelectric" not in text:
+            return 0.10
+    assessment = item.domain_assessment
+    if assessment and assessment.domain_decision == "out_of_scope":
+        return 0.05
+    if assessment and assessment.domain_decision == "borderline":
+        return 0.015
+    return 0.0
+
+
+def _semantic_scholar_zero_result_warning(query_provenance: dict[str, Any]) -> bool:
+    """Return True when Semantic Scholar was queried but all tracked counts are zero."""
+
+    queries = query_provenance.get("final_semantic_scholar_queries", [])
+    if not queries:
+        return False
+    records = [
+        record
+        for record in query_provenance.get("records", [])
+        if isinstance(record, dict) and record.get("provider") == "semantic_scholar"
+    ]
+    if not records:
+        return False
+    return all(int(record.get("paper_count") or 0) == 0 for record in records)
+
+
+def _paper_lane(paper: Paper, query_provenance: dict[str, Any]) -> str:
+    if is_user_seed_paper(paper):
+        return "seed"
+    source = str(paper.raw.get("matched_query_source") or "")
+    family = str(paper.raw.get("matched_query_family") or "")
+    if source == "query_family":
+        return f"query_family:{family or 'unknown'}"
+    if source:
+        return source
+    if paper.source_stage:
+        return paper.source_stage
+    return "keyword"
+
+
+def _bounded_score(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _normalize_for_match(text: str) -> str:
+    return " ".join(str(text or "").lower().split())
+
+
 def summarize_research_tensions(records: list[ResearchTension]) -> dict[str, Any]:
     """Summarize controversy and boundary-condition records."""
 
@@ -2148,9 +2452,7 @@ def run_pipeline(
             {
                 "enabled": effective_intent_repair,
                 "executed": expert_research_intent is not None,
-                "domain": "materials_magnetism"
-                if expert_research_intent and expert_research_intent.materials
-                else "",
+                "domain": intent_llm_metadata.get("domain_pack_domain", ""),
                 "user_is_novice": expert_research_intent.user_is_novice
                 if expert_research_intent
                 else False,
@@ -2183,6 +2485,7 @@ def run_pipeline(
         else question,
         search_brief=search_brief,
         ambiguity_analysis=ambiguity_analysis,
+        expert_intent=expert_research_intent,
     )
     write_json(out / "search_brief.json", search_brief)
     write_json(out / "question_refinement.json", question_refinement)
@@ -2825,6 +3128,15 @@ def run_pipeline(
     )
     write_json(out / "paper_roles.json", paper_role_records)
     paper_role_summary = summarize_paper_roles(paper_role_records)
+    ranked_before_feedback, ranking_diagnostics = apply_research_engine_ranking_adjustments(
+        ranked_before_feedback,
+        paper_role_records,
+        query_provenance,
+        seed_hints,
+        search_contract=search_contract,
+        aspect_coverage_records=aspect_coverage_records,
+    )
+    write_json(out / "ranking_diagnostics.json", ranking_diagnostics)
     if progress_callback:
         progress_callback(
             "paper_roles",
@@ -2833,7 +3145,7 @@ def run_pipeline(
                 "paper_count": len(paper_role_records),
                 "primary_role_counts": paper_role_summary["primary_role_counts"],
                 "artifact": "paper_roles.json",
-                "ranking_unchanged": True,
+                "ranking_diagnostics": "ranking_diagnostics.json",
             },
         )
 
@@ -3012,6 +3324,7 @@ def run_pipeline(
         screening_decisions
     )
     metrics["paper_roles"] = paper_role_summary
+    metrics["ranking_diagnostics"] = ranking_diagnostics
     metrics["research_tensions"] = research_tension_summary
     metrics["preference_learning"] = preference_learning_metrics(preference_learning)
     metrics["query_controls"] = {
@@ -3151,8 +3464,16 @@ def run_pipeline(
         "executed": True,
         "paper_role_count": len(paper_role_records),
         "artifact": "paper_roles.json",
-        "ranking_unchanged": True,
+        "ranking_diagnostics_artifact": "ranking_diagnostics.json",
         "primary_role_counts": paper_role_summary["primary_role_counts"],
+    }
+    trace["ranking_diagnostics"] = {
+        "artifact": "ranking_diagnostics.json",
+        "false_positive_top20_count": ranking_diagnostics.get(
+            "false_positive_top20_count",
+            0,
+        ),
+        "gold_paper_ranks": ranking_diagnostics.get("gold_paper_ranks", {}),
     }
     trace["controversy_boundary"] = {
         "executed": not research_tension_warning,

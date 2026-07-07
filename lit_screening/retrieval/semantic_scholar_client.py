@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Any
 from urllib.parse import quote
@@ -31,6 +32,8 @@ class SemanticScholarClient:
     api_base_url = "https://api.semanticscholar.org/graph/v1"
     recommendations_base_url = "https://api.semanticscholar.org/recommendations/v1"
     base_url = f"{api_base_url}/paper/search"
+    _rate_limit_lock = threading.Lock()
+    _last_request_at = 0.0
 
     def __init__(
         self,
@@ -40,6 +43,7 @@ class SemanticScholarClient:
         timeout: float = 20.0,
         retries: int = 2,
         sleep_seconds: float = 1.0,
+        min_interval_seconds: float = 1.1,
         fields: str | None = None,
     ) -> None:
         self.api_key = api_key if api_key is not None else os.getenv("S2_API_KEY")
@@ -48,6 +52,7 @@ class SemanticScholarClient:
         self.timeout = timeout
         self.retries = retries
         self.sleep_seconds = sleep_seconds
+        self.min_interval_seconds = max(0.0, float(min_interval_seconds))
         self.fields = fields or DEFAULT_SEMANTIC_SCHOLAR_FIELDS
 
     def search(
@@ -81,6 +86,7 @@ class SemanticScholarClient:
         last_error = ""
         for attempt in range(self.retries + 1):
             try:
+                self._throttle_request()
                 response = requests.get(
                     self.base_url,
                     params=params,
@@ -199,6 +205,7 @@ class SemanticScholarClient:
         last_error = ""
         for attempt in range(self.retries + 1):
             try:
+                self._throttle_request()
                 response = requests.get(
                     url,
                     params=params,
@@ -221,6 +228,20 @@ class SemanticScholarClient:
                     **request_error_details(exc),
                     "provider": self.provider_name,
                 }
+
+    def _throttle_request(self) -> None:
+        """Enforce Semantic Scholar's process-wide 1 request/second limit."""
+
+        if self.min_interval_seconds <= 0:
+            return
+        with self._rate_limit_lock:
+            now = time.monotonic()
+            elapsed = now - self.__class__._last_request_at
+            wait_seconds = self.min_interval_seconds - elapsed
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+                now = time.monotonic()
+            self.__class__._last_request_at = now
 
     def _normalize_many(self, raw: dict[str, Any]) -> list[Paper]:
         return [

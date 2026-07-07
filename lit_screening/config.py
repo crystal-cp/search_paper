@@ -18,6 +18,7 @@ class PipelineConfig:
     request_timeout: float = 8.0
     request_retries: int = 1
     rate_limit_sleep: float = 1.0
+    semantic_scholar_min_interval_seconds: float = 1.1
     llm_backend: str = "none"
     deepseek_api_key_env: str = "DEEPSEEK_API_KEY"
     deepseek_base_url: str = "https://api.deepseek.com"

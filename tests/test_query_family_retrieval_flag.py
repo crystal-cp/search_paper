@@ -92,8 +92,18 @@ def test_query_families_enabled_adds_family_queries_and_provenance(tmp_path):
     assert provenance["applied"] is True
     assert provenance["family_query_count"] == len(family_records)
     assert provenance["provider_query_counts"]["fake"] == len(client.seen_queries)
+    assert provenance["old_planner_queries"]["fake"] == ["surface magnetization importance"]
+    assert provenance["query_family_queries"]
+    assert provenance["provider_queries_by_family"]
+    assert any(
+        query in client.seen_queries
+        for provider_queries in provenance["provider_queries_by_family"].values()
+        for queries in provider_queries.values()
+        for query in queries
+    )
     assert any(record["family_name"] for record in family_records)
     assert any(record["lens_name"] for record in family_records)
+    assert any("priority" in record and "budget" in record for record in family_records)
     assert any(
         paper.raw.get("matched_query_family")
         for paper in result.merged_papers

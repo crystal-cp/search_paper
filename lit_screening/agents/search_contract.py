@@ -4,8 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from lit_screening.domain_packs import load_domain_pack
 from lit_screening.llm_client import GenericLLMClient
-from lit_screening.models import DomainProfile, SearchBrief, SearchContract
+from lit_screening.models import (
+    DomainProfile,
+    ExpertResearchIntent,
+    IntentConcept,
+    SearchBrief,
+    SearchConstraintGroup,
+    SearchContract,
+)
 from lit_screening.utils import tokenize
 
 
@@ -43,6 +51,26 @@ BIOMEDICAL_TERMS = {
     "therapy",
 }
 
+FERROELECTRIC_TERMS = {
+    "ferroelectric",
+    "ferroelectricity",
+    "ferroelectric thin film",
+    "ferroelectric polarization",
+    "surface polarization",
+    "depolarization",
+    "depolarization field",
+    "screening charge",
+    "interface screening",
+    "pfm",
+    "piezoresponse",
+    "shg",
+    "second harmonic generation",
+    "铁电",
+    "表面极化",
+    "退极化",
+    "屏蔽",
+}
+
 
 class SearchContractAgent:
     """Build a domain-aware SearchContract before query planning."""
@@ -60,36 +88,96 @@ class SearchContractAgent:
         question: str,
         search_brief: SearchBrief | None = None,
         ambiguity_analysis: list[dict[str, Any]] | None = None,
+        expert_intent: ExpertResearchIntent | None = None,
     ) -> SearchContract:
         """Build a rule-based SearchContract with optional LLM left disabled."""
 
         fallback_brief = search_brief or _fallback_search_brief(question)
         ambiguity = ambiguity_analysis or []
-        return self._build_rule(question, fallback_brief, ambiguity)
+        return self._build_rule(question, fallback_brief, ambiguity, expert_intent)
 
     def _build_rule(
         self,
         question: str,
         search_brief: SearchBrief,
         ambiguity_analysis: list[dict[str, Any]],
+        expert_intent: ExpertResearchIntent | None = None,
     ) -> SearchContract:
         lowered = f"{question} {search_brief.refined_question}".lower()
-        domain_profile = infer_domain_profile(lowered)
+        domain_profile = infer_domain_profile(
+            lowered,
+            domain_hint=_expert_domain_hint(expert_intent),
+        )
+        domain_pack = _load_pack_if_available(domain_profile.domain_name)
         ambiguity_must = _flatten_ambiguity_terms(ambiguity_analysis, "recommended_must_terms")
         ambiguity_exclude = _flatten_ambiguity_terms(
             ambiguity_analysis,
             "recommended_exclude_terms",
         )
-        phrase_concepts = extract_question_concepts(search_brief.refined_question or question)
-        must_include = _unique(
-            [
-                *domain_profile.required_concepts,
-                *phrase_concepts,
-                *ambiguity_must,
-                *_specific_criteria(search_brief.inclusion_criteria),
-            ],
-            12,
-        )
+        if expert_intent is not None:
+            must_include = _concept_terms_by_role(expert_intent.structured_concepts, "must")
+            optional_concepts = _concept_terms_by_role(
+                expert_intent.structured_concepts,
+                "optional",
+                require_query_use=False,
+            )
+            uncertain_concepts = _concept_terms_by_role(
+                expert_intent.structured_concepts,
+                "uncertain",
+                require_query_use=False,
+            )
+            dropped_downweighted = _unique(
+                [
+                    *_concept_terms_by_role(
+                        expert_intent.structured_concepts,
+                        "downweighted",
+                        require_query_use=False,
+                    ),
+                    *expert_intent.ignored_or_downweighted_terms,
+                ],
+                24,
+            )
+            pack_constraint_groups = _constraint_groups_from_domain_pack(domain_pack)
+            intent_constraint_groups = _constraint_groups_from_intent(expert_intent)
+            if any(group.required for group in pack_constraint_groups):
+                intent_constraint_groups = _relaxed_constraint_groups(
+                    intent_constraint_groups
+                )
+            constraint_groups = _unique_constraint_groups(
+                [
+                    *pack_constraint_groups,
+                    *intent_constraint_groups,
+                ]
+            )
+            assumptions = _unique(
+                [
+                    *expert_intent.assumptions,
+                    *expert_intent.needs_user_confirmation,
+                    *expert_intent.unsafe_or_overbroad_assumptions,
+                ],
+                24,
+            )
+        else:
+            phrase_concepts = extract_question_concepts(search_brief.refined_question or question)
+            must_include = _unique(
+                [
+                    *domain_profile.required_concepts,
+                    *phrase_concepts,
+                    *ambiguity_must,
+                    *_specific_criteria(search_brief.inclusion_criteria),
+                ],
+                12,
+            )
+            optional_concepts = []
+            uncertain_concepts = []
+            dropped_downweighted = []
+            constraint_groups = _unique_constraint_groups(
+                [
+                    *_constraint_groups_from_domain_pack(domain_pack),
+                    *_fallback_constraint_groups(must_include),
+                ]
+            )
+            assumptions = []
         must_exclude = _unique(
             [
                 *domain_profile.forbidden_concepts,
@@ -106,11 +194,19 @@ class SearchContractAgent:
             domain_profile=domain_profile,
             must_include_concepts=must_include,
             must_exclude_concepts=must_exclude,
+            optional_concepts=optional_concepts,
+            uncertain_concepts=uncertain_concepts,
+            dropped_downweighted_terms=dropped_downweighted,
+            constraint_groups=constraint_groups,
+            assumptions=assumptions,
             inclusion_criteria=search_brief.inclusion_criteria,
             exclusion_criteria=search_brief.exclusion_criteria,
             required_aspects=_unique(
-                [*search_brief.required_aspects, *domain_profile.required_concepts[:4]],
-                12,
+                [
+                    *_required_aspects_for_contract(domain_pack, search_brief),
+                    *(must_include[:4] if expert_intent is not None else domain_profile.required_concepts[:4]),
+                ],
+                16,
             ),
             preferred_paper_types=search_brief.preferred_paper_types,
             time_window=search_brief.time_window,
@@ -118,8 +214,13 @@ class SearchContractAgent:
         )
 
 
-def infer_domain_profile(lowered_text: str) -> DomainProfile:
+def infer_domain_profile(lowered_text: str, domain_hint: str = "") -> DomainProfile:
     """Infer a coarse domain profile from user-visible terms."""
+
+    if domain_hint and domain_hint != "generic":
+        hinted = _domain_profile_for_hint(domain_hint, lowered_text)
+        if hinted is not None:
+            return hinted
 
     has_ai = any(term in lowered_text for term in AI_LITERATURE_TERMS)
     has_literature_screening = any(
@@ -128,6 +229,7 @@ def infer_domain_profile(lowered_text: str) -> DomainProfile:
     )
     has_materials = any(term in lowered_text for term in MATERIALS_MAGNETISM_TERMS)
     has_biomedical = any(term in lowered_text for term in BIOMEDICAL_TERMS)
+    has_ferroelectric = any(term in lowered_text for term in FERROELECTRIC_TERMS)
 
     if has_ai and has_literature_screening:
         return DomainProfile(
@@ -190,6 +292,9 @@ def infer_domain_profile(lowered_text: str) -> DomainProfile:
             },
         )
 
+    if has_ferroelectric and not has_ai:
+        return _ferroelectric_domain_profile(lowered_text)
+
     if has_materials and not has_ai:
         return DomainProfile(
             domain_name="materials_magnetism",
@@ -230,7 +335,6 @@ def infer_domain_profile(lowered_text: str) -> DomainProfile:
             terminology_map={
                 "surface magnetization": [
                     "surface magnetic moment",
-                    "boundary magnetization",
                     "surface spin polarization",
                 ],
                 "antiferromagnetism": ["antiferromagnetic materials", "Neel order"],
@@ -271,6 +375,107 @@ def infer_domain_profile(lowered_text: str) -> DomainProfile:
         field_of_study_whitelist=[],
         field_of_study_blacklist=[],
         terminology_map={},
+    )
+
+
+def _expert_domain_hint(expert_intent: ExpertResearchIntent | None) -> str:
+    """Return the domain selected during intent repair, when available."""
+
+    if expert_intent is None:
+        return ""
+    metadata = expert_intent.llm_metadata or {}
+    return str(metadata.get("domain_pack_domain") or "")
+
+
+def _domain_profile_for_hint(domain_hint: str, lowered_text: str) -> DomainProfile | None:
+    """Return an explicit domain profile from an intent-repair/domain-pack hint."""
+
+    if domain_hint == "ferroelectric_polarization":
+        return _ferroelectric_domain_profile(lowered_text)
+    if domain_hint == "materials_magnetism":
+        return infer_domain_profile(
+            f"{lowered_text} surface magnetization antiferromagnet",
+            domain_hint="",
+        )
+    if domain_hint == "ai_literature_screening":
+        return infer_domain_profile(
+            f"{lowered_text} LLM scientific literature screening",
+            domain_hint="",
+        )
+    return None
+
+
+def _ferroelectric_domain_profile(lowered_text: str) -> DomainProfile:
+    """Return a ferroelectric-polarization domain profile."""
+
+    pack = _load_pack_if_available("ferroelectric_polarization")
+    pack_terms = pack.false_positive_terms if pack else []
+    required = _unique(
+        [
+            "ferroelectric polarization"
+            if "ferroelectric" in lowered_text or "铁电" in lowered_text
+            else "",
+            "ferroelectric thin film"
+            if "thin film" in lowered_text or "薄膜" in lowered_text
+            else "",
+            "surface polarization"
+            if "surface polarization" in lowered_text or "表面极化" in lowered_text
+            else "",
+            "depolarization field" if "depolarization" in lowered_text or "退极化" in lowered_text else "",
+            "interface screening" if "interface screening" in lowered_text or "界面" in lowered_text else "",
+        ],
+        8,
+    )
+    if not required:
+        required = ["ferroelectric polarization"]
+    return DomainProfile(
+        domain_name="ferroelectric_polarization",
+        positive_domains=[
+            "materials science",
+            "condensed matter physics",
+            "ferroelectricity",
+        ],
+        negative_domains=[
+            "biomedical screening",
+            "clinical screening",
+            "drug screening",
+            "cognitive screening",
+            "generic solvent screening",
+            "cell surface polarization",
+            "surface plasmon polaritons",
+            "generic thin film deposition",
+            "generic SHG plasmonics",
+            "hydrogen evolution catalyst",
+            *pack_terms,
+        ],
+        required_concepts=required,
+        forbidden_concepts=[
+            "drug screening",
+            "clinical screening",
+            "cognitive screening",
+            "transcription factor screening",
+            "transcription factor binding profiles",
+            "cell surface polarization",
+            "generic solvent screening",
+            "COSMO solvent screening",
+        ],
+        preferred_venues=[
+            "Physical Review Letters",
+            "Physical Review B",
+            "Applied Physics Letters",
+            "Advanced Functional Materials",
+            "Nature Materials",
+        ],
+        excluded_venues=[],
+        field_of_study_whitelist=["Materials Science", "Physics"],
+        field_of_study_blacklist=["Medicine", "Biology"],
+        terminology_map={
+            "PFM": ["piezoresponse force microscopy"],
+            "SHG": ["second harmonic generation"],
+            "KPFM": ["Kelvin probe force microscopy"],
+            "surface polarization": ["surface charge", "interface polarization"],
+            "screening": ["screening charge", "interface screening", "electrode screening"],
+        },
     )
 
 
@@ -336,9 +541,236 @@ def _specific_criteria(criteria: list[str]) -> list[str]:
     selected: list[str] = []
     for item in criteria:
         cleaned = " ".join(str(item).split())
-        if cleaned and len(tokenize(cleaned)) <= 6:
+        if (
+            cleaned
+            and len(tokenize(cleaned)) <= 6
+            and not _looks_like_natural_language_criterion(cleaned)
+        ):
             selected.append(cleaned)
     return _unique(selected, 8)
+
+
+def _looks_like_natural_language_criterion(text: str) -> bool:
+    """Return True for prose criteria that should not become hard query terms."""
+
+    lowered = " ".join(str(text or "").lower().split())
+    if not lowered:
+        return False
+    prose_prefixes = (
+        "studies discussing",
+        "papers discussing",
+        "articles discussing",
+        "studies that",
+        "papers that",
+        "articles that",
+        "related to",
+        "relevant to",
+        "work that",
+        "research that",
+    )
+    if lowered.startswith(prose_prefixes):
+        return True
+    tokens = tokenize(lowered)
+    prose_markers = {
+        "discussing",
+        "describing",
+        "explaining",
+        "related",
+        "relevant",
+        "important",
+        "importance",
+        "significance",
+    }
+    return len(tokens) > 3 and bool(set(tokens) & prose_markers)
+
+
+def _concept_terms_by_role(
+    concepts: list[IntentConcept],
+    role: str,
+    *,
+    require_query_use: bool = True,
+) -> list[str]:
+    """Return structured intent concepts for one query role."""
+
+    return _unique(
+        [
+            concept.term
+            for concept in concepts
+            if concept.query_role == role
+            and concept.term
+            and (concept.should_use_in_provider_query or not require_query_use)
+        ],
+        24,
+    )
+
+
+def _constraint_groups_from_intent(
+    expert_intent: ExpertResearchIntent,
+) -> list[SearchConstraintGroup]:
+    """Build generic OR groups from intent concept categories and roles."""
+
+    must_concepts = [
+        concept
+        for concept in expert_intent.structured_concepts
+        if concept.query_role == "must"
+        and concept.should_use_in_provider_query
+        and concept.term
+    ]
+    groups: list[SearchConstraintGroup] = []
+    if must_concepts:
+        groups.append(
+            SearchConstraintGroup(
+                group_name="must_concepts",
+                operator="OR",
+                terms=_unique([concept.term for concept in must_concepts], 24),
+                source="expert_intent",
+                required=True,
+            )
+        )
+    optional_terms = _unique(
+        [
+            concept.term
+            for concept in expert_intent.structured_concepts
+            if concept.query_role == "optional"
+            and concept.should_use_in_provider_query
+            and concept.confidence >= 0.72
+        ],
+        16,
+    )
+    if optional_terms:
+        groups.append(
+            SearchConstraintGroup(
+                group_name="optional_high_confidence",
+                operator="OR",
+                terms=optional_terms,
+                source="expert_intent",
+                required=False,
+            )
+        )
+    return groups
+
+
+def _constraint_groups_from_domain_pack(
+    domain_pack: Any | None,
+) -> list[SearchConstraintGroup]:
+    """Build SearchConstraintGroup objects from optional domain-pack rules."""
+
+    if domain_pack is None:
+        return []
+    groups: list[SearchConstraintGroup] = []
+    for item in getattr(domain_pack, "constraint_groups", []) or []:
+        if not isinstance(item, dict):
+            continue
+        terms = _unique([str(term) for term in item.get("terms", [])], 32)
+        if not terms:
+            continue
+        groups.append(
+            SearchConstraintGroup(
+                group_name=str(item.get("group_name") or "domain_pack_group"),
+                operator=str(item.get("operator") or "OR").upper(),
+                terms=terms,
+                source=str(item.get("source") or "domain_pack"),
+                required=bool(item.get("required", False)),
+            )
+        )
+    return groups
+
+
+def _unique_constraint_groups(
+    groups: list[SearchConstraintGroup],
+) -> list[SearchConstraintGroup]:
+    """Deduplicate constraint groups while preserving order."""
+
+    result: list[SearchConstraintGroup] = []
+    seen: set[tuple[str, tuple[str, ...], bool]] = set()
+    for group in groups:
+        terms = tuple(_unique(group.terms, 32))
+        key = (group.group_name, terms, group.required)
+        if not terms or key in seen:
+            continue
+        result.append(
+            SearchConstraintGroup(
+                group_name=group.group_name,
+                operator=group.operator,
+                terms=list(terms),
+                source=group.source,
+                required=group.required,
+            )
+        )
+        seen.add(key)
+    return result
+
+
+def _relaxed_constraint_groups(
+    groups: list[SearchConstraintGroup],
+) -> list[SearchConstraintGroup]:
+    """Keep intent groups for diagnostics without making them hard guardrails."""
+
+    return [
+        SearchConstraintGroup(
+            group_name=group.group_name,
+            operator=group.operator,
+            terms=list(group.terms),
+            source=group.source,
+            required=False,
+        )
+        for group in groups
+    ]
+
+
+def _aspect_groups_from_domain_pack(domain_pack: Any | None) -> list[str]:
+    """Return compact aspect-group strings consumable by AspectCoverageAgent."""
+
+    if domain_pack is None:
+        return []
+    aspect_groups = getattr(domain_pack, "aspect_groups", {}) or {}
+    if not isinstance(aspect_groups, dict):
+        return []
+    groups: list[str] = []
+    for name, terms in aspect_groups.items():
+        cleaned_terms = _unique([str(term) for term in terms], 24)
+        if name and cleaned_terms:
+            groups.append(f"{name}: {'; '.join(cleaned_terms)}")
+    return groups
+
+
+def _required_aspects_for_contract(
+    domain_pack: Any | None,
+    search_brief: SearchBrief,
+) -> list[str]:
+    """Prefer domain-pack aspect groups over noisy short SearchBrief tokens."""
+
+    pack_aspects = _aspect_groups_from_domain_pack(domain_pack)
+    if pack_aspects:
+        return pack_aspects
+    return search_brief.required_aspects
+
+
+def _fallback_constraint_groups(must_include: list[str]) -> list[SearchConstraintGroup]:
+    """Use a loose group instead of implying every must term is jointly required."""
+
+    if not must_include:
+        return []
+    return [
+        SearchConstraintGroup(
+            group_name="required_topic_terms",
+            operator="OR",
+            terms=_unique(must_include, 12),
+            source="search_contract_fallback",
+            required=True,
+        )
+    ]
+
+
+def _load_pack_if_available(domain_name: str) -> Any | None:
+    """Load a domain pack when it exists, otherwise return None."""
+
+    if not domain_name:
+        return None
+    try:
+        return load_domain_pack(domain_name)
+    except ValueError:
+        return None
 
 
 def _unique(values: list[str], limit: int | None = None) -> list[str]:

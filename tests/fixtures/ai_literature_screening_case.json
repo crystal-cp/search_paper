@@ -1,0 +1,20 @@
+{
+  "user_question": "我想找 LLM 做科学文献筛选和证据验证的人机协作论文",
+  "expected_concepts": [
+    "LLM",
+    "literature screening",
+    "human-in-the-loop",
+    "evidence verification"
+  ],
+  "excluded_concepts": [
+    "surface magnetization",
+    "boundary magnetization",
+    "Cr2O3",
+    "SPLEEM"
+  ],
+  "expected_query_phrases": [
+    "LLM",
+    "literature screening",
+    "evidence verification"
+  ]
+}

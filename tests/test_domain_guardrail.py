@@ -152,3 +152,50 @@ def test_out_of_scope_paper_receives_final_score_penalty():
 
     assert scores.domain_penalty_multiplier == 0.3
     assert scores.final_score == pytest.approx(scores.pre_domain_final_score * 0.3)
+
+
+def test_query_provenance_blacklist_terms_do_not_pollute_domain_judgment():
+    contract = build_contract(
+        "How can LLM agents improve scientific literature screening?"
+    )
+    paper = Paper(
+        paper_id="clean-ai-paper",
+        title="Human-in-the-loop LLM agents for scientific literature screening",
+        abstract=(
+            "This paper studies evidence verification for scientific literature "
+            "screening with human feedback."
+        ),
+        venue="ACL",
+        fields_of_study=["Computer Science"],
+        retrieval_query="patient screening drug screening",
+        raw={
+            "matched_query": "patient screening drug screening",
+            "seed_reason": "drug screening provenance noise",
+        },
+    )
+
+    assessment = DomainGuardrailAgent().assess(paper, contract)
+
+    assert assessment.domain_decision == "in_scope"
+    assert "patient screening" not in assessment.forbidden_concepts_found
+    assert "drug screening" not in assessment.forbidden_concepts_found
+
+
+def test_field_blacklist_is_weak_when_content_has_strong_positive_evidence():
+    contract = build_contract(
+        "the significance of surface magnetization in antiferromagnets"
+    )
+    paper = Paper(
+        paper_id="materials-with-cs-field",
+        title="Surface magnetization in antiferromagnetic materials",
+        abstract=(
+            "Surface magnetization and antiferromagnetic materials provide "
+            "strong positive evidence for the materials magnetism domain."
+        ),
+        fields_of_study=["Computer Science"],
+    )
+
+    assessment = DomainGuardrailAgent().assess(paper, contract)
+
+    assert assessment.domain_decision != "out_of_scope"
+    assert "Computer Science" in assessment.negative_domain_matches

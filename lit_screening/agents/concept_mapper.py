@@ -26,10 +26,21 @@ class ConceptMapper:
     ) -> ResearchLensPlan:
         """Return research lenses without calling LLMs, APIs, or the pipeline."""
 
-        if domain != "materials_magnetism":
-            raise ValueError("ConceptMapper currently supports only materials_magnetism.")
-
         pack = load_domain_pack(domain)
+        if domain == "ferroelectric_polarization":
+            return _map_ferroelectric_polarization(
+                question=question,
+                pack=pack,
+                search_brief=search_brief,
+                search_contract=search_contract,
+                seed_hints=seed_hints,
+            )
+        if domain != "materials_magnetism":
+            raise ValueError(
+                "ConceptMapper currently supports materials_magnetism and "
+                "ferroelectric_polarization."
+            )
+
         seed_title_hints = _seed_hint_titles(seed_hints)
         context = " ".join(
             [
@@ -386,6 +397,172 @@ class ConceptMapper:
         )
 
 
+def _map_ferroelectric_polarization(
+    question: str,
+    pack: DomainPack,
+    search_brief: object | None,
+    search_contract: object | None,
+    seed_hints: list[SeedHint] | None,
+) -> ResearchLensPlan:
+    """Map ferroelectric-polarization questions to domain-pack-driven lenses."""
+
+    seed_title_hints = _seed_hint_titles(seed_hints)
+    context = " ".join(
+        [
+            _context_text(question, search_brief, search_contract),
+            " ".join(seed_title_hints).lower(),
+        ]
+    )
+    concepts = _ferroelectric_concepts(context, pack)
+    materials = _ferroelectric_materials(context, pack)
+    methods = _ferroelectric_methods(context, pack)
+    exclusions = _unique([*pack.false_positive_terms, *_contract_exclusions(search_contract)])
+    seed_paper_hints = _unique(seed_title_hints)
+    lenses: list[ResearchLens] = []
+
+    if _has_any(context, ["why", "important", "重要", "background", "theory", "理论", "depolarization", "surface charge"]):
+        lenses.append(
+            ResearchLens(
+                name="theory_origin",
+                role="recover theory explaining surface polarization and depolarization in ferroelectric thin films",
+                question="What theory explains surface polarization, surface charge, and depolarization fields in ferroelectric thin films?",
+                core_concepts=concepts,
+                synonyms=_concept_synonyms(pack, ["ferroelectric_polarization", "surface_polarization", "screening_effects"]),
+                materials=materials,
+                methods=[],
+                applications=pack.applications,
+                seed_paper_hints=seed_paper_hints,
+                expected_evidence_types=["theory", "model", "surface-charge relation"],
+                exclusion_risks=exclusions,
+            )
+        )
+
+    if _has_any(context, ["probe", "detect", "characterize", "探测", "表征", "method", "实验", "pfm", "shg", "microscopy"]):
+        lenses.append(
+            ResearchLens(
+                name="direct_probe_methods",
+                role="find surface-sensitive and direct experimental probes of ferroelectric polarization",
+                question="Which experiments directly probe or characterize ferroelectric surface or interface polarization?",
+                core_concepts=concepts,
+                synonyms=_concept_synonyms(pack, ["surface_polarization"]),
+                materials=materials,
+                methods=methods,
+                applications=[],
+                seed_paper_hints=seed_paper_hints,
+                expected_evidence_types=["direct probe", "domain imaging", "surface potential measurement"],
+                exclusion_risks=exclusions,
+            )
+        )
+
+    if _has_any(context, ["screening", "屏蔽", "interface", "界面", "depolarization", "surface charge", "charge"]):
+        lenses.append(
+            ResearchLens(
+                name="interface_screening",
+                role="connect surface or interface screening to ferroelectric polarization stability",
+                question="How do screening charges and interfaces control depolarization and surface polarization in ferroelectric thin films?",
+                core_concepts=concepts,
+                synonyms=_concept_synonyms(pack, ["screening_effects"]),
+                materials=materials,
+                methods=methods,
+                applications=pack.applications,
+                seed_paper_hints=seed_paper_hints,
+                expected_evidence_types=["screening mechanism", "interface effect", "depolarization-field evidence"],
+                exclusion_risks=exclusions,
+            )
+        )
+
+    if _has_any(context, ["material", "材料", "case", "案例", "batio3", "pzt", "bifeo3", "hfo2"]) or materials:
+        lenses.append(
+            ResearchLens(
+                name="materials_cases",
+                role="find representative material systems for ferroelectric surface polarization",
+                question="Which ferroelectric materials provide clear surface-polarization or thin-film screening case studies?",
+                core_concepts=concepts,
+                synonyms=_all_synonyms(pack),
+                materials=materials,
+                methods=methods,
+                applications=pack.applications,
+                seed_paper_hints=seed_paper_hints,
+                expected_evidence_types=["material case", "thin-film experiment", "polarization switching"],
+                exclusion_risks=exclusions,
+            )
+        )
+
+    if _has_any(context, ["application", "应用", "device", "器件", "memory", "fefet", "tunnel", "important", "重要"]):
+        lenses.append(
+            ResearchLens(
+                name="device_applications",
+                role="connect surface polarization and screening to device motivation",
+                question="Why do surface polarization and screening matter for ferroelectric devices?",
+                core_concepts=concepts,
+                synonyms=_concept_synonyms(pack, ["ferroelectric_polarization", "screening_effects"]),
+                materials=materials,
+                methods=[],
+                applications=pack.applications,
+                seed_paper_hints=seed_paper_hints,
+                expected_evidence_types=["device motivation", "readout or memory effect", "interface constraint"],
+                exclusion_risks=exclusions,
+            )
+        )
+
+    if _has_any(context, ["limitation", "limits", "限制", "imprint", "pinning", "dead layer", "leakage", "screening"]):
+        lenses.append(
+            ResearchLens(
+                name="limitations",
+                role="separate robust polarization claims from screening, imprint, and interface limitations",
+                question="What limitations or boundary conditions affect surface polarization in ferroelectric thin films?",
+                core_concepts=concepts,
+                synonyms=_concept_synonyms(pack, ["screening_effects"]),
+                materials=materials,
+                methods=methods,
+                applications=[],
+                seed_paper_hints=seed_paper_hints,
+                expected_evidence_types=["limitation", "boundary condition", "artifact risk"],
+                exclusion_risks=exclusions,
+            )
+        )
+
+    if _has_any(context, ["background", "review", "overview", "背景", "综述", "important", "重要"]):
+        lenses.append(
+            ResearchLens(
+                name="background_reviews",
+                role="find conservative background or review papers without treating importance as only a review request",
+                question="Which background papers frame why ferroelectric surface polarization and screening matter?",
+                core_concepts=concepts,
+                synonyms=_all_synonyms(pack),
+                materials=materials,
+                methods=methods,
+                applications=pack.applications,
+                seed_paper_hints=seed_paper_hints,
+                expected_evidence_types=["review", "background", "field framing"],
+                exclusion_risks=exclusions,
+            )
+        )
+
+    if not lenses:
+        lenses.append(
+            ResearchLens(
+                name="theory_origin",
+                role="start from ferroelectric surface-polarization concepts",
+                question="What papers explain ferroelectric thin-film surface polarization?",
+                core_concepts=concepts,
+                synonyms=_all_synonyms(pack),
+                materials=materials,
+                methods=methods,
+                applications=pack.applications,
+                seed_paper_hints=seed_paper_hints,
+                expected_evidence_types=["theory", "experiment", "material case"],
+                exclusion_risks=exclusions,
+            )
+        )
+
+    return ResearchLensPlan(
+        domain=pack.domain_name,
+        central_question=_central_question(question, search_brief, search_contract),
+        lenses=_dedupe_lenses(lenses),
+    )
+
+
 def _context_text(
     question: str,
     search_brief: object | None,
@@ -440,6 +617,43 @@ def _central_question(
         if isinstance(refined, str) and refined.strip():
             return " ".join(refined.split())
     return " ".join(question.split())
+
+
+def _ferroelectric_concepts(context: str, pack: DomainPack) -> list[str]:
+    concepts: list[str] = []
+    if _has_any(context, ["ferroelectric", "ferroelectricity", "铁电"]):
+        concepts.extend(_concept_synonyms(pack, ["ferroelectric_polarization"])[:2])
+    if _has_any(context, ["surface polarization", "表面极化", "surface charge"]):
+        concepts.extend(_concept_synonyms(pack, ["surface_polarization"])[:2])
+    if _has_any(context, ["depolarization", "screening", "屏蔽", "interface", "界面"]):
+        concepts.extend(_concept_synonyms(pack, ["screening_effects"])[:3])
+    if not concepts:
+        concepts.extend([*pack.domain_anchors[:2], *_concept_synonyms(pack, ["ferroelectric_polarization"])[:1]])
+    return _unique(concepts)
+
+
+def _ferroelectric_materials(context: str, pack: DomainPack) -> list[str]:
+    selected = [material for material in pack.materials if material.lower() in context]
+    defaults = ["BaTiO3", "PZT", "PbTiO3", "BiFeO3", "HfO2", "HfZrO2", "LiNbO3"]
+    if _has_any(context, ["material", "材料", "case", "案例", "thin film", "薄膜"]):
+        selected.extend(defaults)
+    return _unique([*selected, *pack.materials])
+
+
+def _ferroelectric_methods(context: str, pack: DomainPack) -> list[str]:
+    selected = [method for method in pack.methods if method.lower() in context]
+    if _has_any(context, ["probe", "detect", "characterize", "探测", "表征", "microscopy", "experiment"]):
+        selected.extend(
+            [
+                "piezoresponse force microscopy",
+                "second harmonic generation",
+                "Kelvin probe force microscopy",
+                "XPS",
+                "TEM",
+                "STEM",
+            ]
+        )
+    return _unique([*selected, *pack.methods])
 
 
 def _materials_concepts(context: str, pack: DomainPack) -> list[str]:

@@ -160,6 +160,122 @@ MATERIALS_QUERY_TEMPLATES = {
     },
 }
 
+FERROELECTRIC_QUERY_TEMPLATES = {
+    "theory_origin": {
+        "purpose": "recover theory for ferroelectric thin-film surface polarization and screening",
+        "openalex": [
+            '"ferroelectric thin film" "depolarization field" screening',
+            '"electric polarization" "surface charge" ferroelectric',
+            '"surface polarization" ferroelectric thin film theory',
+        ],
+        "semantic_scholar": [
+            '"ferroelectric thin film" "depolarization field" screening',
+            '"electric polarization" "surface charge" ferroelectric',
+            '"surface polarization" ferroelectric thin film theory',
+        ],
+        "roles": ["theory_origin", "interface_screening", "background_context"],
+        "stop": "Stop when theory links polarization, surface charge, and depolarization fields.",
+    },
+    "direct_probe_methods": {
+        "purpose": "find direct experimental probes of ferroelectric surface or interface polarization",
+        "openalex": [
+            '"piezoresponse force microscopy" "ferroelectric thin film"',
+            '"piezoresponse force microscopy" "ferroelectric domains"',
+            '"second harmonic generation" ferroelectric surface polarization',
+            '"second harmonic generation" ferroelectric interface polarization',
+            '"Kelvin probe force microscopy" ferroelectric surface potential',
+        ],
+        "semantic_scholar": [
+            '"piezoresponse force microscopy" "ferroelectric thin film"',
+            '"piezoresponse force microscopy" "ferroelectric domains"',
+            '"second harmonic generation" ferroelectric surface polarization',
+            '"second harmonic generation" ferroelectric interface polarization',
+            '"Kelvin probe force microscopy" ferroelectric surface potential',
+        ],
+        "roles": ["direct_probe_method", "experimental_proof", "surface_probe_method"],
+        "stop": "Stop when at least one direct probe and one surface-sensitive characterization route are represented.",
+    },
+    "interface_screening": {
+        "purpose": "find surface and interface screening mechanisms in ferroelectric polarization",
+        "openalex": [
+            '"surface screening" "ferroelectric thin films"',
+            '"interface screening" ferroelectric polarization',
+            '"screening charge" "depolarization field" ferroelectric',
+        ],
+        "semantic_scholar": [
+            '"surface screening" "ferroelectric thin films"',
+            '"interface screening" ferroelectric polarization',
+            '"screening charge" "depolarization field" ferroelectric',
+        ],
+        "roles": ["interface_screening", "limitation_or_challenge", "theory_origin"],
+        "stop": "Stop when screening charges, interfaces, or electrodes are connected to depolarization.",
+    },
+    "materials_cases": {
+        "purpose": "find representative ferroelectric thin-film material case studies",
+        "openalex": [
+            'BaTiO3 "surface polarization" "thin film"',
+            'PZT "ferroelectric thin film" "piezoresponse force microscopy"',
+            'BiFeO3 "ferroelectric domains" "piezoresponse force microscopy"',
+            'HfO2 ferroelectric thin film polarization switching',
+            'HfZrO2 ferroelectric interface screening',
+        ],
+        "semantic_scholar": [
+            'BaTiO3 "surface polarization" "thin film"',
+            'PZT "ferroelectric thin film" "piezoresponse force microscopy"',
+            'BiFeO3 "ferroelectric domains" "piezoresponse force microscopy"',
+            'HfO2 ferroelectric thin film polarization switching',
+            'HfZrO2 ferroelectric interface screening',
+        ],
+        "roles": ["material_case", "direct_probe_method", "interface_screening"],
+        "stop": "Stop when oxide and hafnia-based material examples are covered.",
+    },
+    "device_applications": {
+        "purpose": "connect ferroelectric surface polarization and screening to device applications",
+        "openalex": [
+            '"ferroelectric tunnel junction" polarization screening',
+            'FeFET ferroelectric polarization interface',
+            'ferroelectric memory thin film polarization switching',
+        ],
+        "semantic_scholar": [
+            '"ferroelectric tunnel junction" polarization screening',
+            'FeFET ferroelectric polarization interface',
+            'ferroelectric memory thin film polarization switching',
+        ],
+        "roles": ["device_application", "application_bridge"],
+        "stop": "Stop when memory or transistor papers explain why surface/interface polarization matters.",
+    },
+    "limitations": {
+        "purpose": "find limitations from imprint, pinning, dead layers, and screening artifacts",
+        "openalex": [
+            'imprint domain pinning ferroelectric thin film polarization',
+            '"dead layer" depolarization field ferroelectric thin film',
+            'leakage screening charge ferroelectric thin film polarization',
+        ],
+        "semantic_scholar": [
+            'imprint domain pinning ferroelectric thin film polarization',
+            '"dead layer" depolarization field ferroelectric thin film',
+            'leakage screening charge ferroelectric thin film polarization',
+        ],
+        "roles": ["limitation_or_challenge", "interface_screening"],
+        "stop": "Stop when interface or defect limitations are represented.",
+    },
+    "background_reviews": {
+        "purpose": "find conservative background reviews for ferroelectric thin-film polarization",
+        "openalex": [
+            '"ferroelectric thin films" polarization review',
+            '"thin-film ferroelectric oxides" physics review',
+            'ferroelectric domains piezoresponse force microscopy review',
+        ],
+        "semantic_scholar": [
+            '"ferroelectric thin films" polarization review',
+            '"thin-film ferroelectric oxides" physics review',
+            'ferroelectric domains "piezoresponse force microscopy" review',
+        ],
+        "roles": ["review_background", "background_context"],
+        "stop": "Stop when at least one broad background source is available.",
+    },
+}
+
 
 class QueryFamilyPlanner:
     """Generate QueryFamilyPlan objects from research lenses."""
@@ -201,6 +317,27 @@ class QueryFamilyPlanner:
                 ),
                 exclusion_terms=list(lens.exclusion_risks),
                 stop_condition=str(template["stop"]),
+                priority=_family_priority(lens.name),
+                budget=_family_budget(lens.name),
+            )
+        if domain == "ferroelectric_polarization" and lens.name in FERROELECTRIC_QUERY_TEMPLATES:
+            template = FERROELECTRIC_QUERY_TEMPLATES[lens.name]
+            return QueryFamily(
+                name=lens.name,
+                purpose=str(template["purpose"]),
+                lens_name=lens.name,
+                queries_by_provider={
+                    "openalex": list(template["openalex"]),
+                    "semantic_scholar": list(template["semantic_scholar"]),
+                },
+                expected_paper_roles=list(template["roles"]),
+                expected_evidence_types=_unique(
+                    [*lens.expected_evidence_types, *list(template["roles"])]
+                ),
+                exclusion_terms=list(lens.exclusion_risks),
+                stop_condition=str(template["stop"]),
+                priority=_family_priority(lens.name, domain=domain),
+                budget=_family_budget(lens.name, domain=domain),
             )
         return _fallback_family(lens)
 
@@ -221,6 +358,8 @@ def _fallback_family(lens: ResearchLens) -> QueryFamily:
         expected_evidence_types=list(lens.expected_evidence_types),
         exclusion_terms=list(lens.exclusion_risks),
         stop_condition="Stop when the lens has at least a small set of relevant papers.",
+        priority=40,
+        budget=1,
     )
 
 
@@ -278,6 +417,8 @@ def _seed_context_family(seed_hints: list[SeedHint] | None) -> QueryFamily | Non
         ],
         exclusion_terms=[],
         stop_condition="Stop when the explicitly mentioned seed titles and close context papers are represented.",
+        priority=100,
+        budget=4,
         linked_seed_titles=titles,
         seed_hint_confidence=confidence,
     )
@@ -314,6 +455,60 @@ def _semantic_required(term: str) -> str:
     if " " in cleaned:
         return f'+"{cleaned}"'
     return f"+{cleaned}"
+
+
+def _family_priority(name: str, domain: str = "materials_magnetism") -> int:
+    if domain == "ferroelectric_polarization":
+        priorities = {
+            "theory_origin": 90,
+            "direct_probe_methods": 88,
+            "interface_screening": 86,
+            "materials_cases": 80,
+            "device_applications": 72,
+            "limitations": 68,
+            "background_reviews": 58,
+            "seed_context": 100,
+        }
+        return priorities.get(name, 50)
+    priorities = {
+        "seed_context": 100,
+        "spaldin_framework": 95,
+        "theory_origin": 90,
+        "local_magnetoelectric_predictor": 88,
+        "direct_surface_detection": 85,
+        "nanoscale_readout": 82,
+        "applications": 72,
+        "limitations": 70,
+        "frontier": 60,
+    }
+    return priorities.get(name, 50)
+
+
+def _family_budget(name: str, domain: str = "materials_magnetism") -> int:
+    if domain == "ferroelectric_polarization":
+        budgets = {
+            "theory_origin": 3,
+            "direct_probe_methods": 4,
+            "interface_screening": 3,
+            "materials_cases": 4,
+            "device_applications": 3,
+            "limitations": 2,
+            "background_reviews": 2,
+            "seed_context": 4,
+        }
+        return budgets.get(name, 2)
+    budgets = {
+        "seed_context": 4,
+        "spaldin_framework": 3,
+        "theory_origin": 3,
+        "local_magnetoelectric_predictor": 3,
+        "direct_surface_detection": 3,
+        "nanoscale_readout": 2,
+        "applications": 2,
+        "limitations": 2,
+        "frontier": 2,
+    }
+    return budgets.get(name, 2)
 
 
 def _unique(values: list[str]) -> list[str]:

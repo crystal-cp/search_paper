@@ -1,0 +1,198 @@
+{
+  "domain_name": "ferroelectric_polarization",
+  "domain_anchors": [
+    "ferroelectric",
+    "ferroelectricity",
+    "ferroelectric thin film",
+    "ferroelectric polarization",
+    "surface polarization",
+    "polarization switching"
+  ],
+  "concepts": {
+    "ferroelectric_polarization": {
+      "synonyms": [
+        "ferroelectric polarization",
+        "electric polarization",
+        "spontaneous polarization",
+        "polarization switching"
+      ],
+      "related": [
+        "modern theory of polarization",
+        "polarization charge",
+        "ferroelectric domains"
+      ]
+    },
+    "surface_polarization": {
+      "synonyms": [
+        "surface polarization",
+        "interface polarization",
+        "surface charge",
+        "polarization discontinuity"
+      ],
+      "related": [
+        "surface screening",
+        "interface screening",
+        "surface potential"
+      ]
+    },
+    "screening_effects": {
+      "synonyms": [
+        "depolarization field",
+        "screening charge",
+        "interface screening",
+        "surface charge",
+        "electrode screening"
+      ],
+      "related": [
+        "imprint",
+        "domain pinning",
+        "dead layer",
+        "charge compensation"
+      ]
+    }
+  },
+  "mechanisms": [
+    "depolarization field",
+    "screening charge",
+    "interface screening",
+    "surface charge",
+    "imprint",
+    "domain pinning"
+  ],
+  "materials": [
+    "BaTiO3",
+    "PZT",
+    "PbTiO3",
+    "BiFeO3",
+    "HfO2",
+    "HfZrO2",
+    "LiNbO3",
+    "PVDF"
+  ],
+  "methods": [
+    "PFM",
+    "piezoresponse force microscopy",
+    "SHG",
+    "second harmonic generation",
+    "KPFM",
+    "Kelvin probe force microscopy",
+    "XPS",
+    "photoemission",
+    "TEM",
+    "STEM"
+  ],
+  "applications": [
+    "ferroelectric memory",
+    "ferroelectric tunnel junction",
+    "FeFET",
+    "oxide electronics",
+    "nonvolatile memory"
+  ],
+  "false_positive_terms": [
+    "biomedical screening",
+    "drug screening",
+    "clinical screening",
+    "cognitive screening",
+    "transcription factor binding profiles",
+    "cell surface polarization",
+    "surface plasmon polaritons",
+    "generic thin film deposition",
+    "generic SHG plasmonics",
+    "hydrogen evolution catalyst",
+    "perovskite solar cell"
+  ],
+  "constraint_groups": [
+    {
+      "group_name": "ferroelectric_context",
+      "operator": "OR",
+      "required": true,
+      "source": "domain_pack",
+      "terms": [
+        "ferroelectric",
+        "ferroelectricity",
+        "polarization switching",
+        "ferroelectric thin film",
+        "BaTiO3",
+        "PZT",
+        "PbTiO3",
+        "BiFeO3",
+        "HfO2",
+        "HfZrO2",
+        "LiNbO3"
+      ]
+    },
+    {
+      "group_name": "surface_or_probe_context",
+      "operator": "OR",
+      "required": true,
+      "source": "domain_pack",
+      "terms": [
+        "surface polarization",
+        "depolarization field",
+        "screening charge",
+        "interface screening",
+        "surface charge",
+        "PFM",
+        "piezoresponse force microscopy",
+        "SHG",
+        "second harmonic generation",
+        "KPFM",
+        "Kelvin probe"
+      ]
+    }
+  ],
+  "aspect_groups": {
+    "theory_background": [
+      "theory",
+      "model",
+      "modern theory of polarization",
+      "depolarization field",
+      "surface charge"
+    ],
+    "direct_probe": [
+      "PFM",
+      "piezoresponse",
+      "SHG",
+      "second harmonic",
+      "KPFM",
+      "Kelvin probe",
+      "XPS",
+      "TEM",
+      "STEM"
+    ],
+    "material_case": [
+      "BaTiO3",
+      "PZT",
+      "PbTiO3",
+      "BiFeO3",
+      "HfO2",
+      "HfZrO2",
+      "LiNbO3"
+    ],
+    "device_application": [
+      "memory",
+      "FeFET",
+      "tunnel junction",
+      "nonvolatile",
+      "oxide electronics"
+    ],
+    "screening_effect": [
+      "screening",
+      "surface charge",
+      "interface charge",
+      "electrode screening",
+      "depolarization"
+    ]
+  },
+  "query_expansions": {
+    "PFM": [
+      "piezoresponse force microscopy"
+    ],
+    "SHG": [
+      "second harmonic generation"
+    ],
+    "KPFM": [
+      "Kelvin probe force microscopy"
+    ]
+  }
+}

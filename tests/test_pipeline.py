@@ -215,6 +215,7 @@ def test_pipeline_with_fake_retrievers_and_no_internet(tmp_path):
     assert (output_dir / "ranked_papers.csv").exists()
     assert (output_dir / "evaluation.json").exists()
     assert (output_dir / "agent_trace.json").exists()
+    assert (output_dir / "ranking_diagnostics.json").exists()
     assert (output_dir / "run_events.jsonl").exists()
     assert (output_dir / "search_brief.json").exists()
     assert (output_dir / "search_contract.json").exists()

@@ -63,10 +63,31 @@ def _contains_term(text: str, term: str) -> bool:
 def must_term_coverage(text: str, plan: QueryPlan) -> float:
     """Measure how many must terms are covered by a paper text."""
 
+    groups = _required_term_groups(plan)
+    if groups:
+        hits = sum(
+            1
+            for group in groups
+            if any(_contains_term(text, term) for term in group)
+        )
+        return clamp(hits / len(groups))
     if not plan.must_terms:
         return 1.0
     hits = sum(1 for term in plan.must_terms if _contains_term(text, term))
     return clamp(hits / len(plan.must_terms))
+
+
+def _required_term_groups(plan: QueryPlan) -> list[list[str]]:
+    raw_groups = plan.filters.get("must_term_groups", [])
+    groups: list[list[str]] = []
+    if not isinstance(raw_groups, list):
+        return groups
+    for group in raw_groups:
+        if isinstance(group, list):
+            terms = [" ".join(str(term).split()) for term in group if str(term).strip()]
+            if terms:
+                groups.append(terms)
+    return groups
 
 
 def field_match_score(paper: Paper, plan: QueryPlan) -> float:

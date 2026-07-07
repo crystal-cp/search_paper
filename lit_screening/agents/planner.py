@@ -171,18 +171,6 @@ def _semantic_required(term: str) -> str:
     return f"+{_quote_phrase(term)}"
 
 
-def _semantic_excluded(term: str) -> str:
-    """Format an excluded Semantic Scholar term."""
-
-    return f"-{_quote_phrase(term)}"
-
-
-def _apply_openalex_excludes(query: str, exclude_terms: list[str]) -> str:
-    if not exclude_terms:
-        return query
-    return f"{query} NOT {' NOT '.join(_quote_phrase(term) for term in exclude_terms)}"
-
-
 def _plain_terms_query(terms: list[str], limit: int = 3) -> str:
     """Join terms without provider operators for broad recall-oriented search."""
 
@@ -192,8 +180,6 @@ def _plain_terms_query(terms: list[str], limit: int = 3) -> str:
 def build_openalex_queries(plan: QueryPlan) -> list[str]:
     """Build OpenAlex-flavored queries from a structured query plan."""
 
-    if _is_expert_materials_plan(plan):
-        return _expert_materials_openalex_queries(plan)
     if _is_expert_plan(plan):
         return _expert_generic_openalex_queries(plan)
 
@@ -230,14 +216,12 @@ def build_openalex_queries(plan: QueryPlan) -> list[str]:
         queries.append(f"{focused} mechanism")
     if plan.filters.get("strictness") == "broad" and optional:
         queries.append(" OR ".join(_quote_phrase(term) for term in [*core[:2], *optional[:3]]))
-    return _unique([_apply_openalex_excludes(query, plan.exclude_terms) for query in queries], 6)
+    return _unique(queries, 6)
 
 
 def build_semantic_scholar_queries(plan: QueryPlan) -> list[str]:
     """Build Semantic Scholar-flavored queries from a structured query plan."""
 
-    if _is_expert_materials_plan(plan):
-        return _expert_materials_semantic_scholar_queries(plan)
     if _is_expert_plan(plan):
         return _expert_generic_semantic_scholar_queries(plan)
 
@@ -246,9 +230,8 @@ def build_semantic_scholar_queries(plan: QueryPlan) -> list[str]:
     optional = plan.optional_terms
     natural_query = plan.translated_question or plan.original_question
     required = " ".join(_semantic_required(term) for term in must[:4])
-    excludes = " ".join(_semantic_excluded(term) for term in plan.exclude_terms[:4])
     optional_or = f"({' OR '.join(_quote_phrase(term) for term in optional[:4])})" if optional else ""
-    primary = " ".join(part for part in [required, optional_or, excludes] if part)
+    primary = " ".join(part for part in [required, optional_or] if part)
     if not primary:
         primary = natural_query
     queries = []
@@ -263,28 +246,20 @@ def build_semantic_scholar_queries(plan: QueryPlan) -> list[str]:
     queries.append(primary)
     if core:
         phrase = " ".join(_quote_phrase(term) for term in core[:2])
-        queries.append(" ".join(part for part in [phrase, optional_or, excludes] if part))
-        queries.append(" ".join(part for part in [phrase, "review", excludes] if part))
+        queries.append(" ".join(part for part in [phrase, optional_or] if part))
+        queries.append(" ".join(part for part in [phrase, "review"] if part))
     if optional:
         queries.append(
             " ".join(
-                part
-                for part in [
-                    required,
-                    f"({' OR '.join(_quote_phrase(term) for term in optional[:5])})",
-                    excludes,
-                ]
-                if part
-            )
+                    part
+                    for part in [
+                        required,
+                        f"({' OR '.join(_quote_phrase(term) for term in optional[:5])})",
+                    ]
+                    if part
+                )
         )
     return _unique(queries, 6)
-
-
-def _is_expert_materials_plan(plan: QueryPlan) -> bool:
-    return bool(plan.expert_rewritten_question) and (
-        plan.filters.get("search_contract_domain") == "materials_magnetism"
-        or plan.filters.get("intent_domain") == "materials_magnetism"
-    )
 
 
 def _is_expert_plan(plan: QueryPlan) -> bool:
@@ -295,18 +270,18 @@ def _expert_generic_openalex_queries(plan: QueryPlan) -> list[str]:
     """Short expert-intent OpenAlex queries from activated concepts only."""
 
     concepts = _concepts_from_filters(plan)
-    must = _terms_by_role(concepts, "must")
-    optional = _terms_by_role(concepts, "optional")
-    base_terms = must or optional
-    queries = _structured_concept_queries(base_terms, optional)
-    excludes = plan.exclude_terms[:4]
+    queries = _provider_neutral_expert_queries(
+        concepts,
+        include_seed_titles=False,
+        terminology_map=plan.filters.get("terminology_map", {}),
+    )
     return _unique(
         [
-            _apply_openalex_excludes(query, excludes)
+            query
             for query in queries
             if query and len(query) < 180
         ],
-        6,
+        12,
     )
 
 
@@ -315,16 +290,18 @@ def _expert_generic_semantic_scholar_queries(plan: QueryPlan) -> list[str]:
 
     concepts = _concepts_from_filters(plan)
     must = _terms_by_role(concepts, "must")
-    optional = _terms_by_role(concepts, "optional")
-    base_terms = must or optional
-    excludes = " ".join(_semantic_excluded(term) for term in plan.exclude_terms[:4])
     queries = [
         *_seed_title_queries(concepts),
-        *_structured_concept_queries(base_terms, optional),
+        *_provider_neutral_expert_queries(
+            concepts,
+            include_seed_titles=False,
+            terminology_map=plan.filters.get("terminology_map", {}),
+        ),
     ]
     if must:
         required = " ".join(_semantic_required(term) for term in must[:3])
         queries.append(required)
+        optional = _terms_by_role(concepts, "optional")
         if optional:
             queries.append(
                 " ".join(
@@ -338,37 +315,12 @@ def _expert_generic_semantic_scholar_queries(plan: QueryPlan) -> list[str]:
             )
     return _unique(
         [
-            " ".join(part for part in [query, excludes] if part)
+            query
             for query in queries
             if query and len(query) < 220
         ],
         6,
     )
-
-
-def _expert_materials_openalex_queries(plan: QueryPlan) -> list[str]:
-    """Short OpenAlex queries from activated materials-magnetism concepts."""
-
-    concepts = _concepts_from_filters(plan)
-    terms = _active_terms(concepts)
-    queries = _activated_materials_queries(concepts, include_seed_titles=False)
-    if not queries:
-        queries = _short_pair_queries(terms)
-    return _unique([query for query in queries if len(query) < 180], 8)
-
-
-def _expert_materials_semantic_scholar_queries(plan: QueryPlan) -> list[str]:
-    """Short Semantic Scholar queries from activated concepts and seed hints."""
-
-    concepts = _concepts_from_filters(plan)
-    terms = _active_terms(concepts)
-    queries = [
-        *_seed_title_queries(concepts),
-        *_activated_materials_queries(concepts, include_seed_titles=False),
-    ]
-    if not queries:
-        queries = _short_pair_queries(terms)
-    return _unique([query for query in queries if len(query) < 220], 8)
 
 
 def _concepts_from_filters(plan: QueryPlan) -> list[IntentConcept]:
@@ -437,81 +389,107 @@ def _terms_by_category_from_concepts(
     )
 
 
-def _has_active(concepts: list[IntentConcept], term: str) -> bool:
-    lowered = term.lower()
-    return any(
-        concept.term.lower() == lowered
-        for concept in _query_eligible(concepts)
-    )
-
-
-def _find_active(concepts: list[IntentConcept], candidates: list[str]) -> str:
-    candidate_set = {candidate.lower() for candidate in candidates}
-    for concept in _query_eligible(concepts):
-        if concept.term.lower() in candidate_set:
-            return concept.term
-    return ""
-
-
-def _activated_materials_queries(
+def _provider_neutral_expert_queries(
     concepts: list[IntentConcept],
     include_seed_titles: bool,
+    terminology_map: dict[str, list[str]] | None = None,
 ) -> list[str]:
+    """Compose short queries from structured concept categories, not domain strings."""
+
     queries: list[str] = []
-    materials = _terms_by_category_from_concepts(concepts, "material")
-    methods = _terms_by_category_from_concepts(concepts, "method")
     active_terms = _active_terms(concepts)
-
-    boundary = _find_active(concepts, ["boundary magnetization"])
-    magnetoelectric = _find_active(
-        concepts,
-        ["magnetoelectric antiferromagnet", "magnetoelectric"],
+    prioritized_must_terms = _terms_by_role_priority(concepts, "must")
+    conceptual_terms = _unique(
+        [
+            *prioritized_must_terms,
+            *_terms_by_category_from_concepts(concepts, "object"),
+            *_terms_by_category_from_concepts(concepts, "property"),
+            *_terms_by_category_from_concepts(concepts, "mechanism"),
+            *_terms_by_category_from_concepts(concepts, "concept"),
+            *_terms_by_role(concepts, "must"),
+        ],
+        12,
     )
-    surface_magnetization = _find_active(concepts, ["surface magnetization"])
-    local_me = _find_active(
-        concepts,
-        ["local magnetoelectric response", "local magnetoelectric effect"],
+    case_terms = _terms_by_category_from_concepts(concepts, "material")
+    methods = _terms_by_category_from_concepts(concepts, "method")
+    applications = _terms_by_category_from_concepts(concepts, "application")
+    base_terms = conceptual_terms or active_terms
+    expanded_base_terms = _provider_terms(base_terms, terminology_map)
+    expanded_optional = _provider_terms(_terms_by_role(concepts, "optional"), terminology_map)
+    case_terms = _provider_terms(case_terms, terminology_map)
+    methods = _provider_terms(methods, terminology_map)
+    applications = _provider_terms(applications, terminology_map)
+    queries.extend(
+        _quote_phrase(term)
+        for term in _provider_terms(prioritized_must_terms[:6], terminology_map)
+        if term
     )
-    surface_order = _find_active(concepts, ["surface magnetic order"])
-    spin_polarization = _find_active(
-        concepts,
-        ["surface spin polarization", "spin polarization"],
-    )
-    altermagnetism = _find_active(concepts, ["altermagnetism"])
-    spin_splitting = _find_active(concepts, ["spin splitting"])
-
-    if boundary and magnetoelectric:
-        queries.append(f"{_quote_phrase(boundary)} {_quote_phrase(magnetoelectric)}")
-    if local_me and surface_order:
-        queries.append(f"{_quote_phrase(local_me)} {_quote_phrase(surface_order)}")
-    material_queries: list[str] = []
-    method_queries: list[str] = []
-    for material in materials[:3]:
-        if surface_magnetization:
-            material_queries.append(f"{material} {_quote_phrase(surface_magnetization)}")
-        if boundary:
-            material_queries.append(f"{material} {_quote_phrase(boundary)}")
-    for method in methods:
-        anchor = materials[0] if materials else ""
-        if method in {"SPLEEM", "XMCD-PEEM", "SP-STM", "spin-resolved photoemission"}:
-            signal = spin_polarization or surface_magnetization or surface_order
-            if anchor and signal:
-                method_queries.append(f"{anchor} {_quote_phrase(signal)} {method}")
-            elif signal:
-                method_queries.append(f"{_quote_phrase(signal)} {method}")
-        elif method in {"NV magnetometry", "scanning diamond magnetometry"}:
-            signal = boundary or surface_magnetization or surface_order
-            if anchor and signal:
-                method_queries.append(f"{method} {anchor} {_quote_phrase(signal)}")
-        elif method in {"SARPES", "spin-resolved ARPES"} and altermagnetism:
-            method_queries.append(f"{altermagnetism} {spin_splitting or 'spin splitting'} {method}")
-    queries.extend(_unique(method_queries, 5))
-    queries.extend(_unique(material_queries, 5))
-    if altermagnetism and not any("altermagnet" in query.lower() for query in queries):
-        queries.append(f"{altermagnetism} {spin_splitting or 'spin splitting'}")
+    queries.extend(_quote_phrase(term) for term in case_terms[:2] if term)
+    for method in _selected_provider_methods(methods):
+        if expanded_base_terms:
+            queries.append(f"{_quote_phrase(method)} {_quote_phrase(expanded_base_terms[0])}")
+    queries.extend(_structured_concept_queries(expanded_base_terms, expanded_optional))
+    for case in case_terms[:4]:
+        for concept in expanded_base_terms[:2]:
+            queries.append(f"{_quote_phrase(case)} {_quote_phrase(concept)}")
+    for method in methods[:5]:
+        for concept in expanded_base_terms[:2]:
+            queries.append(f"{_quote_phrase(method)} {_quote_phrase(concept)}")
+        if case_terms and expanded_base_terms:
+            queries.append(
+                f"{_quote_phrase(method)} {_quote_phrase(case_terms[0])} {_quote_phrase(expanded_base_terms[0])}"
+            )
+    for application in applications[:3]:
+        if expanded_base_terms:
+            queries.append(f"{_quote_phrase(expanded_base_terms[0])} {_quote_phrase(application)}")
     if include_seed_titles:
         queries.extend(_seed_title_queries(concepts))
-    return _unique([query for query in queries if query.strip()], 12)
+    if not queries:
+        queries = _short_pair_queries(_provider_terms(active_terms, terminology_map))
+    return _unique([query for query in queries if query.strip()], 14)
+
+
+def _provider_terms(
+    terms: list[str],
+    terminology_map: dict[str, list[str]] | None,
+) -> list[str]:
+    """Use provider-friendly terminology-map expansions when available."""
+
+    if not terminology_map:
+        return list(terms)
+    result: list[str] = []
+    normalized_map = {
+        str(key).lower(): [str(value) for value in values if str(value).strip()]
+        for key, values in terminology_map.items()
+        if isinstance(values, list)
+    }
+    for term in terms:
+        expanded = normalized_map.get(str(term).lower(), [])
+        if expanded and _should_expand_provider_term(term, expanded[0]):
+            result.append(expanded[0])
+        else:
+            result.append(term)
+    return _unique(result, 24)
+
+
+def _selected_provider_methods(methods: list[str]) -> list[str]:
+    """Keep early query budget diverse across activated methods."""
+
+    if len(methods) <= 2:
+        return methods
+    return _unique([methods[0], methods[-1]], 2)
+
+
+def _should_expand_provider_term(term: str, expansion: str) -> bool:
+    """Expand compact method acronyms without replacing ordinary concept phrases."""
+
+    cleaned = " ".join(str(term or "").split())
+    expanded = " ".join(str(expansion or "").split())
+    if not cleaned or not expanded:
+        return False
+    if len(cleaned) <= 5 and cleaned.upper() == cleaned:
+        return True
+    return False
 
 
 def _structured_concept_queries(
@@ -589,15 +567,6 @@ def _looks_like_seed_identifier(text: str) -> bool:
 
 
 def _seed_core_phrase(title: str) -> str:
-    lower = title.lower()
-    for marker in [
-        "surface magnetization in antiferromagnets",
-        "local magnetoelectric effects",
-        "surface magnetic order",
-        "altermagnetism",
-    ]:
-        if marker in lower:
-            return marker
     words = [word for word in re.findall(r"[A-Za-z][A-Za-z0-9\-]+", title) if len(word) > 3]
     return " ".join(words[:5])
 
@@ -611,6 +580,20 @@ def _short_pair_queries(terms: list[str]) -> list[str]:
         if pair:
             queries.append(" ".join(_quote_phrase(term) for term in pair))
     return queries
+
+
+def _terms_by_role_priority(concepts: list[IntentConcept], role: str) -> list[str]:
+    """Return role terms ordered by confidence for early query budget slots."""
+
+    ranked = sorted(
+        [
+            concept
+            for concept in _query_eligible(concepts)
+            if concept.query_role == role
+        ],
+        key=lambda concept: (-concept.confidence, concept.term.lower()),
+    )
+    return _unique([concept.term for concept in ranked], 12)
 
 
 def _extract_exclude_terms(text: str) -> list[str]:
@@ -709,35 +692,22 @@ def _expert_core_terms(
             value
             for value in values
             if value.lower() not in downweighted
-            and value.lower() not in {"spin", "magnetization", "materials", "example", "review"}
+            and value.lower() not in GENERIC_TOPIC_MODIFIERS
         ],
         24,
     )
 
 
-def _materials_must_groups(expert_intent: ExpertResearchIntent) -> list[list[str]]:
-    """Any-one-of groups used for materials-magnetism retrieval/domain logic."""
+def _constraint_groups_from_contract(search_contract: SearchContract | None) -> list[list[str]]:
+    """Return generic required search groups from a SearchContract."""
 
-    active = _query_eligible(expert_intent.structured_concepts)
-    group_a = _unique(
-        [
-            concept.term
-            for concept in active
-            if concept.category in {"material"}
-            or concept.term in {"antiferromagnet", "magnetoelectric antiferromagnet"}
-        ],
-        10,
-    )
-    group_b = _unique(
-        [
-            concept.term
-            for concept in active
-            if concept.category in {"object", "property", "mechanism"}
-            and concept.term not in {"antiferromagnet", "magnetoelectric antiferromagnet"}
-        ],
-        10,
-    )
-    return [group for group in [group_a, group_b] if group]
+    if not search_contract:
+        return []
+    return [
+        _unique(group.terms, 12)
+        for group in search_contract.constraint_groups
+        if group.required and group.terms
+    ]
 
 
 def _concept_payloads(concepts: list[IntentConcept]) -> list[dict[str, Any]]:
@@ -942,15 +912,15 @@ class PlannerAgent:
             core_terms = [planning_question]
 
         must_groups: list[list[str]] = []
-        if expert_intent and _intent_domain(search_contract) == "materials_magnetism":
-            must_groups = _materials_must_groups(expert_intent)
+        if expert_intent:
+            must_groups = _constraint_groups_from_contract(search_contract)
             must_terms = _unique(
                 [
                     concept.term
                     for concept in _query_eligible(expert_intent.structured_concepts)
                     if concept.query_role == "must"
                 ],
-                5,
+                12,
             )
             must_count = len(must_terms)
         else:
@@ -975,8 +945,8 @@ class PlannerAgent:
                         planning_question,
                     ),
                 ],
-                8,
-            )
+        12,
+    )
 
         if expert_intent:
             topical_optional = _unique(
@@ -1065,6 +1035,21 @@ class PlannerAgent:
                 else "",
                 "intent_domain": _intent_domain(search_contract),
                 "must_term_groups": must_groups,
+                "constraint_groups": [
+                    {
+                        "group_name": group.group_name,
+                        "operator": group.operator,
+                        "terms": list(group.terms),
+                        "source": group.source,
+                        "required": group.required,
+                    }
+                    for group in (search_contract.constraint_groups if search_contract else [])
+                ],
+                "terminology_map": (
+                    search_contract.domain_profile.terminology_map
+                    if search_contract
+                    else {}
+                ),
                 "intent_materials": expert_intent.materials if expert_intent else [],
                 "intent_methods": expert_intent.methods if expert_intent else [],
                 "intent_repair_used": bool(expert_intent),

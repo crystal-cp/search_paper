@@ -50,11 +50,16 @@ def _domain_pack_from_json(data: dict[str, Any]) -> DomainPack:
     }
     return DomainPack(
         domain_name=str(data.get("domain_name") or ""),
+        domain_anchors=_string_list(data.get("domain_anchors", [])),
         concepts=concepts,
+        mechanisms=_string_list(data.get("mechanisms", [])),
         materials=_string_list(data.get("materials", [])),
         methods=_string_list(data.get("methods", [])),
         applications=_string_list(data.get("applications", [])),
         false_positive_terms=_string_list(data.get("false_positive_terms", [])),
+        constraint_groups=_dict_list(data.get("constraint_groups", [])),
+        aspect_groups=_string_list_dict(data.get("aspect_groups", {})),
+        query_expansions=_string_list_dict(data.get("query_expansions", {})),
     )
 
 
@@ -64,3 +69,25 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [" ".join(item.split()) for item in value if isinstance(item, str) and item.strip()]
+
+
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    """Return a list of dictionary values from optional JSON sections."""
+
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _string_list_dict(value: Any) -> dict[str, list[str]]:
+    """Return a dictionary whose values are compact string lists."""
+
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, list[str]] = {}
+    for key, items in value.items():
+        cleaned_key = " ".join(str(key).split())
+        cleaned_items = _string_list(items)
+        if cleaned_key and cleaned_items:
+            result[cleaned_key] = cleaned_items
+    return result

@@ -5,6 +5,7 @@ from lit_screening.domain_packs.loader import load_domain_pack, list_domain_pack
 
 def test_list_domain_packs_includes_materials_magnetism():
     assert "materials_magnetism" in list_domain_packs()
+    assert "ferroelectric_polarization" in list_domain_packs()
 
 
 def test_load_materials_magnetism_domain_pack():
@@ -32,6 +33,17 @@ def test_materials_magnetism_false_positive_terms_include_clinical_screening():
     pack = load_domain_pack("materials_magnetism")
 
     assert "clinical screening" in pack.false_positive_terms
+
+
+def test_load_ferroelectric_polarization_domain_pack():
+    pack = load_domain_pack("ferroelectric_polarization")
+
+    assert pack.domain_name == "ferroelectric_polarization"
+    assert "ferroelectric thin film" in pack.domain_anchors
+    assert "PFM" in pack.methods
+    assert "depolarization field" in pack.mechanisms
+    assert "direct_probe" in pack.aspect_groups
+    assert pack.query_expansions["PFM"] == ["piezoresponse force microscopy"]
 
 
 def test_missing_domain_pack_raises_clear_error():

@@ -165,7 +165,7 @@ def _rule_repair(
     if pack.domain_name == "materials_magnetism":
         return _repair_materials_magnetism(original_question, seeds, pack)
     if pack.domain_name == "ferroelectric_polarization":
-        return _repair_ferroelectric_polarization(original_question)
+        return _repair_ferroelectric_polarization(original_question, pack)
     if pack.domain_name == "ai_literature_screening":
         return _repair_ai_literature_screening(original_question)
     return _fallback_repair(original_question)
@@ -508,24 +508,14 @@ def _validate_llm_intent_with_domain_pack(
 
 def _domain_pack_terms(pack: DomainPack) -> list[str]:
     terms = [pack.domain_name]
+    terms.extend(pack.domain_anchors)
     for concept in pack.concepts.values():
         terms.extend(concept.synonyms)
         terms.extend(concept.related)
+    terms.extend(pack.mechanisms)
     terms.extend(pack.materials)
     terms.extend(pack.methods)
     terms.extend(pack.applications)
-    if pack.domain_name == "ferroelectric_polarization":
-        terms.extend(
-            [
-                "ferroelectric polarization",
-                "surface polarization",
-                "PFM",
-                "SHG",
-                "depolarization field",
-                "screening",
-                "thin film",
-            ]
-        )
     if pack.domain_name == "ai_literature_screening":
         terms.extend(
             [
@@ -591,8 +581,21 @@ def _infer_domain_pack(question: str, seed_hints: list[SeedHint]) -> DomainPack:
         ],
     ):
         return DomainPack(domain_name="ai_literature_screening")
-    if _has_any(context, ["ferroelectric", "铁电", "surface polarization", "表面极化"]):
-        return DomainPack(domain_name="ferroelectric_polarization")
+    if _has_any(
+        context,
+        [
+            "ferroelectric",
+            "ferroelectric thin film",
+            "surface polarization",
+            "depolarization",
+            "pfm",
+            "shg",
+            "铁电",
+            "表面极化",
+            "退极化",
+        ],
+    ):
+        return load_domain_pack("ferroelectric_polarization")
     if _has_any(
         context,
         [
@@ -848,7 +851,10 @@ def _repair_materials_magnetism(
     )
 
 
-def _repair_ferroelectric_polarization(question: str) -> ExpertResearchIntent:
+def _repair_ferroelectric_polarization(
+    question: str,
+    pack: DomainPack,
+) -> ExpertResearchIntent:
     context = question.lower()
     concepts = _downweighted_concepts(question)
     concepts.extend(
@@ -877,15 +883,45 @@ def _repair_ferroelectric_polarization(question: str) -> ExpertResearchIntent:
         concepts.extend(
             [
                 _concept("PFM", "method", "domain_pack", 0.82, "Probe/detection wording activates standard ferroelectric polarization microscopy.", "optional", True),
+                _concept("piezoresponse force microscopy", "method", "domain_pack", 0.82, "PFM should be expanded for provider queries.", "optional", True),
                 _concept("SHG", "method", "domain_pack", 0.74, "Probe/detection wording activates nonlinear optical polarization probes.", "optional", True),
+                _concept("second harmonic generation", "method", "domain_pack", 0.74, "SHG should be expanded for provider queries.", "optional", True),
+                _concept("KPFM", "method", "domain_pack", 0.7, "Surface-potential wording can be probed by Kelvin probe force microscopy.", "optional", True),
             ]
         )
     concepts.extend(
         [
             _concept("depolarization field", "mechanism", "domain_pack", 0.76, "Ferroelectric thin-film surface polarization commonly involves depolarization fields.", "optional", True),
             _concept("screening", "mechanism", "domain_pack", 0.7, "Surface polarization context can involve charge screening; keep it optional.", "optional", True),
+            _concept("interface screening", "mechanism", "domain_pack", 0.72, "Surface/interface wording activates interface screening as a mechanism.", "optional", True),
         ]
     )
+    if _has_any(context, ["material", "材料", "case", "案例", "thin film", "薄膜"]):
+        for material in _pack_items(pack.materials, ["BaTiO3", "PZT", "PbTiO3", "BiFeO3", "HfO2", "HfZrO2", "LiNbO3"]):
+            concepts.append(
+                _concept(
+                    material,
+                    "material",
+                    "domain_pack",
+                    0.7,
+                    "User asks for typical material cases; keep representative ferroelectrics optional.",
+                    "optional",
+                    True,
+                )
+            )
+    if _has_any(context, ["application", "应用", "device", "器件", "memory", "important", "重要"]):
+        for application in _pack_items(pack.applications, ["ferroelectric memory", "ferroelectric tunnel junction", "FeFET", "nonvolatile memory"]):
+            concepts.append(
+                _concept(
+                    application,
+                    "application",
+                    "domain_pack",
+                    0.68,
+                    "Importance/application wording activates device motivation as optional context.",
+                    "optional",
+                    True,
+                )
+            )
     return _intent_from_concepts(
         question=question,
         concepts=_merge_concepts(concepts),

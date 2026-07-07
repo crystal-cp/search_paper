@@ -42,7 +42,7 @@ def test_planner_uses_search_brief_inclusion_and_exclusion_terms():
     assert "antiferromagnetic materials" in " ".join(plan.must_terms).lower()
     assert "battery" in plan.exclude_terms
     assert "spin signals" in plan.required_aspects
-    assert "battery" in joined_queries
+    assert "battery" not in joined_queries
 
 
 def test_aspect_coverage_detects_covered_and_missing_aspects():
