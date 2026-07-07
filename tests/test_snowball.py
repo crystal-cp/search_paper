@@ -238,9 +238,9 @@ def test_snowballing_runs_with_fake_semantic_scholar_responses():
 
     assert len(seeds) == 1
     assert {paper.source_stage for paper in expanded} == {
-        "reference",
-        "citation",
-        "recommendation",
+        "seed_reference",
+        "seed_citation",
+        "seed_recommendation",
     }
     assert all(path.seed_paper_id == "seed-paper" for path in paths)
     assert all(paper.retrieval_stage.startswith("snowball_") for paper in expanded)

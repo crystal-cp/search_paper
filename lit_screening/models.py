@@ -179,6 +179,8 @@ class RetrievalPath:
     seed_paper_id: str
     seed_title: str
     reason: str
+    seed_relation: str = ""
+    seed_confidence: float = 0.0
 
 
 @dataclass
@@ -201,6 +203,8 @@ class Paper:
     seed_paper_id: str = ""
     seed_title: str = ""
     seed_reason: str = ""
+    seed_relation: str = ""
+    seed_confidence: float = 0.0
     provider_ids: dict[str, str] = field(default_factory=dict)
     citation_count: int = 0
     api_relevance_score: float = 0.0
@@ -214,6 +218,39 @@ class Paper:
     open_access_pdf_url: str = ""
     tldr: str = ""
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+
+SEED_EXACT_SOURCE_STAGES = {"seed_exact", "manual_seed"}
+SEED_DERIVED_SOURCE_STAGES = {
+    *SEED_EXACT_SOURCE_STAGES,
+    "seed_reference",
+    "seed_citation",
+    "seed_recommendation",
+}
+
+
+def source_stage_values(source_stage: str) -> list[str]:
+    """Return normalized semicolon-delimited source stages."""
+
+    return [
+        value.strip()
+        for value in str(source_stage or "").split(";")
+        if value.strip()
+    ]
+
+
+def is_user_seed_paper(paper: Paper) -> bool:
+    """Return True for user-provided exact or manual seed records."""
+
+    stages = set(source_stage_values(paper.source_stage))
+    return bool(stages & SEED_EXACT_SOURCE_STAGES) or paper.seed_relation == "self"
+
+
+def is_seed_derived_paper(paper: Paper) -> bool:
+    """Return True for records that entered through seed exact/expansion paths."""
+
+    stages = set(source_stage_values(paper.source_stage))
+    return bool(stages & SEED_DERIVED_SOURCE_STAGES) or bool(paper.seed_title)
 
 
 class EvidenceFunction(str, Enum):

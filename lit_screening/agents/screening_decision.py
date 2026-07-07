@@ -10,6 +10,8 @@ from lit_screening.models import (
     AspectCoverageRecord,
     RankedPaper,
     ScreeningDecision,
+    is_user_seed_paper,
+    source_stage_values,
 )
 from lit_screening.utils import clamp
 
@@ -59,6 +61,25 @@ class ScreeningDecisionAgent:
         support_level = item.verification.support_level
         domain_decision = domain.domain_decision if domain else "unknown"
         domain_score = domain.domain_match_score if domain else 0.0
+
+        if is_user_seed_paper(item.paper):
+            stages = set(source_stage_values(item.paper.source_stage))
+            primary = "seed_exact_match" if "seed_exact" in stages else "user_seed"
+            return ScreeningDecision(
+                paper_id=item.paper.paper_id,
+                decision="include",
+                decision_confidence=0.98,
+                primary_reason=primary,
+                exclusion_reasons=[],
+                required_aspects_covered=covered,
+                required_aspects_missing=missing,
+                domain_match_score=max(domain_score, 1.0),
+                domain_decision="in_scope"
+                if domain_decision in {"unknown", "out_of_scope", "borderline"}
+                else domain_decision,
+                reading_priority="must_read",
+                suggested_action="include",
+            )
 
         if is_duplicate:
             decision = "exclude"

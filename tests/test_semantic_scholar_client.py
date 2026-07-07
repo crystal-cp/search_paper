@@ -1,4 +1,7 @@
-from lit_screening.retrieval.semantic_scholar_client import SemanticScholarClient
+from lit_screening.retrieval.semantic_scholar_client import (
+    SemanticScholarClient,
+    semantic_scholar_expansion_fields,
+)
 
 
 def test_semantic_scholar_normalizer_handles_null_collection_fields():
@@ -26,3 +29,11 @@ def test_semantic_scholar_normalizer_handles_null_collection_fields():
     assert papers[0].authors == []
     assert papers[0].publication_types == []
     assert papers[0].fields_of_study == []
+
+
+def test_semantic_scholar_expansion_fields_drop_tldr():
+    fields = semantic_scholar_expansion_fields(
+        "paperId,title,tldr,citedPaper.tldr,abstract"
+    )
+
+    assert fields == "paperId,title,abstract"

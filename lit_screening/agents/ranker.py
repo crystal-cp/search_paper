@@ -13,6 +13,8 @@ from lit_screening.models import (
     QueryPlan,
     RankedPaper,
     VerificationResult,
+    is_user_seed_paper,
+    source_stage_values,
 )
 from lit_screening.scoring import compute_score_breakdown
 
@@ -65,6 +67,7 @@ class RankerAgent:
                 ).aspect_coverage_score,
                 domain_assessment=domain_assessment,
             )
+            scores = seed_score_floor(paper, scores)
             preliminary.append(
                 RankedPaper(
                     0,
@@ -100,7 +103,25 @@ class RankerAgent:
                 ).aspect_coverage_score,
                 domain_assessment=item.domain_assessment,
             )
+            scores = seed_score_floor(item.paper, scores)
             reranked.append(replace(item, scores=scores))
 
         reranked.sort(key=lambda item: item.scores.final_score, reverse=True)
         return [replace(item, rank=index + 1) for index, item in enumerate(reranked)]
+
+
+def seed_score_floor(paper: Paper, scores):
+    """Keep user-provided seed anchors at the top of the ranked list."""
+
+    if not is_user_seed_paper(paper):
+        return scores
+    stages = set(source_stage_values(paper.source_stage))
+    floor = 0.995 if "seed_exact" in stages else 0.985
+    if scores.final_score >= floor:
+        return scores
+    return replace(
+        scores,
+        final_score=floor,
+        pre_domain_final_score=max(scores.pre_domain_final_score, floor),
+        domain_penalty_multiplier=1.0,
+    )

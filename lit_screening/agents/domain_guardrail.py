@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from lit_screening.models import DomainAssessment, DomainProfile, Paper, QueryPlan, SearchContract
+from lit_screening.models import (
+    DomainAssessment,
+    DomainProfile,
+    Paper,
+    QueryPlan,
+    SearchContract,
+    is_user_seed_paper,
+)
 from lit_screening.utils import clamp, tokenize
 
 
@@ -18,6 +25,18 @@ class DomainGuardrailAgent:
         query_plan: QueryPlan | None = None,
     ) -> DomainAssessment:
         """Return a domain decision for one paper."""
+
+        if is_user_seed_paper(paper):
+            return DomainAssessment(
+                paper_id=paper.paper_id,
+                domain_match_score=1.0,
+                domain_decision="in_scope",
+                off_topic_reason="User-provided seed paper retained as an in-scope anchor.",
+                positive_domain_matches=["user_seed"],
+                negative_domain_matches=[],
+                missing_required_concepts=[],
+                forbidden_concepts_found=[],
+            )
 
         contract = contract_or_profile if isinstance(contract_or_profile, SearchContract) else None
         profile = (

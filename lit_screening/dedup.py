@@ -6,7 +6,7 @@ import re
 import string
 from dataclasses import replace
 
-from .models import Paper
+from .models import Paper, source_stage_values
 
 
 def normalize_doi(doi: str | None) -> str:
@@ -56,6 +56,26 @@ def _merge_unique_text_values(*values: str) -> str:
     return ";".join(merged)
 
 
+def _merge_source_stage_values(*values: str) -> str:
+    """Merge stages while keeping seed stages as the primary provenance."""
+
+    stages: list[str] = []
+    for value in values:
+        for stage in source_stage_values(value):
+            if stage and stage not in stages:
+                stages.append(stage)
+    for seed_stage in [
+        "manual_seed",
+        "seed_exact",
+        "seed_reference",
+        "seed_citation",
+        "seed_recommendation",
+    ]:
+        if seed_stage in stages:
+            return seed_stage
+    return ";".join(stages)
+
+
 def merge_papers(left: Paper, right: Paper) -> Paper:
     """Merge duplicate paper records, keeping the more complete base record."""
 
@@ -103,7 +123,7 @@ def merge_papers(left: Paper, right: Paper) -> Paper:
             base.retrieval_query,
             other.retrieval_query,
         ),
-        source_stage=_merge_unique_text_values(
+        source_stage=_merge_source_stage_values(
             base.source_stage,
             other.source_stage,
         ),
@@ -119,6 +139,8 @@ def merge_papers(left: Paper, right: Paper) -> Paper:
             base.seed_reason,
             other.seed_reason,
         ),
+        seed_relation=base.seed_relation or other.seed_relation,
+        seed_confidence=max(base.seed_confidence, other.seed_confidence),
         provider_ids=provider_ids,
         citation_count=max(base.citation_count, other.citation_count),
         api_relevance_score=max(base.api_relevance_score, other.api_relevance_score),

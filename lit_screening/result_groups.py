@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from lit_screening.models import AspectCoverageRecord, RankedPaper, SearchBrief
+from lit_screening.models import (
+    AspectCoverageRecord,
+    RankedPaper,
+    SearchBrief,
+    is_user_seed_paper,
+)
 
 
 GROUP_NAMES = [
@@ -48,6 +53,8 @@ def recommended_role(item: RankedPaper, aspect_score: float, intent: str = "over
     """Recommend how a paper should be used by the reader."""
 
     text = " ".join([item.paper.title, item.paper.venue, item.evidence.claim]).lower()
+    if is_user_seed_paper(item.paper):
+        return "user_seed"
     if item.verification.support_level in {"unverified", "missing_abstract", "llm_invalid_evidence"}:
         return "uncertain"
     if "review" in text or "survey" in text:
@@ -64,6 +71,8 @@ def recommended_role(item: RankedPaper, aspect_score: float, intent: str = "over
 
 
 def _group_name(item: RankedPaper, aspect_score: float, role: str) -> str:
+    if is_user_seed_paper(item.paper):
+        return "must_read"
     if item.verification.support_level in {"missing_abstract", "llm_invalid_evidence"}:
         return "excluded_or_low_confidence"
     if item.scores.final_score >= 0.65 and aspect_score >= 0.5:

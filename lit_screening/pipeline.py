@@ -28,7 +28,13 @@ from .agents.retriever import RetrieverAgent
 from .agents.search_contract import SearchContractAgent
 from .agents.screening_decision import ScreeningDecisionAgent, summarize_screening_decisions
 from .agents.seed_extraction import SeedExtractionAgent
-from .agents.snowball import CitationSnowballAgent, parse_seed_file, parse_seed_values
+from .agents.snowball import (
+    CitationSnowballAgent,
+    empty_seed_expansion_report,
+    parse_seed_file,
+    parse_seed_values,
+    resolve_seed_inputs,
+)
 from .agents.verifier import VerifierAgent
 from .config import PipelineConfig
 from .dedup import deduplicate_with_stats
@@ -62,6 +68,7 @@ from .models import (
     SeedPaper,
     ScreeningDecision,
     VerificationResult,
+    is_user_seed_paper,
 )
 from .paper_cards import generate_paper_cards
 from .reading_path import generate_reading_path
@@ -89,6 +96,8 @@ PAPER_FIELDS = [
     "seed_paper_id",
     "seed_title",
     "seed_reason",
+    "seed_relation",
+    "seed_confidence",
     "citation_count",
 ]
 
@@ -138,6 +147,8 @@ RANKED_FIELDS = [
     "seed_paper_id",
     "seed_title",
     "seed_reason",
+    "seed_relation",
+    "seed_confidence",
     "citation_count",
     "relevance_score",
     "evidence_score",
@@ -211,6 +222,8 @@ RETRIEVAL_PATH_FIELDS = [
     "source_stage",
     "seed_paper_id",
     "seed_title",
+    "seed_relation",
+    "seed_confidence",
     "reason",
 ]
 
@@ -234,6 +247,8 @@ def paper_to_row(paper: Paper) -> dict[str, Any]:
         "seed_paper_id": paper.seed_paper_id,
         "seed_title": paper.seed_title,
         "seed_reason": paper.seed_reason,
+        "seed_relation": paper.seed_relation,
+        "seed_confidence": f"{paper.seed_confidence:.4f}" if paper.seed_confidence else "",
         "citation_count": paper.citation_count,
     }
 
@@ -304,6 +319,8 @@ def ranked_to_row(item: RankedPaper) -> dict[str, Any]:
         "seed_paper_id": item.paper.seed_paper_id,
         "seed_title": item.paper.seed_title,
         "seed_reason": item.paper.seed_reason,
+        "seed_relation": item.paper.seed_relation,
+        "seed_confidence": f"{item.paper.seed_confidence:.4f}" if item.paper.seed_confidence else "",
         "citation_count": item.paper.citation_count,
         "relevance_score": f"{item.scores.relevance_score:.4f}",
         "evidence_score": f"{item.scores.evidence_score:.4f}",
@@ -389,6 +406,8 @@ def retrieval_path_to_row(record: RetrievalPath) -> dict[str, Any]:
         "source_stage": record.source_stage,
         "seed_paper_id": record.seed_paper_id,
         "seed_title": record.seed_title,
+        "seed_relation": record.seed_relation,
+        "seed_confidence": f"{record.seed_confidence:.4f}" if record.seed_confidence else "",
         "reason": record.reason,
     }
 
@@ -1447,6 +1466,8 @@ def annotate_papers_with_query_provenance(
                 "matched_query_purpose": record.get("purpose", ""),
             }
         )
+        if record.get("source") == "query_family" and not is_user_seed_paper(paper):
+            paper.source_stage = "query_family"
 
 
 def enrich_query_provenance_with_results(
@@ -1775,8 +1796,13 @@ def filter_papers_by_from_year(
     kept: list[Paper] = []
     excluded_before = 0
     excluded_missing = 0
+    seed_exempt = 0
     examples: list[dict[str, Any]] = []
     for paper in papers:
+        if is_user_seed_paper(paper):
+            kept.append(paper)
+            seed_exempt += 1
+            continue
         if paper.year is None:
             excluded_missing += 1
             if len(examples) < 10:
@@ -1809,6 +1835,7 @@ def filter_papers_by_from_year(
         "kept_count": len(kept),
         "excluded_before_year_count": excluded_before,
         "excluded_missing_year_count": excluded_missing,
+        "seed_exempt_count": seed_exempt,
         "excluded_examples": examples,
     }
 
@@ -2191,6 +2218,37 @@ def run_pipeline(
         *parse_seed_values(seed_papers),
         *parse_seed_file(seed_file),
     ]
+    seed_exact_papers, resolved_seed_papers, seed_resolution_report = resolve_seed_inputs(
+        user_seed_papers,
+        clients=retriever.clients,
+    )
+    write_json(out / "seed_resolution_report.json", seed_resolution_report)
+    seed_expansion_report = empty_seed_expansion_report(
+        seed_input_count=len(user_seed_papers),
+        enabled=enable_snowballing,
+    )
+    seed_expansion_report["seed_resolved_count"] = seed_resolution_report.get(
+        "seed_resolved_count",
+        0,
+    )
+    seed_expansion_report["seed_unresolved_count"] = seed_resolution_report.get(
+        "seed_unresolved_count",
+        0,
+    )
+    seed_expansion_report["provider_errors"] = list(
+        seed_resolution_report.get("provider_errors", [])
+    )
+    if progress_callback:
+        progress_callback(
+            "seed_resolution",
+            "Resolved or retained user-provided seed papers",
+            {
+                "seed_input_count": seed_resolution_report["seed_input_count"],
+                "seed_resolved_count": seed_resolution_report["seed_resolved_count"],
+                "seed_unresolved_count": seed_resolution_report["seed_unresolved_count"],
+                "seed_exact_paper_count": len(seed_exact_papers),
+            },
+        )
     raw_papers, raw_by_provider, retrieval_counts = retriever.retrieve(
         queries=queries_by_provider,
         providers=providers,
@@ -2201,6 +2259,9 @@ def run_pipeline(
         sort_mode=sort_preference,
         openalex_mode=openalex_mode,
     )
+    if seed_exact_papers:
+        raw_papers = [*seed_exact_papers, *raw_papers]
+        retrieval_counts["seed_exact"] = len(seed_exact_papers)
     annotate_papers_with_query_provenance(raw_papers, query_provenance)
     query_provenance = enrich_query_provenance_with_results(
         query_provenance,
@@ -2408,7 +2469,6 @@ def run_pipeline(
 
     citation_expansion_papers: list[Paper] = []
     retrieval_paths: list[RetrievalPath] = []
-    resolved_seed_papers = user_seed_papers
     if enable_snowballing:
         if progress_callback:
             progress_callback(
@@ -2423,14 +2483,39 @@ def run_pipeline(
             semantic_scholar_client=retriever.clients.get("semantic_scholar"),
             enabled=True,
         )
-        citation_expansion_papers, retrieval_paths, resolved_seed_papers = (
+        citation_expansion_papers, retrieval_paths, snowball_seed_papers = (
             active_snowball_agent.expand(
                 existing_papers=merged_papers,
                 ranked_papers=ranked_before_feedback,
-                seed_papers=user_seed_papers or None,
+                seed_papers=resolved_seed_papers or user_seed_papers or None,
                 top_n=snowball_top_n,
             )
         )
+        if snowball_seed_papers:
+            resolved_seed_papers = snowball_seed_papers
+        agent_expansion_report = getattr(
+            active_snowball_agent,
+            "last_expansion_report",
+            None,
+        )
+        if isinstance(agent_expansion_report, dict):
+            seed_expansion_report = {
+                **seed_expansion_report,
+                **agent_expansion_report,
+                "seed_input_count": len(user_seed_papers),
+                "seed_resolved_count": seed_resolution_report.get(
+                    "seed_resolved_count",
+                    0,
+                ),
+                "seed_unresolved_count": seed_resolution_report.get(
+                    "seed_unresolved_count",
+                    0,
+                ),
+                "provider_errors": [
+                    *list(seed_resolution_report.get("provider_errors", [])),
+                    *list(agent_expansion_report.get("provider_errors", [])),
+                ],
+            }
         raw_paper_count_before_year_filter += len(citation_expansion_papers)
         retrieval_counts["citation_snowball"] = len(citation_expansion_papers)
         if citation_expansion_papers:
@@ -2489,6 +2574,33 @@ def run_pipeline(
                     "retrieval_path_count": len(retrieval_paths),
                 },
             )
+    seed_expansion_report["expanded_paper_count"] = len(citation_expansion_papers)
+    seed_expansion_report["retrieval_path_count"] = len(retrieval_paths)
+    seed_expansion_report["references_retrieved"] = max(
+        int(seed_expansion_report.get("references_retrieved") or 0),
+        sum(
+            1
+            for path in retrieval_paths
+            if path.source_stage in {"reference", "seed_reference"}
+        ),
+    )
+    seed_expansion_report["citations_retrieved"] = max(
+        int(seed_expansion_report.get("citations_retrieved") or 0),
+        sum(
+            1
+            for path in retrieval_paths
+            if path.source_stage in {"citation", "seed_citation"}
+        ),
+    )
+    seed_expansion_report["recommendations_retrieved"] = max(
+        int(seed_expansion_report.get("recommendations_retrieved") or 0),
+        sum(
+            1
+            for path in retrieval_paths
+            if path.source_stage in {"recommendation", "seed_recommendation"}
+        ),
+    )
+    write_json(out / "seed_expansion_report.json", seed_expansion_report)
 
     paper_role_records = PaperRoleClassifier().classify_many(
         merged_papers,
@@ -2655,11 +2767,28 @@ def run_pipeline(
     metrics["seed_paper_expansion"] = {
         "enabled": enable_snowballing,
         "seed_count": len(resolved_seed_papers),
+        "seed_input_count": len(user_seed_papers),
+        "seed_resolved_count": seed_resolution_report.get("seed_resolved_count", 0),
+        "seed_unresolved_count": seed_resolution_report.get("seed_unresolved_count", 0),
         "expanded_paper_count": len(citation_expansion_papers),
         "retrieval_path_count": len(retrieval_paths),
+        "references_retrieved": seed_expansion_report.get("references_retrieved", 0),
+        "citations_retrieved": seed_expansion_report.get("citations_retrieved", 0),
+        "recommendations_retrieved": seed_expansion_report.get(
+            "recommendations_retrieved",
+            0,
+        ),
+        "provider_errors": seed_expansion_report.get("provider_errors", []),
         "source_stage_counts": {
             stage: sum(1 for path in retrieval_paths if path.source_stage == stage)
-            for stage in ["reference", "citation", "recommendation"]
+            for stage in [
+                "seed_reference",
+                "seed_citation",
+                "seed_recommendation",
+                "reference",
+                "citation",
+                "recommendation",
+            ]
         },
     }
     metrics["screening_decisions"] = summarize_screening_decisions(
@@ -2784,6 +2913,8 @@ def run_pipeline(
     trace["seed_paper_expansion"] = {
         "enabled": enable_snowballing,
         "seed_papers": resolved_seed_papers,
+        "seed_resolution_report": seed_resolution_report,
+        "seed_expansion_report": seed_expansion_report,
         "retrieval_paths": retrieval_paths,
         "expanded_paper_count": len(citation_expansion_papers),
         "decision": "Expanded from user-provided or high-confidence seed papers when enabled.",

@@ -21,6 +21,7 @@ DEFAULT_SEMANTIC_SCHOLAR_FIELDS = (
     "citationCount,influentialCitationCount,referenceCount,externalIds,url,"
     "openAccessPdf,fieldsOfStudy,s2FieldsOfStudy,tldr"
 )
+SEMANTIC_SCHOLAR_EXPANSION_UNSUPPORTED_FIELDS = {"tldr"}
 
 
 class SemanticScholarClient:
@@ -154,7 +155,7 @@ class SemanticScholarClient:
             return RetrievalResult(raw={"data": []}, papers=[])
         raw = self._get_json(
             f"{self.recommendations_base_url}/papers/forpaper/{quote(paper_id, safe=':')}",
-            {"limit": limit, "fields": self.fields},
+            {"limit": limit, "fields": self._expansion_fields()},
         )
         items = as_list(raw.get("recommendedPapers")) or as_list(raw.get("data"))
         papers = [
@@ -177,7 +178,7 @@ class SemanticScholarClient:
             return RetrievalResult(raw={"data": []}, papers=[])
         nested_fields = ",".join(
             f"{nested_key}.{field.strip()}"
-            for field in self.fields.split(",")
+            for field in self._expansion_fields().split(",")
             if field.strip()
         )
         raw = self._get_json(
@@ -285,6 +286,11 @@ class SemanticScholarClient:
             raw=item,
         )
 
+    def _expansion_fields(self) -> str:
+        """Return Semantic Scholar fields accepted by expansion endpoints."""
+
+        return semantic_scholar_expansion_fields(self.fields)
+
 
 def as_list(value: Any) -> list[Any]:
     """Return a list for provider fields that may be null."""
@@ -296,6 +302,21 @@ def as_dict(value: Any) -> dict[str, Any]:
     """Return a dict for provider fields that may be null."""
 
     return value if isinstance(value, dict) else {}
+
+
+def semantic_scholar_expansion_fields(fields: str) -> str:
+    """Drop fields not accepted by S2 link/recommendation endpoints."""
+
+    cleaned: list[str] = []
+    for field in fields.split(","):
+        name = field.strip()
+        if not name:
+            continue
+        leaf_name = name.rsplit(".", maxsplit=1)[-1]
+        if leaf_name in SEMANTIC_SCHOLAR_EXPANSION_UNSUPPORTED_FIELDS:
+            continue
+        cleaned.append(name)
+    return ",".join(cleaned)
 
 
 def request_error_details(exc: requests.RequestException) -> dict[str, Any]:
