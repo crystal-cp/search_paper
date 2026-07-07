@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from lit_screening.agents.aspect_classifier import AspectCoverageAgent
 from lit_screening.agents.planner import PlannerAgent
 from lit_screening.agents.research_intent import ResearchIntentAgent

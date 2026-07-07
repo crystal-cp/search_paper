@@ -1,0 +1,58 @@
+{
+  "user_question": "有没有和 Nicola A. Spaldin 的 Surface Magnetization in Antiferromagnets: Classification, Example Materials, and Relation to Magnetoelectric Responses 和 Local Magnetoelectric Effects as Predictors of Surface Magnetic Order 相关的有关探测表面磁化和自旋极化的重要性的文章",
+  "expected_concepts": [
+    "surface magnetization",
+    "boundary magnetization",
+    "spin polarization",
+    "antiferromagnet",
+    "local magnetoelectric response",
+    "magnetic multipole"
+  ],
+  "expected_materials": [
+    "Cr2O3",
+    "chromia",
+    "FeF2",
+    "NiO",
+    "CuMnAs"
+  ],
+  "expected_methods": [
+    "SPLEEM",
+    "XMCD-PEEM",
+    "spin-resolved photoemission",
+    "SP-STM",
+    "NV magnetometry"
+  ],
+  "expected_lenses": [
+    "theory_origin",
+    "spaldin_framework",
+    "direct_surface_detection",
+    "nanoscale_readout",
+    "local_magnetoelectric_predictor",
+    "applications",
+    "limitations"
+  ],
+  "expected_query_phrases": [
+    "boundary magnetization",
+    "magnetoelectric antiferromagnet",
+    "Cr2O3 surface magnetization",
+    "SPLEEM",
+    "local magnetoelectric effects",
+    "surface magnetic order",
+    "NV magnetometry"
+  ],
+  "expected_roles": [
+    "theory_origin",
+    "conceptual_framework",
+    "experimental_proof",
+    "surface_probe_method",
+    "nanoscale_readout",
+    "application_bridge",
+    "limitation_or_challenge"
+  ],
+  "expected_gaps": [
+    "finite_temperature_effect",
+    "roughness_and_termination",
+    "direct_surface_probe_gap",
+    "material_coverage_gap"
+  ]
+}

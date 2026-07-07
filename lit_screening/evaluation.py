@@ -10,6 +10,10 @@ from typing import Any
 from .models import EvidenceRecord, Paper, RankedPaper, VerificationResult
 from .utils import write_json
 
+# Keep this legacy module import-compatible while allowing optional
+# submodules under lit_screening/evaluation/.
+__path__ = [str(Path(__file__).with_suffix(""))]
+
 
 def load_gold_labels(path: str | Path | None) -> dict[str, str]:
     """Load gold labels from CSV if a path is provided."""

@@ -1,0 +1,80 @@
+{
+  "domain_name": "materials_magnetism",
+  "concepts": {
+    "surface_magnetization": {
+      "synonyms": [
+        "surface magnetization",
+        "boundary magnetization",
+        "equilibrium boundary magnetization",
+        "surface magnetic moment",
+        "uncompensated surface magnetization",
+        "interface magnetization"
+      ],
+      "related": [
+        "roughness robust",
+        "roughness sensitive",
+        "surface termination",
+        "compensated surface",
+        "uncompensated antiferromagnetic surface"
+      ]
+    },
+    "surface_spin_polarization": {
+      "synonyms": [
+        "surface spin polarization",
+        "boundary spin polarization",
+        "spin polarization asymmetry",
+        "spin-polarized surface state"
+      ]
+    },
+    "local_magnetoelectricity": {
+      "synonyms": [
+        "local magnetoelectric response",
+        "local magnetoelectric effect",
+        "atomic-site magnetoelectric response",
+        "magnetoelectric multipole",
+        "magnetoelectric multipolization",
+        "magnetic multipole"
+      ]
+    }
+  },
+  "materials": [
+    "Cr2O3",
+    "chromia",
+    "FeF2",
+    "NiO",
+    "CuMnAs",
+    "Mn2Au",
+    "FeSn",
+    "Mn/W(110)"
+  ],
+  "methods": [
+    "SPLEEM",
+    "spin-polarized low-energy electron microscopy",
+    "spin-resolved photoemission",
+    "spin-polarized photoemission",
+    "XMCD-PEEM",
+    "XMLD-PEEM",
+    "NV magnetometry",
+    "scanning diamond magnetometry",
+    "MFM",
+    "SP-STM",
+    "spin-polarized STM",
+    "SHG",
+    "SARPES"
+  ],
+  "applications": [
+    "exchange bias",
+    "magnetoelectric memory",
+    "antiferromagnetic spintronics",
+    "Neel vector readout",
+    "Néel vector readout"
+  ],
+  "false_positive_terms": [
+    "clinical screening",
+    "drug screening",
+    "LLM literature screening",
+    "generic ferromagnetic thin films",
+    "magnetic nanoparticles",
+    "superparamagnetic nanoparticles"
+  ]
+}

@@ -190,6 +190,10 @@ The UI also supports:
   by default but remains available for auditing the exact query plan used.
 - Project-style tabs for `Research Intent`, `Search Strategy`, `Results Map`,
   `Paper Cards`, `Feedback`, `Report & Export`, `Trace`, and `Metrics`.
+- The `Research Whiteboard` tab summarizes generated sensemaking artifacts before
+  the user dives into ranked papers: concept map, query families, seed hints,
+  query provenance, paper role distribution, evidence functions, research
+  tensions, and suggested next searches.
 - Aspect coverage tables, grouped result lists, a PRISMA-like screening flow,
   recommended reading path, and top-paper evidence cards.
 - Existing-library import from BibTeX, RIS, or CSV. Imported records are merged
@@ -229,6 +233,123 @@ python -m lit_screening.pipeline run \
   --output-dir outputs
 ```
 
+## Research Sensemaking Mode
+
+Research Sensemaking Mode is an explanatory layer around the existing screening
+pipeline. It helps the system show how it understood the research question,
+which concepts it split the question into, why different search routes exist,
+and which parts of the resulting literature map are verified or still uncertain.
+It does not replace the legacy `QueryPlan`: by default retrieval still uses
+`planned_queries.json`. Query-family retrieval is opt-in through
+`use_query_families=True` / `--use-query-families`.
+
+### Domain Packs
+
+Domain packs are small JSON knowledge files under `lit_screening/domain_packs/`.
+They hold domain terms, synonyms, materials, methods, applications, and
+false-positive terms without adding YAML or heavy ontology dependencies. The
+first pack is `materials_magnetism.json`, covering concepts such as surface
+magnetization, boundary magnetization, surface spin polarization, local
+magnetoelectric response, Cr2O3/chromia, FeF2, NiO, CuMnAs, SPLEEM, XMCD-PEEM,
+SP-STM, NV magnetometry, and common off-topic phrases.
+
+Use `load_domain_pack("materials_magnetism")` and `list_domain_packs()` from
+`lit_screening.domain_packs.loader` when adding or testing domain-aware logic.
+Keep domain packs lightweight, fixture-backed, and safe to load without network
+or API keys.
+
+### ResearchLens and QueryFamily
+
+`ResearchLens` represents a researcher-style angle on the question, for example
+`theory_origin`, `spaldin_framework`, `direct_surface_detection`,
+`nanoscale_readout`, `local_magnetoelectric_predictor`, `applications`,
+`limitations`, or `frontier`. `ConceptMapper` writes these lenses to
+`concept_map.json`.
+
+`QueryFamily` explains why a set of provider queries exists for a lens. For
+example, a `direct_surface_detection` family may search SPLEEM, XMCD-PEEM,
+spin-resolved photoemission, and SP-STM routes, while `nanoscale_readout` may
+search NV and scanning diamond magnetometry routes. `QueryFamilyPlanner` writes
+these route explanations to `query_families.json`.
+
+The current default is conservative: query families are documented but do not
+change retrieval unless the query-family feature flag is enabled. When enabled,
+the pipeline writes `query_provenance.json` so each added query records its
+provider, source, family name, lens name, and purpose.
+
+### Seed hints
+
+`SeedExtractionAgent` extracts lightweight seed hints from the user question:
+explicit titles, DOI strings, arXiv IDs, and author mentions such as Nicola A.
+Spaldin. These hints are written to `seed_hints.json`. Seed hints can strengthen
+research lenses and query families, but they do not trigger citation expansion
+unless the existing Seed Paper Mode and snowballing flags are explicitly used.
+
+### Paper roles
+
+`PaperRoleClassifier` assigns rule-based research roles from title, abstract,
+venue, year, and query provenance. Roles include `theory_origin`,
+`conceptual_framework`, `experimental_proof`, `surface_probe_method`,
+`nanoscale_readout`, `material_case`, `application_bridge`,
+`frontier_extension`, `limitation_or_challenge`, and `review_background`.
+The role records are written to `paper_roles.json` and used by the report and
+Research Whiteboard to organize papers by research lineage rather than only by
+final score.
+
+### Research Process Report
+
+The Research Process Report is currently the `# Research Process` section inside
+`report.md`; the pipeline does not write a separate `research_process_report.md`
+file. This section summarizes:
+
+- research question interpretation,
+- concept decomposition,
+- search lenses and query families,
+- screening and inclusion criteria,
+- paper roles and why they matter,
+- research lineage,
+- controversies, limitations, and gaps,
+- missing keywords, methods, authors, or schools,
+- suggested next searches,
+- verified vs uncertain findings.
+
+If an artifact was not generated, the report says `Not generated in this run.`
+It must not invent citation relations. Unless citation or snowballing artifacts
+verify a link, the report states that the citation relation is not verified.
+
+### Exploration quality metrics
+
+`lit_screening/evaluation/exploration_quality.py` adds an exploration-quality
+summary without replacing ranking metrics such as precision@k or nDCG. It writes
+`exploration_quality.json` with first-pass measures for concept coverage, query
+family coverage, paper role diversity, seed hint utilization, evidence function
+diversity, gap specificity, and research tension count.
+
+### Materials Magnetism Example
+
+For an offline check of the Spaldin surface-magnetization case, run:
+
+```bash
+python -m lit_screening.pipeline run \
+  --question "有没有和 Nicola A. Spaldin 的 Surface Magnetization in Antiferromagnets 和 Local Magnetoelectric Effects as Predictors of Surface Magnetic Order 相关的探测表面磁化和自旋极化重要性的文章" \
+  --providers openalex semantic_scholar \
+  --max-per-query 0 \
+  --output-dir outputs/spaldin_surface_demo
+```
+
+Expected sensemaking outputs include:
+
+- `outputs/spaldin_surface_demo/concept_map.json`
+- `outputs/spaldin_surface_demo/query_families.json`
+- `outputs/spaldin_surface_demo/seed_hints.json`
+- `outputs/spaldin_surface_demo/paper_roles.json`
+- `outputs/spaldin_surface_demo/exploration_quality.json`
+- `outputs/spaldin_surface_demo/report.md`, including the Research Process section
+
+With `--max-per-query 0`, paper-dependent artifacts such as `paper_roles.json`
+may be empty, but the concept map, seed hints, query-family rationale, and report
+structure should still be available for review.
+
 ## Outputs
 
 The pipeline writes:
@@ -238,12 +359,19 @@ The pipeline writes:
 - `outputs/search_contract.json`
 - `outputs/ambiguity_analysis.json`
 - `outputs/question_refinement.json`
+- `outputs/concept_map.json`
+- `outputs/query_families.json`
+- `outputs/seed_hints.json`
+- `outputs/query_provenance.json`
 - `outputs/raw_openalex_results.json`
 - `outputs/raw_semantic_scholar_results.json`
 - `outputs/merged_papers.csv`
 - `outputs/evidence_table.csv`
+- `outputs/evidence_functions.json`
 - `outputs/aspect_coverage.csv`
 - `outputs/domain_assessments.json`
+- `outputs/paper_roles.json`
+- `outputs/research_tensions.json`
 - `outputs/screening_decisions.csv`
 - `outputs/screening_decisions.json`
 - `outputs/preference_learning.json`
@@ -273,6 +401,7 @@ The pipeline writes:
 - `outputs/paper_cards.md`
 - `outputs/reading_path.md`
 - `outputs/report.md`
+- `outputs/exploration_quality.json`
 
 Raw cache files are stored under `data/cache/` and ignored by git.
 
@@ -301,6 +430,10 @@ priority, suggested action, and normalized exclusion reasons.
 `preference_learning.json` and `feedback_query_refinement.json` record terms
 learned from human include/exclude feedback and suggested terms for the next
 retrieval run.
+`concept_map.json`, `query_families.json`, `seed_hints.json`,
+`query_provenance.json`, `paper_roles.json`, `evidence_functions.json`, and
+`research_tensions.json` are the Research Sensemaking artifacts used by the
+Research Whiteboard and the Research Process section of `report.md`.
 `seed_papers.json`, `citation_expansion.csv`, and `retrieval_paths.csv` record
 Seed Paper Mode inputs, expanded candidate papers, and why each expanded paper
 entered the candidate set.
@@ -310,6 +443,9 @@ are represented, what gaps remain, and what to search next.
 `query_pilot_diagnostics.json` and `query_repair_suggestions.json` are written
 for the optional pilot-search workflow. Pilot search is off by default and runs
 only when requested through the UI or CLI flags such as `--pilot-search`.
+`exploration_quality.json` summarizes concept coverage, query-family coverage,
+paper-role diversity, seed-hint utilization, evidence-function diversity, gap
+specificity, and research tension count.
 
 `ranked_papers.csv` includes provenance columns such as `retrieval_provider`,
 `retrieval_stage`, `retrieval_query`, `source_stage`, `seed_paper_id`,

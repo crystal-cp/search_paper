@@ -477,6 +477,61 @@ def read_json_file(path: str | Path) -> dict[str, Any]:
         return {}
 
 
+def read_json_artifact(path: str | Path) -> Any | None:
+    """Read a JSON artifact that may be a dict or list."""
+
+    candidate = Path(path)
+    if not candidate.exists():
+        return None
+    try:
+        return json.loads(candidate.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def artifact_missing_message(language: str) -> str:
+    """Return the standard missing-artifact message."""
+
+    return "Not available for this run."
+
+
+def as_records(value: Any) -> list[dict[str, Any]]:
+    """Return a list of dict records for table rendering."""
+
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def safe_join_values(value: Any, limit: int = 12) -> str:
+    """Render list-like values compactly for tables."""
+
+    if isinstance(value, list):
+        return "; ".join(str(item) for item in value[:limit])
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value or "")
+
+
+def count_values(records: list[dict[str, Any]], field: str) -> pd.DataFrame:
+    """Build a simple distribution dataframe."""
+
+    counts: dict[str, int] = {}
+    for record in records:
+        value = record.get(field)
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            key = str(item or "").strip()
+            if not key:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+    rows = [
+        {"value": key, "count": count}
+        for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    return pd.DataFrame(rows)
+
+
 def set_runtime_api_keys() -> None:
     """Apply user-entered API keys to the current Streamlit process only."""
 
@@ -1960,6 +2015,304 @@ def render_markdown_artifact(path: str | Path, empty_message: str) -> None:
         st.info(empty_message)
 
 
+def render_artifact_missing(language: str) -> None:
+    """Render the standard message for absent whiteboard artifacts."""
+
+    st.info(artifact_missing_message(language))
+
+
+def render_research_question_interpretation(
+    output_dir: Path,
+    result: PipelineResult | None,
+    language: str,
+) -> None:
+    """Render SearchBrief/SearchContract interpretation for the whiteboard."""
+
+    st.subheader("Research question interpretation")
+    search_brief = read_json_artifact(output_dir / "search_brief.json")
+    search_contract = read_json_artifact(output_dir / "search_contract.json")
+    if search_brief is None and result and result.search_brief:
+        search_brief = {
+            "refined_question": result.search_brief.refined_question,
+            "search_intent": result.search_brief.search_intent,
+            "user_goal": result.search_brief.user_goal,
+            "inclusion_criteria": result.search_brief.inclusion_criteria,
+            "exclusion_criteria": result.search_brief.exclusion_criteria,
+            "required_aspects": result.search_brief.required_aspects,
+        }
+    if search_contract is None and result and result.search_contract:
+        search_contract = {
+            "domain": result.search_contract.domain_profile.domain_name,
+            "must_include_concepts": result.search_contract.must_include_concepts,
+            "must_exclude_concepts": result.search_contract.must_exclude_concepts,
+            "required_aspects": result.search_contract.required_aspects,
+        }
+    if not isinstance(search_brief, dict) and not isinstance(search_contract, dict):
+        render_artifact_missing(language)
+        return
+    rows: list[dict[str, str]] = []
+    if isinstance(search_brief, dict):
+        for field in [
+            "refined_question",
+            "search_intent",
+            "user_goal",
+            "inclusion_criteria",
+            "exclusion_criteria",
+            "required_aspects",
+            "preferred_paper_types",
+            "success_definition",
+        ]:
+            if field in search_brief:
+                rows.append({"field": field, "value": safe_join_values(search_brief.get(field))})
+    if isinstance(search_contract, dict):
+        domain = search_contract.get("domain")
+        if not domain and isinstance(search_contract.get("domain_profile"), dict):
+            domain = search_contract["domain_profile"].get("domain_name", "")
+        rows.append({"field": "domain", "value": str(domain or "")})
+        for field in [
+            "must_include_concepts",
+            "must_exclude_concepts",
+            "required_aspects",
+        ]:
+            if field in search_contract:
+                rows.append({"field": field, "value": safe_join_values(search_contract.get(field))})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def render_concept_map_whiteboard(output_dir: Path, language: str) -> None:
+    """Render concept map and research lenses."""
+
+    st.subheader("Concept map / Research lenses")
+    concept_map = read_json_artifact(output_dir / "concept_map.json")
+    if not isinstance(concept_map, dict):
+        render_artifact_missing(language)
+        return
+    st.caption(f"Domain: {concept_map.get('domain', '')}")
+    st.write(concept_map.get("central_question", ""))
+    rows = []
+    for lens in as_records(concept_map.get("lenses", [])):
+        rows.append(
+            {
+                "name": lens.get("name", ""),
+                "role": lens.get("role", ""),
+                "question": lens.get("question", ""),
+                "core_concepts": safe_join_values(lens.get("core_concepts")),
+                "materials": safe_join_values(lens.get("materials")),
+                "methods": safe_join_values(lens.get("methods")),
+                "applications": safe_join_values(lens.get("applications")),
+                "expected_evidence_types": safe_join_values(
+                    lens.get("expected_evidence_types")
+                ),
+            }
+        )
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        render_artifact_missing(language)
+
+
+def render_query_families_whiteboard(output_dir: Path, language: str) -> None:
+    """Render query families as provider-query rows."""
+
+    st.subheader("Query families")
+    query_families = read_json_artifact(output_dir / "query_families.json")
+    if not isinstance(query_families, dict):
+        render_artifact_missing(language)
+        return
+    rows = []
+    for family in as_records(query_families.get("families", [])):
+        queries_by_provider = family.get("queries_by_provider", {})
+        if not isinstance(queries_by_provider, dict):
+            queries_by_provider = {}
+        for provider, queries in queries_by_provider.items():
+            rows.append(
+                {
+                    "family name": family.get("name", ""),
+                    "purpose": family.get("purpose", ""),
+                    "provider": provider,
+                    "queries": safe_join_values(queries),
+                    "expected roles": safe_join_values(family.get("expected_paper_roles")),
+                }
+            )
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        render_artifact_missing(language)
+
+
+def render_seed_hints_whiteboard(output_dir: Path, language: str) -> None:
+    """Render extracted seed hints."""
+
+    st.subheader("Seed hints")
+    seed_hints = read_json_artifact(output_dir / "seed_hints.json")
+    rows = as_records(seed_hints)
+    if not rows:
+        render_artifact_missing(language)
+        return
+    display_rows = [
+        {
+            "title": row.get("title", ""),
+            "authors": safe_join_values(row.get("authors")),
+            "doi": row.get("doi", ""),
+            "arxiv_id": row.get("arxiv_id", ""),
+            "confidence": row.get("confidence", ""),
+            "reason": row.get("extraction_reason", ""),
+        }
+        for row in rows
+    ]
+    st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+
+
+def render_query_provenance_whiteboard(output_dir: Path, language: str) -> None:
+    """Render query provenance summary."""
+
+    st.subheader("Query provenance summary")
+    provenance = read_json_artifact(output_dir / "query_provenance.json")
+    if not isinstance(provenance, dict):
+        render_artifact_missing(language)
+        return
+    summary_fields = [
+        "enabled",
+        "applied",
+        "reason",
+        "domain",
+        "old_planner_query_count",
+        "family_candidate_query_count",
+        "family_query_count",
+        "duplicate_family_query_count",
+        "returned_paper_count",
+    ]
+    summary_rows = [
+        {"field": field, "value": safe_join_values(provenance.get(field))}
+        for field in summary_fields
+        if field in provenance
+    ]
+    if "provider_query_counts" in provenance:
+        summary_rows.append(
+            {
+                "field": "provider_query_counts",
+                "value": safe_join_values(provenance.get("provider_query_counts")),
+            }
+        )
+    if summary_rows:
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+    records = as_records(provenance.get("records", []))
+    if records:
+        st.caption("Sample query provenance records")
+        st.dataframe(
+            pd.DataFrame(records[:20]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+def render_paper_role_distribution_whiteboard(output_dir: Path, language: str) -> None:
+    """Render role distribution from paper_roles.json."""
+
+    st.subheader("Paper role distribution")
+    paper_roles = read_json_artifact(output_dir / "paper_roles.json")
+    rows = as_records(paper_roles)
+    if not rows:
+        render_artifact_missing(language)
+        return
+    role_counts = count_values(rows, "roles")
+    primary_counts = count_values(rows, "primary_role")
+    cols = st.columns(2)
+    with cols[0]:
+        st.caption("All roles")
+        if not role_counts.empty:
+            st.dataframe(role_counts, use_container_width=True, hide_index=True)
+        else:
+            render_artifact_missing(language)
+    with cols[1]:
+        st.caption("Primary roles")
+        if not primary_counts.empty:
+            st.dataframe(primary_counts, use_container_width=True, hide_index=True)
+        else:
+            render_artifact_missing(language)
+
+
+def render_evidence_function_distribution_whiteboard(
+    output_dir: Path,
+    language: str,
+) -> None:
+    """Render evidence function distribution."""
+
+    st.subheader("Evidence function distribution")
+    evidence_functions = read_json_artifact(output_dir / "evidence_functions.json")
+    rows = as_records(evidence_functions)
+    if not rows:
+        render_artifact_missing(language)
+        return
+    distribution = count_values(rows, "evidence_function")
+    if distribution.empty:
+        render_artifact_missing(language)
+    else:
+        st.dataframe(distribution, use_container_width=True, hide_index=True)
+
+
+def render_research_tensions_whiteboard(output_dir: Path, language: str) -> None:
+    """Render controversy/boundary-condition artifacts."""
+
+    st.subheader("Research tensions")
+    tensions = read_json_artifact(output_dir / "research_tensions.json")
+    rows = as_records(tensions)
+    if not rows:
+        render_artifact_missing(language)
+        return
+    display_rows = [
+        {
+            "tension": row.get("tension_label") or row.get("tension_key", ""),
+            "supporting_paper_ids": safe_join_values(row.get("supporting_paper_ids")),
+            "why_it_matters": row.get("why_it_matters", ""),
+            "suggested_next_searches": safe_join_values(
+                row.get("suggested_next_searches")
+            ),
+            "confidence": row.get("confidence", ""),
+        }
+        for row in rows
+    ]
+    st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+
+
+def render_suggested_next_searches_whiteboard(output_dir: Path, language: str) -> None:
+    """Render suggested next searches."""
+
+    st.subheader("Suggested next searches")
+    next_searches = read_json_artifact(output_dir / "suggested_next_searches.json")
+    rows = as_records(next_searches)
+    if not rows:
+        render_artifact_missing(language)
+        return
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def render_research_whiteboard(
+    output_dir: str | Path,
+    language: str,
+    result: PipelineResult | None = None,
+) -> None:
+    """Render research-process artifacts before ranked-paper inspection."""
+
+    artifact_dir = Path(output_dir)
+    st.caption(
+        ui_text(
+            language,
+            "This whiteboard summarizes generated research-process artifacts for the current run.",
+            "这个白板汇总本次运行已生成的研究过程 artifacts。",
+        )
+    )
+    render_research_question_interpretation(artifact_dir, result, language)
+    render_concept_map_whiteboard(artifact_dir, language)
+    render_query_families_whiteboard(artifact_dir, language)
+    render_seed_hints_whiteboard(artifact_dir, language)
+    render_query_provenance_whiteboard(artifact_dir, language)
+    render_paper_role_distribution_whiteboard(artifact_dir, language)
+    render_evidence_function_distribution_whiteboard(artifact_dir, language)
+    render_research_tensions_whiteboard(artifact_dir, language)
+    render_suggested_next_searches_whiteboard(artifact_dir, language)
+
+
 def render_result(result: PipelineResult, language: str) -> None:
     """Render active project results."""
 
@@ -2037,6 +2390,7 @@ def render_result(result: PipelineResult, language: str) -> None:
         [
             "Research Intent",
             "Search Strategy",
+            "Research Whiteboard",
             "Ranked Papers",
             "Evidence Chain",
             "Results Map",
@@ -2079,6 +2433,9 @@ def render_result(result: PipelineResult, language: str) -> None:
         render_planned_queries(result.planned_queries)
 
     with tabs[2]:
+        render_research_whiteboard(result.output_dir, language, result=result)
+
+    with tabs[3]:
         if result.merged_paper_count == 0:
             st.warning(
                 ui_text(
@@ -2128,7 +2485,7 @@ def render_result(result: PipelineResult, language: str) -> None:
         table = ranked_dataframe(result.ranked_final)
         st.dataframe(table, use_container_width=True, hide_index=True)
 
-    with tabs[3]:
+    with tabs[4]:
         if selected is None:
             st.info(ui_text(language, "Run a screening project and select a paper to inspect evidence.", "先运行一个筛选项目，并选择一篇论文查看 evidence。"))
         else:
@@ -2151,7 +2508,7 @@ def render_result(result: PipelineResult, language: str) -> None:
             )
             st.dataframe(evidence_table, use_container_width=True, hide_index=True)
 
-    with tabs[4]:
+    with tabs[5]:
         st.subheader(ui_text(language, "Aspect Coverage Matrix", "Aspect Coverage 矩阵"))
         render_aspect_coverage(result, language)
         st.subheader(ui_text(language, "Grouped Result Lists", "结果分组"))
@@ -2198,7 +2555,7 @@ def render_result(result: PipelineResult, language: str) -> None:
                 )
             )
 
-    with tabs[5]:
+    with tabs[6]:
         st.subheader(ui_text(language, "Recommended Reading Path", "推荐阅读路径"))
         render_markdown_artifact(
             Path(result.output_dir) / "reading_path.md",
@@ -2210,13 +2567,13 @@ def render_result(result: PipelineResult, language: str) -> None:
             ui_text(language, "paper_cards.md was not generated.", "没有生成 paper_cards.md。"),
         )
 
-    with tabs[6]:
+    with tabs[7]:
         render_feedback_tools(result, language)
         if selected is not None:
             render_manual_feedback(selected, result, language)
         render_preference_learning(result, language)
 
-    with tabs[7]:
+    with tabs[8]:
         render_downloads(result.ranked_papers_path, result.report_path, language)
         extra_artifacts = [
             ("aspect_coverage.csv", Path(result.output_dir) / "aspect_coverage.csv", "text/csv"),
@@ -2242,10 +2599,10 @@ def render_result(result: PipelineResult, language: str) -> None:
                     mime=mime,
                 )
 
-    with tabs[8]:
+    with tabs[9]:
         st.json(result.agent_trace)
 
-    with tabs[9]:
+    with tabs[10]:
         st.json(result.evaluation_metrics)
 
 
@@ -2271,6 +2628,7 @@ def render_saved_project(manifest: dict[str, Any], language: str) -> None:
         [
             "Research Intent",
             "Search Strategy",
+            "Research Whiteboard",
             "Ranked Papers",
             "Results Map",
             "Paper Cards",
@@ -2313,11 +2671,13 @@ def render_saved_project(manifest: dict[str, Any], language: str) -> None:
         render_question_preprocessing(planned.get("question", ""), metadata, language)
         render_planned_queries(planned.get("queries", []))
     with tabs[2]:
+        render_research_whiteboard(output_dir, language)
+    with tabs[3]:
         if ranked_path.exists():
             st.dataframe(pd.read_csv(ranked_path), use_container_width=True)
         else:
             st.warning(ui_text(language, "Saved ranked_papers.csv is missing.", "保存的 ranked_papers.csv 不存在。"))
-    with tabs[3]:
+    with tabs[4]:
         aspect_path = output_dir / "aspect_coverage.csv"
         if aspect_path.exists():
             st.dataframe(pd.read_csv(aspect_path), use_container_width=True)
@@ -2331,7 +2691,7 @@ def render_saved_project(manifest: dict[str, Any], language: str) -> None:
         retrieval_paths_path = output_dir / "retrieval_paths.csv"
         if retrieval_paths_path.exists():
             st.dataframe(pd.read_csv(retrieval_paths_path), use_container_width=True)
-    with tabs[4]:
+    with tabs[5]:
         render_markdown_artifact(
             output_dir / "reading_path.md",
             ui_text(language, "reading_path.md was not generated.", "没有生成 reading_path.md。"),
@@ -2340,11 +2700,11 @@ def render_saved_project(manifest: dict[str, Any], language: str) -> None:
             output_dir / "paper_cards.md",
             ui_text(language, "paper_cards.md was not generated.", "没有生成 paper_cards.md。"),
         )
-    with tabs[5]:
-        render_downloads(str(ranked_path), str(output_dir / "report.md"), language)
     with tabs[6]:
-        st.json(trace)
+        render_downloads(str(ranked_path), str(output_dir / "report.md"), language)
     with tabs[7]:
+        st.json(trace)
+    with tabs[8]:
         st.json(evaluation)
 
 

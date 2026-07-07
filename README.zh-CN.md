@@ -144,6 +144,8 @@ UI 的推荐流程：
 
 Step 3 是一个可折叠检查点，里面分为字段说明、研究意图、术语与 provider queries。第 4 步检索完成后，Step 3 会默认收起，但仍然可以展开查看本次实际使用的 query plan。
 
+UI 还包含 `Research Whiteboard` tab，用来在正式阅读 ranked papers 前查看系统的研究理解过程：concept map、research lenses、query families、seed hints、query provenance、paper role distribution、evidence function distribution、research tensions 和 suggested next searches。缺失的 artifact 会显示 `Not available for this run.`，不会让 UI 报错。
+
 注意：`From year` 只有在 `Apply year filter` 勾选后才生效。启用后，pipeline 会在 provider 返回结果之后再做一次本地硬过滤，早于该年份的论文不会进入 dedup、evidence extraction 或 ranking。缺少年份元数据的论文也会被排除，因为无法证明它满足年份条件。
 
 OpenAlex mode 中的 `keyword`、`exact`、`semantic` 会分别映射到 OpenAlex 请求参数 `search`、`search.exact`、`search.semantic`。`keyword+semantic` 会拆成两次独立检索，并在 diagnostics 里记录为不同 retrieval stage。
@@ -169,6 +171,78 @@ python -m lit_screening.pipeline run \
 
 如果 `DEEPSEEK_API_KEY` 缺失，系统不会失败，会记录 LLM inactive 并自动使用规则版 agents。
 
+## Research Sensemaking Mode
+
+Research Sensemaking Mode 是现有筛选 pipeline 外层的解释层。它负责说明系统如何理解研究问题、如何拆概念、为什么开这些检索路线、哪些结论已经由摘要 span 支持、哪些只是由标题/query/规则推断出来的待验证线索。
+
+它不会替换旧的 `QueryPlan`。默认检索仍然使用 `planned_queries.json`；只有显式开启 `use_query_families=True` 或 CLI 的 `--use-query-families` 时，`QueryFamilyPlan` 里的 query 才会参与检索。
+
+### Domain Packs
+
+Domain pack 是放在 `lit_screening/domain_packs/` 里的轻量 JSON 领域知识文件，不依赖 PyYAML，也不引入复杂 ontology。第一版领域包是 `materials_magnetism.json`，包含表面磁化、boundary magnetization、surface spin polarization、local magnetoelectric response、Cr2O3 / chromia、FeF2、NiO、CuMnAs、SPLEEM、XMCD-PEEM、SP-STM、NV magnetometry 等术语、材料、方法、应用和误检排除词。
+
+开发时使用 `lit_screening.domain_packs.loader` 里的 `load_domain_pack("materials_magnetism")` 和 `list_domain_packs()`。新增 domain pack 应保持 JSON/dataclass 结构简单、可测试、不依赖网络或 API key。
+
+### ResearchLens and QueryFamily
+
+`ResearchLens` 表示研究者式调研视角，例如 `theory_origin`、`spaldin_framework`、`direct_surface_detection`、`nanoscale_readout`、`local_magnetoelectric_predictor`、`applications`、`limitations` 和 `frontier`。`ConceptMapper` 会把这些 lens 写入 `concept_map.json`。
+
+`QueryFamily` 表示某个 lens 下为什么要开一组 provider query。例如 `direct_surface_detection` 会组织 SPLEEM、XMCD-PEEM、spin-resolved photoemission、SP-STM 相关检索；`nanoscale_readout` 会组织 NV magnetometry 和 scanning diamond magnetometry 相关检索。`QueryFamilyPlanner` 会写出 `query_families.json`。
+
+默认情况下，query families 只作为解释 artifact，不改变检索。当开启 query-family 检索时，pipeline 会额外写出 `query_provenance.json`，记录每条 query 的 provider、source、family name、lens name 和 purpose。
+
+### Seed hints
+
+`SeedExtractionAgent` 会从用户问题中抽取轻量 seed hints，包括显式论文标题、DOI、arXiv ID 和 Nicola A. Spaldin / Spaldin 这样的作者提示，并写入 `seed_hints.json`。这些 seed hints 可以增强 research lenses 和 query families，但不会自动做 citation expansion；只有用户显式启用已有 Seed Paper Mode 和 snowballing flags 时才会滚雪球。
+
+### Paper roles
+
+`PaperRoleClassifier` 会基于 title、abstract、venue、year 和 query provenance 为论文分配研究角色，包括 `theory_origin`、`conceptual_framework`、`experimental_proof`、`surface_probe_method`、`nanoscale_readout`、`material_case`、`application_bridge`、`frontier_extension`、`limitation_or_challenge`、`review_background`。结果写入 `paper_roles.json`，用于 report 和 Research Whiteboard 按研究脉络组织论文，而不只是按 final score 排序。
+
+### Research Process Report
+
+Research Process Report 目前是 `report.md` 中的 `# Research Process` 章节；pipeline 不会单独生成 `research_process_report.md` 文件。该章节包括：
+
+- research question interpretation
+- concept decomposition
+- search lenses and query families
+- screening and inclusion criteria
+- paper roles and why they matter
+- research lineage
+- controversies, limitations, and gaps
+- missing keywords, methods, authors, or schools
+- suggested next searches
+- verified vs uncertain findings
+
+如果某个 artifact 没有生成，report 会写 `Not generated in this run.`。报告不能编造 citation relation；没有真实 citation / snowballing artifact 支持时，会保守写明 citation relation not verified。
+
+### Exploration quality metrics
+
+`lit_screening/evaluation/exploration_quality.py` 新增 exploration-quality 指标，但不替代 precision@k、nDCG 等原有 ranking metrics。输出文件是 `exploration_quality.json`，包含 concept coverage、query family coverage、paper role diversity、seed hint utilization、evidence function diversity、gap specificity 和 research tension count。
+
+### 材料磁学示例
+
+可以用 Spaldin surface magnetization 问题做离线检查：
+
+```bash
+python -m lit_screening.pipeline run \
+  --question "有没有和 Nicola A. Spaldin 的 Surface Magnetization in Antiferromagnets 和 Local Magnetoelectric Effects as Predictors of Surface Magnetic Order 相关的探测表面磁化和自旋极化重要性的文章" \
+  --providers openalex semantic_scholar \
+  --max-per-query 0 \
+  --output-dir outputs/spaldin_surface_demo
+```
+
+预期可以看到这些 sensemaking outputs：
+
+- `outputs/spaldin_surface_demo/concept_map.json`
+- `outputs/spaldin_surface_demo/query_families.json`
+- `outputs/spaldin_surface_demo/seed_hints.json`
+- `outputs/spaldin_surface_demo/paper_roles.json`
+- `outputs/spaldin_surface_demo/exploration_quality.json`
+- `outputs/spaldin_surface_demo/report.md`，其中包含 Research Process 章节
+
+因为 `--max-per-query 0` 不调用 provider，`paper_roles.json` 等依赖论文结果的 artifact 可能为空；但 concept map、seed hints、query-family rationale 和 report 结构应该仍然可用于审计。
+
 ## 输出文件
 
 一次运行会生成：
@@ -180,12 +254,19 @@ outputs/
   search_contract.json
   ambiguity_analysis.json
   question_refinement.json
+  concept_map.json
+  query_families.json
+  seed_hints.json
+  query_provenance.json
   raw_openalex_results.json
   raw_semantic_scholar_results.json
   merged_papers.csv
   evidence_table.csv
+  evidence_functions.json
   aspect_coverage.csv
   domain_assessments.json
+  paper_roles.json
+  research_tensions.json
   screening_decisions.csv
   screening_decisions.json
   preference_learning.json
@@ -215,6 +296,7 @@ outputs/
   paper_cards.md
   reading_path.md
   report.md
+  exploration_quality.json
 ```
 
 其中：
@@ -229,10 +311,12 @@ outputs/
 - `agent_trace.json`：记录 planner、retriever、extractor、verifier、ranker 的关键决策。
 - `screening_decisions.csv/json`：给每篇论文输出 include / maybe / exclude、置信度、阅读优先级、建议动作和排除原因。
 - `preference_learning.json`、`feedback_query_refinement.json`：记录从人工 include/exclude 反馈里学到的正/负 terms，以及下一轮检索建议。
+- `concept_map.json`、`query_families.json`、`seed_hints.json`、`query_provenance.json`、`paper_roles.json`、`evidence_functions.json`、`research_tensions.json`：Research Sensemaking artifacts，供 Research Whiteboard 和 `report.md` 的 Research Process 章节使用。
 - `seed_papers.json`、`citation_expansion.csv`、`retrieval_paths.csv`：记录种子论文、引用扩展得到的候选论文，以及每篇扩展论文是通过 reference、citation 还是 recommendation 进入候选集。
 - `ranked_papers.csv`：最终排序结果，并包含 `retrieval_provider`、`retrieval_stage`、`retrieval_query`、`source_stage`、`seed_paper_id`、`seed_title`、`seed_reason` 等 provenance 字段。
 - `method_comparison_matrix.*`、`research_gap_matrix.*`、`suggested_next_searches.*`：把排序结果整理成方法比较、研究空白和下一步检索建议。
 - `report.md`：面向展示和复盘的 Markdown 报告。
+- `exploration_quality.json`：记录 concept coverage、query family coverage、paper role diversity、seed hint utilization、evidence function diversity、gap specificity 和 research tension count。
 
 缓存文件写入 `data/cache/`，输出文件写入 `outputs/`。这些运行产物默认被 `.gitignore` 忽略。
 

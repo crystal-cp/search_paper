@@ -13,7 +13,6 @@ from lit_screening.models import (
     EvidenceRecord,
     Paper,
     QueryPlan,
-    SearchBrief,
     SearchContract,
 )
 

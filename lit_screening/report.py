@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import json
 from pathlib import Path
 from typing import Any
 
@@ -13,12 +15,13 @@ from .models import (
     QueryPlan,
     RankedPaper,
     RetrievalPath,
+    ResearchTension,
     SearchBrief,
     SearchContract,
     SeedPaper,
     ScreeningDecision,
 )
-from .utils import ensure_dir
+from .utils import ensure_dir, to_plain_data
 
 
 SCORING_FORMULA = (
@@ -32,6 +35,585 @@ SCORING_FORMULA = (
 def _escape_table(text: Any) -> str:
     value = str(text or "").replace("\n", " ").replace("|", "\\|")
     return value[:300]
+
+
+PAPER_ROLE_ORDER = [
+    "theory_origin",
+    "conceptual_framework",
+    "experimental_proof",
+    "surface_probe_method",
+    "nanoscale_readout",
+    "application_bridge",
+    "frontier_extension",
+    "limitation_or_challenge",
+    "review_background",
+]
+
+MISSING_ARTIFACT_MESSAGE = "Not generated in this run."
+
+
+def _read_optional_json(artifact_dir: Path, filename: str) -> tuple[Any, bool]:
+    path = artifact_dir / filename
+    if not path.exists():
+        return None, False
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), True
+    except (OSError, json.JSONDecodeError):
+        return {"error": f"Could not read {filename}."}, True
+
+
+def _read_optional_csv(artifact_dir: Path, filename: str) -> tuple[list[dict[str, Any]], bool]:
+    path = artifact_dir / filename
+    if not path.exists():
+        return [], False
+    try:
+        with path.open(newline="", encoding="utf-8") as handle:
+            return list(csv.DictReader(handle)), True
+    except OSError:
+        return [{"error": f"Could not read {filename}."}], True
+
+
+def _artifact_payload(
+    artifact_dir: Path,
+    filename: str,
+    fallback: Any | None = None,
+) -> tuple[Any, bool]:
+    if fallback is not None:
+        return to_plain_data(fallback), True
+    return _read_optional_json(artifact_dir, filename)
+
+
+def _gap_artifact_payload(
+    artifact_dir: Path,
+    fallback: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    if fallback is not None:
+        return to_plain_data(fallback), True
+    json_rows, has_json = _read_optional_json(artifact_dir, "research_gap_matrix.json")
+    if has_json and isinstance(json_rows, list):
+        return json_rows, True
+    csv_rows, has_csv = _read_optional_csv(artifact_dir, "research_gap_matrix.csv")
+    return csv_rows, has_csv
+
+
+def _append_missing(lines: list[str]) -> None:
+    lines.append(MISSING_ARTIFACT_MESSAGE)
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _join(values: Any, limit: int = 8) -> str:
+    items = [str(item) for item in _as_list(values) if str(item)]
+    return ", ".join(items[:limit])
+
+
+def _paper_title_by_id(ranked_papers: list[RankedPaper]) -> dict[str, str]:
+    return {item.paper.paper_id: item.paper.title for item in ranked_papers}
+
+
+def _paper_role_groups(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped = {role: [] for role in PAPER_ROLE_ORDER}
+    for record in records:
+        roles = _as_list(record.get("roles"))
+        primary = str(record.get("primary_role") or "")
+        candidate_roles = roles or ([primary] if primary else [])
+        for role in candidate_roles:
+            if role in grouped:
+                grouped[role].append(record)
+    return grouped
+
+
+def _is_verified_support(item: RankedPaper) -> bool:
+    verification = item.verification
+    support_level = verification.support_level
+    if support_level in {"strict_support", "strong_support"}:
+        return True
+    if verification.span_match_type in {"exact", "exact_match", "high_confidence_fuzzy", "fuzzy"}:
+        return verification.span_match_confidence >= 0.8
+    return False
+
+
+def _seed_related_papers(
+    seed: dict[str, Any],
+    ranked_papers: list[RankedPaper],
+) -> list[str]:
+    title = str(seed.get("title") or "")
+    seed_terms = {term for term in title.lower().replace(":", " ").split() if len(term) > 5}
+    if not seed_terms:
+        return []
+    related: list[str] = []
+    for item in ranked_papers:
+        paper_terms = set(item.paper.title.lower().replace(":", " ").split())
+        if len(seed_terms & paper_terms) >= 2:
+            related.append(item.paper.title)
+    return related[:5]
+
+
+def _append_research_process_section(
+    lines: list[str],
+    artifact_dir: Path,
+    research_question: str,
+    planned_queries: list[str],
+    ranked_papers: list[RankedPaper],
+    evidence_records: list[EvidenceRecord],
+    search_brief: SearchBrief | None,
+    search_contract: SearchContract | None,
+    query_plan: QueryPlan | None,
+    screening_decisions: list[ScreeningDecision] | None,
+    research_gap_matrix: list[dict[str, Any]] | None,
+    suggested_next_searches: list[dict[str, Any]] | None,
+    research_tensions: list[ResearchTension] | None,
+) -> None:
+    concept_map, concept_generated = _artifact_payload(artifact_dir, "concept_map.json")
+    query_families, query_families_generated = _artifact_payload(
+        artifact_dir,
+        "query_families.json",
+    )
+    seed_hints, seed_hints_generated = _artifact_payload(artifact_dir, "seed_hints.json")
+    paper_roles, paper_roles_generated = _artifact_payload(artifact_dir, "paper_roles.json")
+    evidence_functions, evidence_functions_generated = _artifact_payload(
+        artifact_dir,
+        "evidence_functions.json",
+    )
+    tension_rows, tensions_generated = _artifact_payload(
+        artifact_dir,
+        "research_tensions.json",
+        fallback=research_tensions,
+    )
+    gap_rows, gaps_generated = _gap_artifact_payload(
+        artifact_dir,
+        fallback=research_gap_matrix,
+    )
+    next_search_rows, next_searches_generated = _artifact_payload(
+        artifact_dir,
+        "suggested_next_searches.json",
+        fallback=suggested_next_searches,
+    )
+
+    lines.extend(["", "# Research Process", ""])
+    _append_research_question_interpretation(
+        lines,
+        research_question,
+        search_brief,
+        search_contract,
+        query_plan,
+    )
+    _append_concept_decomposition(lines, concept_map, concept_generated)
+    _append_search_lenses(lines, query_families, query_families_generated, planned_queries)
+    _append_screening_criteria(lines, search_brief, search_contract, screening_decisions)
+    _append_paper_roles(lines, paper_roles, paper_roles_generated)
+    _append_research_lineage(
+        lines,
+        ranked_papers,
+        paper_roles,
+        paper_roles_generated,
+        seed_hints,
+        seed_hints_generated,
+    )
+    _append_controversies_and_gaps(
+        lines,
+        tension_rows,
+        tensions_generated,
+        gap_rows,
+        gaps_generated,
+    )
+    _append_missing_keywords_methods_authors(
+        lines,
+        concept_map,
+        concept_generated,
+        gap_rows,
+        gaps_generated,
+        seed_hints,
+        seed_hints_generated,
+    )
+    _append_process_next_searches(
+        lines,
+        next_search_rows,
+        next_searches_generated,
+        gap_rows,
+        gaps_generated,
+        tension_rows,
+        tensions_generated,
+    )
+    _append_verified_vs_uncertain(
+        lines,
+        ranked_papers,
+        evidence_records,
+        evidence_functions,
+        evidence_functions_generated,
+    )
+
+
+def _append_research_question_interpretation(
+    lines: list[str],
+    research_question: str,
+    search_brief: SearchBrief | None,
+    search_contract: SearchContract | None,
+    query_plan: QueryPlan | None,
+) -> None:
+    lines.extend(["## 1. Research question interpretation", ""])
+    if not (search_brief or search_contract or query_plan):
+        _append_missing(lines)
+        lines.append("")
+        return
+    lines.append(f"- Original question: {research_question}")
+    if search_brief:
+        lines.append(f"- Refined question: {search_brief.refined_question}")
+        lines.append(f"- Search intent: {search_brief.search_intent}")
+        lines.append(f"- User goal: {search_brief.user_goal}")
+    if search_contract:
+        lines.append(f"- Domain: {search_contract.domain_profile.domain_name}")
+        lines.append(
+            f"- Must include concepts: {_join(search_contract.must_include_concepts)}"
+        )
+        lines.append(
+            f"- Must exclude concepts: {_join(search_contract.must_exclude_concepts)}"
+        )
+    if query_plan:
+        lines.append(f"- Core terms: {_join(query_plan.core_terms)}")
+    lines.append("")
+
+
+def _append_concept_decomposition(
+    lines: list[str],
+    concept_map: Any,
+    generated: bool,
+) -> None:
+    lines.extend(["## 2. Concept decomposition", ""])
+    if not generated:
+        _append_missing(lines)
+        lines.append("")
+        return
+    payload = _as_dict(concept_map)
+    lines.append(f"- Domain: {payload.get('domain', '')}")
+    lines.append(f"- Central question: {payload.get('central_question', '')}")
+    for lens in _as_list(payload.get("lenses"))[:6]:
+        lens_data = _as_dict(lens)
+        lines.append(
+            "- "
+            f"{lens_data.get('name', '')}: "
+            f"concepts={_join(lens_data.get('core_concepts'), 5)}; "
+            f"methods={_join(lens_data.get('methods'), 5)}; "
+            f"materials={_join(lens_data.get('materials'), 5)}"
+        )
+    lines.append("")
+
+
+def _append_search_lenses(
+    lines: list[str],
+    query_families: Any,
+    generated: bool,
+    planned_queries: list[str],
+) -> None:
+    lines.extend(["## 3. Search lenses and query families", ""])
+    if not generated:
+        _append_missing(lines)
+        if planned_queries:
+            lines.append(f"- Existing planner queries: {len(planned_queries)}")
+        lines.append("")
+        return
+    payload = _as_dict(query_families)
+    families = _as_list(payload.get("families"))
+    lines.append(f"- Query families generated: {len(families)}")
+    for family in families[:8]:
+        family_data = _as_dict(family)
+        queries_by_provider = _as_dict(family_data.get("queries_by_provider"))
+        samples: list[str] = []
+        for provider, queries in queries_by_provider.items():
+            sample = _as_list(queries)[:2]
+            if sample:
+                samples.append(f"{provider}: {'; '.join(str(query) for query in sample)}")
+        lines.append(
+            "- "
+            f"{family_data.get('name', '')} "
+            f"(lens={family_data.get('lens_name', '')}): "
+            f"{family_data.get('purpose', '')}; "
+            f"sample queries={_escape_table(' | '.join(samples))}"
+        )
+    lines.append("")
+
+
+def _append_screening_criteria(
+    lines: list[str],
+    search_brief: SearchBrief | None,
+    search_contract: SearchContract | None,
+    screening_decisions: list[ScreeningDecision] | None,
+) -> None:
+    lines.extend(["## 4. Screening and inclusion criteria", ""])
+    if not (search_brief or search_contract or screening_decisions):
+        _append_missing(lines)
+        lines.append("")
+        return
+    if search_brief:
+        lines.append(f"- Inclusion criteria: {_join(search_brief.inclusion_criteria)}")
+        lines.append(f"- Exclusion criteria: {_join(search_brief.exclusion_criteria)}")
+        lines.append(f"- Required aspects: {_join(search_brief.required_aspects)}")
+    if search_contract:
+        lines.append(
+            f"- Contract inclusion criteria: {_join(search_contract.inclusion_criteria)}"
+        )
+        lines.append(
+            f"- Contract exclusion criteria: {_join(search_contract.exclusion_criteria)}"
+        )
+    if screening_decisions:
+        counts: dict[str, int] = {}
+        for decision in screening_decisions:
+            counts[decision.decision] = counts.get(decision.decision, 0) + 1
+        lines.append(f"- Decision counts: {counts}")
+    lines.append("")
+
+
+def _append_paper_roles(
+    lines: list[str],
+    paper_roles: Any,
+    generated: bool,
+) -> None:
+    lines.extend(["## 5. Paper roles and why they matter", ""])
+    if not generated:
+        _append_missing(lines)
+        lines.append("")
+        return
+    records = [_as_dict(record) for record in _as_list(paper_roles)]
+    grouped = _paper_role_groups(records)
+    for role in PAPER_ROLE_ORDER:
+        items = grouped.get(role, [])
+        lines.append(f"- {role}: {len(items)} paper(s)")
+        for item in items[:4]:
+            reason = _join(item.get("reasons"), 2)
+            lines.append(
+                f"  - {item.get('title', item.get('paper_id', ''))}"
+                f" ({item.get('paper_id', '')})"
+                f"{': ' + reason if reason else ''}"
+            )
+    lines.append("")
+
+
+def _append_research_lineage(
+    lines: list[str],
+    ranked_papers: list[RankedPaper],
+    paper_roles: Any,
+    paper_roles_generated: bool,
+    seed_hints: Any,
+    seed_hints_generated: bool,
+) -> None:
+    lines.extend(["## 6. Research lineage", ""])
+    role_by_id: dict[str, list[str]] = {}
+    if paper_roles_generated:
+        for record in _as_list(paper_roles):
+            data = _as_dict(record)
+            role_by_id[str(data.get("paper_id") or "")] = _as_list(data.get("roles"))
+    if ranked_papers:
+        sorted_items = sorted(
+            ranked_papers,
+            key=lambda item: (item.paper.year is None, item.paper.year or 9999, item.rank),
+        )
+        for item in sorted_items[:12]:
+            year = item.paper.year if item.paper.year is not None else "unknown year"
+            roles = role_by_id.get(item.paper.paper_id) or ["role not generated"]
+            lines.append(
+                f"- {year}: {item.paper.title} "
+                f"({', '.join(str(role) for role in roles[:3])}); "
+                "citation relation not verified"
+            )
+    else:
+        _append_missing(lines)
+    if seed_hints_generated:
+        hints = [_as_dict(seed) for seed in _as_list(seed_hints)]
+        if hints:
+            lines.append("- Seed context:")
+            for seed in hints[:6]:
+                related = _seed_related_papers(seed, ranked_papers)
+                title = seed.get("title") or seed.get("raw_mention") or "untitled seed"
+                if related:
+                    lines.append(
+                        f"  - {title}: possible title-overlap with "
+                        f"{'; '.join(related)}; citation relation not verified"
+                    )
+                else:
+                    lines.append(
+                        f"  - {title}: no retrieved title-overlap found; "
+                        "citation relation not verified"
+                    )
+    else:
+        lines.append(f"- Seed hints: {MISSING_ARTIFACT_MESSAGE}")
+    lines.append("- citation relation not verified unless explicit citation-expansion artifacts support it.")
+    lines.append("")
+
+
+def _append_controversies_and_gaps(
+    lines: list[str],
+    tension_rows: Any,
+    tensions_generated: bool,
+    gap_rows: list[dict[str, Any]],
+    gaps_generated: bool,
+) -> None:
+    lines.extend(["## 7. Controversies, limitations, and gaps", ""])
+    if not tensions_generated and not gaps_generated:
+        _append_missing(lines)
+        lines.append("")
+        return
+    if tensions_generated:
+        for row in _as_list(tension_rows)[:6]:
+            data = _as_dict(row)
+            lines.append(
+                "- "
+                f"{data.get('tension_label', data.get('tension_key', ''))}: "
+                f"{data.get('why_it_matters', data.get('description', ''))}"
+            )
+    else:
+        lines.append(f"- Research tensions: {MISSING_ARTIFACT_MESSAGE}")
+    if gaps_generated:
+        for row in gap_rows[:6]:
+            lines.append(
+                "- Gap: "
+                f"{row.get('gap_label') or row.get('gap') or row.get('gap_key')}: "
+                f"{row.get('evidence_or_reason') or row.get('why_gap_remains', '')}"
+            )
+    else:
+        lines.append(f"- Gap matrix: {MISSING_ARTIFACT_MESSAGE}")
+    lines.append("")
+
+
+def _append_missing_keywords_methods_authors(
+    lines: list[str],
+    concept_map: Any,
+    concept_generated: bool,
+    gap_rows: list[dict[str, Any]],
+    gaps_generated: bool,
+    seed_hints: Any,
+    seed_hints_generated: bool,
+) -> None:
+    lines.extend(["## 8. Missing keywords, methods, authors, or schools", ""])
+    if not (concept_generated or gaps_generated or seed_hints_generated):
+        _append_missing(lines)
+        lines.append("")
+        return
+    if gaps_generated and gap_rows:
+        lines.append("- Gap-derived missing directions:")
+        for row in gap_rows[:6]:
+            suggestions = row.get("suggested_next_searches", "")
+            lines.append(
+                f"  - {row.get('gap_label') or row.get('gap') or row.get('gap_key')}: "
+                f"{suggestions}"
+            )
+    else:
+        lines.append(f"- Gap-derived missing directions: {MISSING_ARTIFACT_MESSAGE}")
+    if concept_generated:
+        payload = _as_dict(concept_map)
+        methods: list[str] = []
+        materials: list[str] = []
+        for lens in _as_list(payload.get("lenses")):
+            data = _as_dict(lens)
+            methods.extend(str(item) for item in _as_list(data.get("methods")))
+            materials.extend(str(item) for item in _as_list(data.get("materials")))
+        lines.append(f"- Lens methods to audit: {_join(_unique(methods), 12)}")
+        lines.append(f"- Lens materials to audit: {_join(_unique(materials), 12)}")
+    if seed_hints_generated:
+        authors: list[str] = []
+        for seed in _as_list(seed_hints):
+            authors.extend(str(item) for item in _as_list(_as_dict(seed).get("authors")))
+        lines.append(f"- Author hints from seed mentions: {_join(_unique(authors), 8)}")
+    lines.append("- School/lab inference was not generated; needs further verification.")
+    lines.append("")
+
+
+def _append_process_next_searches(
+    lines: list[str],
+    next_search_rows: Any,
+    next_searches_generated: bool,
+    gap_rows: list[dict[str, Any]],
+    gaps_generated: bool,
+    tension_rows: Any,
+    tensions_generated: bool,
+) -> None:
+    lines.extend(["## 9. Suggested next searches", ""])
+    queries: list[str] = []
+    if next_searches_generated:
+        for row in _as_list(next_search_rows):
+            query = _as_dict(row).get("query")
+            if query:
+                queries.append(str(query))
+    if gaps_generated:
+        for row in gap_rows:
+            suggestions = row.get("suggested_next_searches", "")
+            if isinstance(suggestions, list):
+                queries.extend(str(item) for item in suggestions)
+            elif suggestions:
+                queries.extend(part.strip() for part in str(suggestions).split(";") if part.strip())
+    if tensions_generated:
+        for row in _as_list(tension_rows):
+            queries.extend(
+                str(item)
+                for item in _as_list(_as_dict(row).get("suggested_next_searches"))
+            )
+    queries = _unique(queries)
+    if not queries:
+        _append_missing(lines)
+    for query in queries[:12]:
+        lines.append(f"- {query}")
+    lines.append("")
+
+
+def _append_verified_vs_uncertain(
+    lines: list[str],
+    ranked_papers: list[RankedPaper],
+    evidence_records: list[EvidenceRecord],
+    evidence_functions: Any,
+    evidence_functions_generated: bool,
+) -> None:
+    lines.extend(["## 10. Verified vs uncertain findings", ""])
+    if not ranked_papers and not evidence_records and not evidence_functions_generated:
+        _append_missing(lines)
+        lines.append("")
+        return
+    verified = [item for item in ranked_papers if _is_verified_support(item)]
+    uncertain = [item for item in ranked_papers if not _is_verified_support(item)]
+    lines.append("- Verified:")
+    if verified:
+        for item in verified[:8]:
+            lines.append(
+                f"  - {item.paper.title}: {item.verification.support_level}; "
+                f"span={item.verification.span_match_type or 'none'}"
+            )
+    else:
+        lines.append("  - No strict or span-validated findings were available.")
+    lines.append("- Uncertain:")
+    if uncertain:
+        for item in uncertain[:8]:
+            reason = item.verification.support_level or "rule/query-derived"
+            if not item.paper.abstract:
+                reason = "missing abstract"
+            lines.append(f"  - {item.paper.title}: {reason}; needs further verification")
+    else:
+        lines.append("  - No uncertain findings were identified.")
+    if evidence_functions_generated:
+        functions = [
+            str(_as_dict(row).get("evidence_function"))
+            for row in _as_list(evidence_functions)
+            if _as_dict(row).get("evidence_function")
+        ]
+        lines.append(f"- Evidence functions observed: {_join(_unique(functions), 12)}")
+    else:
+        lines.append(f"- Evidence functions: {MISSING_ARTIFACT_MESSAGE}")
+    lines.append("")
+
+
+def _unique(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        cleaned = str(value or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        unique.append(cleaned)
+    return unique
 
 
 def generate_report(
@@ -65,6 +647,7 @@ def generate_report(
     seed_papers: list[SeedPaper] | None = None,
     retrieval_paths: list[RetrievalPath] | None = None,
     citation_expansion_papers: list[Any] | None = None,
+    research_tensions: list[ResearchTension] | None = None,
 ) -> None:
     """Generate a human-readable Markdown report."""
 
@@ -198,6 +781,21 @@ def generate_report(
                 "",
             ]
         )
+    _append_research_process_section(
+        lines,
+        destination.parent,
+        research_question,
+        planned_queries,
+        ranked_papers,
+        evidence_records,
+        search_brief,
+        search_contract,
+        query_plan,
+        screening_decisions,
+        research_gap_matrix,
+        suggested_next_searches,
+        research_tensions,
+    )
     year_filter = retrieval_statistics.get("year_filter", {})
     imported_library = retrieval_statistics.get("imported_library", {})
     lines.extend(
@@ -607,6 +1205,29 @@ def generate_report(
         lines.append("- Full list: `suggested_next_searches.json` and `suggested_next_searches.md`.")
     else:
         lines.append("- No follow-up searches were suggested.")
+
+    tension_rows = research_tensions or []
+    lines.extend(["", "## Research Tensions And Boundary Conditions", ""])
+    if tension_rows:
+        lines.extend(
+            [
+                "| Tension | Why it matters | Supporting papers | Suggested searches | Confidence |",
+                "| --- | --- | --- | --- | ---: |",
+            ]
+        )
+        for record in tension_rows[:10]:
+            lines.append(
+                "| "
+                f"{_escape_table(record.tension_label)} | "
+                f"{_escape_table(record.why_it_matters)} | "
+                f"{_escape_table(', '.join(record.supporting_paper_ids))} | "
+                f"{_escape_table('; '.join(record.suggested_next_searches[:2]))} | "
+                f"{record.confidence:.2f} |"
+            )
+        lines.append("")
+        lines.append("- Full list: `research_tensions.json`.")
+    else:
+        lines.append("- No research tensions were identified from this run.")
 
     lines.extend(["", "## Aspect Coverage Summary", ""])
     aspect_records = aspect_coverage_records or []

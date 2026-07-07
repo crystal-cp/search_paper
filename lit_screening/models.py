@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 
@@ -36,6 +37,77 @@ class DomainProfile:
     field_of_study_whitelist: list[str] = field(default_factory=list)
     field_of_study_blacklist: list[str] = field(default_factory=list)
     terminology_map: dict[str, list[str]] = field(default_factory=dict)
+
+
+@dataclass
+class DomainConcept:
+    """One concept entry from a lightweight domain pack."""
+
+    synonyms: list[str] = field(default_factory=list)
+    related: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DomainPack:
+    """Externalized domain knowledge for future query-planning extensions."""
+
+    domain_name: str
+    concepts: dict[str, DomainConcept] = field(default_factory=dict)
+    materials: list[str] = field(default_factory=list)
+    methods: list[str] = field(default_factory=list)
+    applications: list[str] = field(default_factory=list)
+    false_positive_terms: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ResearchLens:
+    """A researcher-style viewpoint for exploring a central question."""
+
+    name: str
+    role: str
+    question: str
+    core_concepts: list[str] = field(default_factory=list)
+    synonyms: list[str] = field(default_factory=list)
+    materials: list[str] = field(default_factory=list)
+    methods: list[str] = field(default_factory=list)
+    applications: list[str] = field(default_factory=list)
+    seed_paper_hints: list[str] = field(default_factory=list)
+    expected_evidence_types: list[str] = field(default_factory=list)
+    exclusion_risks: list[str] = field(default_factory=list)
+
+
+@dataclass
+class QueryFamily:
+    """Provider queries generated for one research lens and purpose."""
+
+    name: str
+    purpose: str
+    lens_name: str
+    queries_by_provider: dict[str, list[str]] = field(default_factory=dict)
+    expected_paper_roles: list[str] = field(default_factory=list)
+    expected_evidence_types: list[str] = field(default_factory=list)
+    exclusion_terms: list[str] = field(default_factory=list)
+    stop_condition: str | None = None
+    linked_seed_titles: list[str] = field(default_factory=list)
+    seed_hint_confidence: float = 0.0
+
+
+@dataclass
+class ResearchLensPlan:
+    """A collection of research lenses for a domain and central question."""
+
+    domain: str
+    central_question: str
+    lenses: list[ResearchLens] = field(default_factory=list)
+
+
+@dataclass
+class QueryFamilyPlan:
+    """A collection of query families for a domain and central question."""
+
+    domain: str
+    central_question: str
+    families: list[QueryFamily] = field(default_factory=list)
 
 
 @dataclass
@@ -86,6 +158,19 @@ class SeedPaper:
 
 
 @dataclass
+class SeedHint:
+    """A bibliographic seed mention extracted from the user's question."""
+
+    title: str | None = None
+    authors: list[str] = field(default_factory=list)
+    doi: str | None = None
+    arxiv_id: str | None = None
+    raw_mention: str = ""
+    confidence: float = 0.0
+    extraction_reason: str = ""
+
+
+@dataclass
 class RetrievalPath:
     """Trace how a paper entered the candidate set."""
 
@@ -131,6 +216,21 @@ class Paper:
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
+class EvidenceFunction(str, Enum):
+    """Research-argument function of an extracted evidence sentence."""
+
+    DEFINES_CONCEPT = "defines_concept"
+    PREDICTS_EFFECT = "predicts_effect"
+    REPORTS_EXPERIMENT = "reports_experiment"
+    DIRECTLY_IMAGES_SIGNAL = "directly_images_signal"
+    MEASURES_SPIN_POLARIZATION = "measures_spin_polarization"
+    REPORTS_SURFACE_PROBE = "reports_surface_probe"
+    CONNECTS_TO_APPLICATION = "connects_to_application"
+    REPORTS_LIMITATION = "reports_limitation"
+    REVIEW_BACKGROUND = "review_background"
+    UNKNOWN = "unknown"
+
+
 @dataclass
 class EvidenceRecord:
     """A claim-level evidence snippet extracted from a title or abstract."""
@@ -142,6 +242,7 @@ class EvidenceRecord:
     relevance_reason: str
     limitation: str = ""
     keyword_overlap: float = 0.0
+    evidence_function: EvidenceFunction = EvidenceFunction.UNKNOWN
     extraction_mode: str = "rule"
     llm_used: bool = False
     invalid_llm_output: bool = False
@@ -246,6 +347,34 @@ class ScreeningDecision:
 
 
 @dataclass
+class PaperRoleRecord:
+    """Research-role labels assigned to one paper for sensemaking artifacts."""
+
+    paper_id: str
+    title: str
+    roles: list[str] = field(default_factory=list)
+    primary_role: str = ""
+    confidence: float = 0.0
+    reasons: list[str] = field(default_factory=list)
+    linked_lenses: list[str] = field(default_factory=list)
+    linked_query_families: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ResearchTension:
+    """A controversy, limitation, or boundary condition found across papers."""
+
+    tension_key: str
+    tension_label: str
+    description: str
+    supporting_paper_ids: list[str] = field(default_factory=list)
+    evidence_snippets: list[str] = field(default_factory=list)
+    why_it_matters: str = ""
+    suggested_next_searches: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+
+
+@dataclass
 class FeedbackRecord:
     """Human review signal applied to a paper ranking."""
 
@@ -300,7 +429,10 @@ class PipelineResult:
     ambiguity_analysis: list[dict[str, Any]] = field(default_factory=list)
     domain_assessments: list[DomainAssessment] = field(default_factory=list)
     screening_decisions: list[ScreeningDecision] = field(default_factory=list)
+    paper_role_records: list[PaperRoleRecord] = field(default_factory=list)
+    research_tensions: list[ResearchTension] = field(default_factory=list)
     seed_papers: list[SeedPaper] = field(default_factory=list)
+    seed_hints: list[SeedHint] = field(default_factory=list)
     retrieval_paths: list[RetrievalPath] = field(default_factory=list)
     citation_expansion_papers: list[Paper] = field(default_factory=list)
     preference_learning: PreferenceLearningResult | None = None
@@ -310,3 +442,6 @@ class PipelineResult:
     question_refinement: dict[str, Any] = field(default_factory=dict)
     aspect_coverage_records: list[AspectCoverageRecord] = field(default_factory=list)
     result_groups: dict[str, Any] = field(default_factory=dict)
+    concept_map: ResearchLensPlan | None = None
+    query_family_plan: QueryFamilyPlan | None = None
+    query_provenance: dict[str, Any] = field(default_factory=dict)

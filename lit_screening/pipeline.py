@@ -9,11 +9,16 @@ from typing import Any, Callable
 
 from .agents.aspect_classifier import AspectCoverageAgent
 from .agents.ambiguity_detector import AmbiguityDetectorAgent
+from .agents.concept_mapper import ConceptMapper
+from .agents.controversy_boundary import ControversyAndBoundaryAgent
 from .agents.domain_guardrail import DomainGuardrailAgent
+from .agents.evidence_function_classifier import classify_evidence_function
 from .agents.extractor import ExtractorAgent
 from .agents.human_feedback import HumanFeedbackAgent
 from .agents.planner import PlannerAgent
+from .agents.paper_role_classifier import PaperRoleClassifier
 from .agents.preference_learning import PreferenceLearningAgent
+from .agents.query_family_planner import QueryFamilyPlanner
 from .agents.query_pilot import QueryPilotAgent
 from .agents.query_repair import QueryRepairAgent
 from .agents.question_refiner import QuestionRefinementAgent
@@ -22,12 +27,17 @@ from .agents.research_intent import ResearchIntentAgent
 from .agents.retriever import RetrieverAgent
 from .agents.search_contract import SearchContractAgent
 from .agents.screening_decision import ScreeningDecisionAgent, summarize_screening_decisions
+from .agents.seed_extraction import SeedExtractionAgent
 from .agents.snowball import CitationSnowballAgent, parse_seed_file, parse_seed_values
 from .agents.verifier import VerifierAgent
 from .config import PipelineConfig
 from .dedup import deduplicate_with_stats
 from .decision_artifacts import write_decision_artifacts
 from .evaluation import compute_evaluation, save_evaluation
+from .evaluation.exploration_quality import (
+    compute_exploration_quality,
+    save_exploration_quality,
+)
 from .importers import ImportResult, import_papers_from_file
 from .llm_client import GenericLLMClient
 from .models import (
@@ -36,13 +46,19 @@ from .models import (
     EvidenceRecord,
     FeedbackRecord,
     Paper,
+    PaperRoleRecord,
     PipelineResult,
     PreferenceLearningResult,
+    QueryFamily,
     QueryPlan,
+    QueryFamilyPlan,
     RankedPaper,
     RetrievalPath,
+    ResearchTension,
+    ResearchLensPlan,
     SearchBrief,
     SearchContract,
+    SeedHint,
     SeedPaper,
     ScreeningDecision,
     VerificationResult,
@@ -81,6 +97,7 @@ EVIDENCE_FIELDS = [
     "title",
     "claim",
     "evidence_sentence",
+    "evidence_function",
     "relevance_reason",
     "limitation",
     "keyword_overlap",
@@ -154,6 +171,7 @@ RANKED_FIELDS = [
     "missing_abstract",
     "claim",
     "evidence_sentence",
+    "evidence_function",
     "feedback_label",
     "feedback_note",
     "extraction_mode",
@@ -220,6 +238,13 @@ def paper_to_row(paper: Paper) -> dict[str, Any]:
     }
 
 
+def evidence_function_value(evidence: EvidenceRecord) -> str:
+    """Return evidence function as a stable string."""
+
+    value = evidence.evidence_function
+    return getattr(value, "value", str(value or "unknown"))
+
+
 def evidence_to_row(
     evidence: EvidenceRecord,
     verification: VerificationResult,
@@ -231,6 +256,7 @@ def evidence_to_row(
         "title": evidence.title,
         "claim": evidence.claim,
         "evidence_sentence": evidence.evidence_sentence,
+        "evidence_function": evidence_function_value(evidence),
         "relevance_reason": evidence.relevance_reason,
         "limitation": evidence.limitation,
         "keyword_overlap": f"{evidence.keyword_overlap:.4f}",
@@ -311,6 +337,7 @@ def ranked_to_row(item: RankedPaper) -> dict[str, Any]:
         "missing_abstract": not bool(item.paper.abstract),
         "claim": item.evidence.claim,
         "evidence_sentence": item.evidence.evidence_sentence,
+        "evidence_function": evidence_function_value(item.evidence),
         "feedback_label": feedback.label if feedback else "",
         "feedback_note": feedback.note if feedback else "",
         "extraction_mode": item.evidence.extraction_mode,
@@ -771,6 +798,7 @@ def apply_feedback_to_pipeline_result(
     metrics["screening_decisions"] = summarize_screening_decisions(
         screening_decisions
     )
+    metrics["paper_roles"] = summarize_paper_roles(result.paper_role_records)
     metrics["preference_learning"] = preference_learning_metrics(preference_learning)
     result_groups = group_ranked_papers(
         ranked_after_feedback,
@@ -857,6 +885,19 @@ def apply_feedback_to_pipeline_result(
         "research_gap_rows": len(decision_artifacts["research_gap_matrix"]),
         "suggested_next_search_count": len(decision_artifacts["suggested_next_searches"]),
     }
+    exploration_quality = compute_exploration_quality(
+        concept_map=result.concept_map,
+        query_families=result.query_family_plan,
+        paper_roles=result.paper_role_records,
+        evidence_functions=result.evidence_records,
+        gap_matrix=decision_artifacts["research_gap_matrix"],
+        research_tensions=result.research_tensions,
+        seed_hints=result.seed_hints,
+    )
+    save_exploration_quality(
+        output_dir / "exploration_quality.json",
+        exploration_quality,
+    )
     save_evaluation(output_dir / "evaluation.json", metrics)
     write_pipeline_csvs(
         output_dir,
@@ -1048,6 +1089,104 @@ def _manual_planner_metadata(
     return metadata
 
 
+SUPPORTED_RESEARCH_LENS_DOMAINS = {"materials_magnetism"}
+
+
+def build_research_lens_artifacts(
+    question: str,
+    search_brief: SearchBrief,
+    search_contract: SearchContract,
+    output_dir: Path,
+    seed_hints: list[SeedHint] | None = None,
+    progress_callback: Callable[[str, str, dict[str, Any]], None] | None = None,
+) -> tuple[ResearchLensPlan | None, QueryFamilyPlan | None, dict[str, Any]]:
+    """Optionally write concept-map and query-family artifacts.
+
+    These artifacts are explanatory only. They do not replace the existing
+    QueryPlan or alter retrieval queries.
+    """
+
+    domain = search_contract.domain_profile.domain_name if search_contract else ""
+    trace_summary: dict[str, Any] = {
+        "domain": domain,
+        "concept_mapper": {
+            "executed": False,
+            "skipped": False,
+            "lens_count": 0,
+            "warning": "",
+        },
+        "query_family_planner": {
+            "executed": False,
+            "skipped": False,
+            "query_family_count": 0,
+            "warning": "",
+        },
+    }
+    if domain not in SUPPORTED_RESEARCH_LENS_DOMAINS:
+        trace_summary["concept_mapper"]["skipped"] = True
+        trace_summary["query_family_planner"]["skipped"] = True
+        trace_summary["reason"] = "unsupported_domain"
+        return None, None, trace_summary
+
+    try:
+        concept_map = ConceptMapper().map_question(
+            question=question,
+            domain=domain,
+            search_brief=search_brief,
+            search_contract=search_contract,
+            seed_hints=seed_hints,
+        )
+        write_json(output_dir / "concept_map.json", concept_map)
+        trace_summary["concept_mapper"]["executed"] = True
+        trace_summary["concept_mapper"]["lens_count"] = len(concept_map.lenses)
+    except Exception as exc:
+        warning = str(exc)[:240]
+        trace_summary["concept_mapper"]["skipped"] = True
+        trace_summary["concept_mapper"]["warning"] = warning
+        trace_summary["query_family_planner"]["skipped"] = True
+        trace_summary["query_family_planner"]["warning"] = (
+            "Skipped because ConceptMapper failed."
+        )
+        trace_summary["reason"] = "concept_mapper_failed"
+        if progress_callback:
+            progress_callback(
+                "research_lens",
+                "ConceptMapper failed; continuing with the existing query planner",
+                {
+                    "domain": domain,
+                    "warning": warning,
+                },
+            )
+        return None, None, trace_summary
+
+    try:
+        query_family_plan = QueryFamilyPlanner().plan(
+            concept_map,
+            seed_hints=seed_hints,
+        )
+        write_json(output_dir / "query_families.json", query_family_plan)
+        trace_summary["query_family_planner"]["executed"] = True
+        trace_summary["query_family_planner"]["query_family_count"] = len(
+            query_family_plan.families
+        )
+        return concept_map, query_family_plan, trace_summary
+    except Exception as exc:
+        warning = str(exc)[:240]
+        trace_summary["query_family_planner"]["skipped"] = True
+        trace_summary["query_family_planner"]["warning"] = warning
+        trace_summary["reason"] = "query_family_planner_failed"
+        if progress_callback:
+            progress_callback(
+                "research_lens",
+                "QueryFamilyPlanner failed; continuing with the existing query planner",
+                {
+                    "domain": domain,
+                    "warning": warning,
+                },
+            )
+        return concept_map, None, trace_summary
+
+
 def _make_query_plan(
     question: str,
     planner_mode: str,
@@ -1147,6 +1286,204 @@ def _queries_by_provider(
         provider: query_map.get(provider) or fallback_queries
         for provider in providers
     }
+
+
+def _query_provenance_record(
+    provider: str,
+    raw_query: str,
+    source: str,
+    family_name: str = "",
+    lens_name: str = "",
+    purpose: str = "",
+) -> dict[str, Any]:
+    """Return one serializable query provenance record."""
+
+    return {
+        "provider": provider,
+        "raw_query": " ".join(str(raw_query).split()),
+        "source": source,
+        "family_name": family_name,
+        "lens_name": lens_name,
+        "purpose": purpose,
+    }
+
+
+def _family_queries_for_provider(family: QueryFamily, provider: str) -> list[str]:
+    """Return provider-specific family queries with a fallback for fake clients."""
+
+    provider_queries = family.queries_by_provider.get(provider)
+    if provider_queries:
+        return _unique_strings(provider_queries)
+    fallback_queries: list[str] = []
+    for fallback_provider in ["openalex", "semantic_scholar"]:
+        fallback_queries.extend(family.queries_by_provider.get(fallback_provider, []))
+    for family_provider, queries in family.queries_by_provider.items():
+        if family_provider not in {"openalex", "semantic_scholar"}:
+            fallback_queries.extend(queries)
+    return _unique_strings(fallback_queries)
+
+
+def build_query_provenance(
+    providers: list[str],
+    queries_by_provider: dict[str, list[str]],
+    query_family_plan: QueryFamilyPlan | None,
+    use_query_families: bool = False,
+) -> tuple[dict[str, list[str]], dict[str, Any]]:
+    """Merge optional query-family queries and record retrieval provenance."""
+
+    merged_queries: dict[str, list[str]] = {}
+    records: list[dict[str, Any]] = []
+    duplicate_family_records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for provider in providers:
+        provider_queries = _unique_strings(queries_by_provider.get(provider, []))
+        merged_queries[provider] = provider_queries
+        for query in provider_queries:
+            seen.add((provider, query))
+            records.append(
+                _query_provenance_record(
+                    provider=provider,
+                    raw_query=query,
+                    source="old_planner",
+                )
+            )
+
+    family_candidate_count = 0
+    family_added_count = 0
+    reason = "disabled"
+    if use_query_families:
+        if query_family_plan is None:
+            reason = "no_query_family_plan"
+        else:
+            reason = ""
+            for family in query_family_plan.families:
+                for provider in providers:
+                    for query in _family_queries_for_provider(family, provider):
+                        family_candidate_count += 1
+                        key = (provider, query)
+                        family_record = _query_provenance_record(
+                            provider=provider,
+                            raw_query=query,
+                            source="query_family",
+                            family_name=family.name,
+                            lens_name=family.lens_name,
+                            purpose=family.purpose,
+                        )
+                        if key in seen:
+                            duplicate_family_records.append(family_record)
+                            continue
+                        seen.add(key)
+                        merged_queries.setdefault(provider, []).append(query)
+                        records.append(family_record)
+                        family_added_count += 1
+            if family_candidate_count == 0:
+                reason = "no_family_queries"
+            elif family_added_count == 0:
+                reason = "all_family_queries_already_present"
+
+    payload = {
+        "enabled": bool(use_query_families),
+        "applied": bool(use_query_families and family_added_count > 0),
+        "reason": reason,
+        "domain": query_family_plan.domain if query_family_plan else "",
+        "records": records,
+        "duplicate_family_records": duplicate_family_records,
+        "provider_query_counts": {
+            provider: len(queries) for provider, queries in merged_queries.items()
+        },
+        "old_planner_query_count": sum(
+            1 for record in records if record["source"] == "old_planner"
+        ),
+        "family_candidate_query_count": family_candidate_count,
+        "family_query_count": family_added_count,
+        "duplicate_family_query_count": len(duplicate_family_records),
+    }
+    return merged_queries, payload
+
+
+def annotate_papers_with_query_provenance(
+    papers: list[Paper],
+    query_provenance: dict[str, Any],
+) -> None:
+    """Attach matched-query metadata to retrieved papers without changing schema."""
+
+    records = query_provenance.get("records", [])
+    by_provider_query = {
+        (str(record.get("provider") or ""), str(record.get("raw_query") or "")): record
+        for record in records
+        if isinstance(record, dict)
+    }
+    by_query: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        raw_query = str(record.get("raw_query") or "")
+        if raw_query and raw_query not in by_query:
+            by_query[raw_query] = record
+
+    for paper in papers:
+        query = paper.retrieval_query
+        if not query:
+            continue
+        provider_candidates = _unique_strings(
+            [paper.retrieval_provider, paper.source_provider]
+        )
+        record = None
+        for provider in provider_candidates:
+            record = by_provider_query.get((provider, query))
+            if record:
+                break
+        if record is None:
+            record = by_query.get(query)
+        if record is None:
+            continue
+        paper.raw.update(
+            {
+                "matched_query": query,
+                "matched_query_source": record.get("source", ""),
+                "matched_query_family": record.get("family_name", ""),
+                "matched_lens": record.get("lens_name", ""),
+                "matched_query_purpose": record.get("purpose", ""),
+            }
+        )
+
+
+def enrich_query_provenance_with_results(
+    query_provenance: dict[str, Any],
+    raw_by_provider: dict[str, list[dict]],
+) -> dict[str, Any]:
+    """Add returned paper ids/counts to query provenance after retrieval."""
+
+    records = query_provenance.get("records", [])
+    lookup = {
+        (str(record.get("provider") or ""), str(record.get("raw_query") or "")): record
+        for record in records
+        if isinstance(record, dict)
+    }
+    for provider, bundles in raw_by_provider.items():
+        for bundle in bundles:
+            query = str(bundle.get("query") or "")
+            record = lookup.get((provider, query))
+            if record is None:
+                continue
+            paper_ids = [
+                str(paper_id)
+                for paper_id in bundle.get("paper_ids", [])
+                if str(paper_id)
+            ]
+            record["paper_count"] = int(record.get("paper_count") or 0) + int(
+                bundle.get("paper_count") or 0
+            )
+            record["paper_ids"] = _unique_strings(
+                [*list(record.get("paper_ids", [])), *paper_ids]
+            )
+    query_provenance["returned_paper_count"] = sum(
+        int(record.get("paper_count") or 0)
+        for record in records
+        if isinstance(record, dict)
+    )
+    return query_provenance
 
 
 def run_query_pilot_workflow(
@@ -1351,6 +1688,75 @@ def build_domain_guardrail_summary(
     }
 
 
+def summarize_paper_roles(records: list[PaperRoleRecord]) -> dict[str, Any]:
+    """Summarize paper-role labels for metrics and trace artifacts."""
+
+    primary_role_counts: dict[str, int] = {}
+    role_counts: dict[str, int] = {}
+    for record in records:
+        primary_role_counts[record.primary_role] = (
+            primary_role_counts.get(record.primary_role, 0) + 1
+        )
+        for role in record.roles:
+            role_counts[role] = role_counts.get(role, 0) + 1
+    return {
+        "record_count": len(records),
+        "primary_role_counts": primary_role_counts,
+        "role_counts": role_counts,
+    }
+
+
+def summarize_research_tensions(records: list[ResearchTension]) -> dict[str, Any]:
+    """Summarize controversy and boundary-condition records."""
+
+    return {
+        "record_count": len(records),
+        "tension_keys": [record.tension_key for record in records],
+        "average_confidence": (
+            sum(record.confidence for record in records) / len(records)
+            if records
+            else 0.0
+        ),
+    }
+
+
+def classify_evidence_functions_for_records(
+    evidence_records: list[EvidenceRecord],
+    papers: list[Paper],
+) -> list[EvidenceRecord]:
+    """Attach research-argument function labels to evidence records."""
+
+    papers_by_id = {paper.paper_id: paper for paper in papers}
+    classified: list[EvidenceRecord] = []
+    for record in evidence_records:
+        paper = papers_by_id.get(record.paper_id)
+        abstract = paper.abstract if paper else ""
+        title = record.title or (paper.title if paper else "")
+        evidence_text = record.evidence_sentence or record.claim
+        evidence_function = classify_evidence_function(
+            evidence_text,
+            title=title,
+            abstract=abstract,
+        )
+        classified.append(replace(record, evidence_function=evidence_function))
+    return classified
+
+
+def evidence_function_records(evidence_records: list[EvidenceRecord]) -> list[dict[str, Any]]:
+    """Return a compact JSON payload for evidence-function audit."""
+
+    return [
+        {
+            "paper_id": record.paper_id,
+            "title": record.title,
+            "claim": record.claim,
+            "evidence_sentence": record.evidence_sentence,
+            "evidence_function": evidence_function_value(record),
+        }
+        for record in evidence_records
+    ]
+
+
 def filter_papers_by_from_year(
     papers: list[Paper],
     from_year: int | None,
@@ -1445,6 +1851,7 @@ def run_pipeline(
     seed_file: str | None = None,
     enable_snowballing: bool = False,
     snowball_top_n: int = 3,
+    use_query_families: bool = False,
     llm_client: GenericLLMClient | None = None,
     retriever_agent: RetrieverAgent | None = None,
     snowball_agent: CitationSnowballAgent | None = None,
@@ -1485,6 +1892,7 @@ def run_pipeline(
             "snowball_top_n": snowball_top_n,
             "seed_paper_count": len(seed_papers or []),
             "seed_file": seed_file or "",
+            "use_query_families": use_query_families,
         },
     )
 
@@ -1495,7 +1903,34 @@ def run_pipeline(
         output_dir=str(out),
         use_cache=use_cache,
         llm_backend=llm_backend,
+        use_query_families=use_query_families,
     )
+
+    seed_extraction_warning = ""
+    try:
+        seed_hints = SeedExtractionAgent().extract(question)
+    except Exception as exc:
+        seed_hints = []
+        seed_extraction_warning = str(exc)[:240]
+        if progress_callback:
+            progress_callback(
+                "seed_extraction",
+                "Seed hint extraction failed; continuing without seed hints",
+                {"warning": seed_extraction_warning},
+            )
+    write_json(out / "seed_hints.json", seed_hints)
+    if progress_callback:
+        progress_callback(
+            "seed_extraction",
+            "Seed hint extraction skipped after failure"
+            if seed_extraction_warning
+            else "Extracted explicit seed-paper hints from the question",
+            {
+                "seed_hint_count": len(seed_hints),
+                "artifact_only": True,
+                "warning": seed_extraction_warning,
+            },
+        )
 
     active_llm_client = build_llm_client(config, llm_backend, llm_client)
     active_scoring_weights = sanitize_score_weights(
@@ -1522,6 +1957,14 @@ def run_pipeline(
     write_json(out / "question_refinement.json", question_refinement)
     write_json(out / "ambiguity_analysis.json", ambiguity_analysis)
     write_json(out / "search_contract.json", search_contract)
+    concept_map, query_family_plan, research_lens_trace = build_research_lens_artifacts(
+        question=question,
+        search_brief=search_brief,
+        search_contract=search_contract,
+        output_dir=out,
+        seed_hints=seed_hints,
+        progress_callback=progress_callback,
+    )
 
     if progress_callback:
         progress_callback(
@@ -1696,7 +2139,14 @@ def run_pipeline(
             )
     elif skip_pilot_search:
         query_pilot_diagnostics["reason"] = "pilot_search_skipped"
+    queries_by_provider, query_provenance = build_query_provenance(
+        providers=providers,
+        queries_by_provider=queries_by_provider,
+        query_family_plan=query_family_plan,
+        use_query_families=use_query_families,
+    )
     write_json(out / "planned_queries.json", query_plan_payload)
+    write_json(out / "query_provenance.json", query_provenance)
     write_json(out / "query_pilot_diagnostics.json", query_pilot_diagnostics)
     write_json(out / "query_repair_suggestions.json", query_repair_suggestions)
     if progress_callback:
@@ -1705,6 +2155,15 @@ def run_pipeline(
             "Query plan ready",
             {
                 "query_count": len(queries),
+                "retrieval_query_count": sum(
+                    len(provider_queries)
+                    for provider_queries in queries_by_provider.values()
+                ),
+                "use_query_families": use_query_families,
+                "query_family_query_count": query_provenance.get(
+                    "family_query_count",
+                    0,
+                ),
                 "planning_question": planning_question,
                 "translation_mode": planner_metadata.get("translation_mode", "none"),
                 "queries_by_provider": {
@@ -1742,6 +2201,12 @@ def run_pipeline(
         sort_mode=sort_preference,
         openalex_mode=openalex_mode,
     )
+    annotate_papers_with_query_provenance(raw_papers, query_provenance)
+    query_provenance = enrich_query_provenance_with_results(
+        query_provenance,
+        raw_by_provider,
+    )
+    write_json(out / "query_provenance.json", query_provenance)
     import_result = empty_import_result()
     if input_file:
         if progress_callback:
@@ -1813,14 +2278,24 @@ def run_pipeline(
             },
         )
     evidence_records = extractor.extract_many(merged_papers, planning_question)
+    evidence_records = classify_evidence_functions_for_records(
+        evidence_records,
+        merged_papers,
+    )
+    write_json(out / "evidence_functions.json", evidence_function_records(evidence_records))
     if progress_callback:
         missing_abstract_count = sum(1 for paper in merged_papers if not paper.abstract)
+        function_counts: dict[str, int] = {}
+        for record in evidence_records:
+            function = evidence_function_value(record)
+            function_counts[function] = function_counts.get(function, 0) + 1
         progress_callback(
             "extraction",
             "Evidence extraction finished",
             {
                 "evidence_record_count": len(evidence_records),
                 "missing_abstract_count": missing_abstract_count,
+                "evidence_function_counts": function_counts,
             },
         )
 
@@ -1974,6 +2449,14 @@ def run_pipeline(
             )
             duplicate_count += expansion_duplicate_count
             evidence_records = extractor.extract_many(merged_papers, planning_question)
+            evidence_records = classify_evidence_functions_for_records(
+                evidence_records,
+                merged_papers,
+            )
+            write_json(
+                out / "evidence_functions.json",
+                evidence_function_records(evidence_records),
+            )
             verification_results = verifier.verify_many(merged_papers, evidence_records)
             aspect_coverage_records = aspect_agent.classify_many(
                 merged_papers,
@@ -2006,6 +2489,52 @@ def run_pipeline(
                     "retrieval_path_count": len(retrieval_paths),
                 },
             )
+
+    paper_role_records = PaperRoleClassifier().classify_many(
+        merged_papers,
+        query_provenance=query_provenance,
+    )
+    write_json(out / "paper_roles.json", paper_role_records)
+    paper_role_summary = summarize_paper_roles(paper_role_records)
+    if progress_callback:
+        progress_callback(
+            "paper_roles",
+            "Classified papers into research roles",
+            {
+                "paper_count": len(paper_role_records),
+                "primary_role_counts": paper_role_summary["primary_role_counts"],
+                "artifact": "paper_roles.json",
+                "ranking_unchanged": True,
+            },
+        )
+
+    research_tension_warning = ""
+    research_tension_domain = (
+        search_contract.domain_profile.domain_name if search_contract else ""
+    )
+    try:
+        research_tensions = ControversyAndBoundaryAgent().analyze(
+            merged_papers,
+            domain=research_tension_domain,
+            query_provenance=query_provenance,
+        )
+    except Exception as exc:
+        research_tension_warning = str(exc)[:240]
+        research_tensions = []
+    write_json(out / "research_tensions.json", research_tensions)
+    research_tension_summary = summarize_research_tensions(research_tensions)
+    if progress_callback:
+        progress_callback(
+            "controversy_boundary",
+            "Identified research tensions and boundary conditions",
+            {
+                "domain": research_tension_domain,
+                "tension_count": len(research_tensions),
+                "artifact": "research_tensions.json",
+                "ranking_unchanged": True,
+                "warning": research_tension_warning,
+            },
+        )
 
     screening_decision_agent = ScreeningDecisionAgent()
     before_screening_decisions, ranked_before_feedback = (
@@ -2136,12 +2665,15 @@ def run_pipeline(
     metrics["screening_decisions"] = summarize_screening_decisions(
         screening_decisions
     )
+    metrics["paper_roles"] = paper_role_summary
+    metrics["research_tensions"] = research_tension_summary
     metrics["preference_learning"] = preference_learning_metrics(preference_learning)
     metrics["query_controls"] = {
         "strictness": strictness,
         "openalex_mode": openalex_mode,
         "sort_preference": sort_preference,
         "ranking_profile": ranking_profile,
+        "use_query_families": use_query_families,
     }
     metrics["search_intent"] = search_brief.search_intent
     metrics["average_aspect_coverage"] = (
@@ -2195,6 +2727,58 @@ def run_pipeline(
         year_filter_stats=year_filter_stats,
         import_diagnostics=import_result.diagnostics(),
     )
+    trace["concept_mapper"] = {
+        **research_lens_trace.get("concept_mapper", {}),
+        "domain": research_lens_trace.get("domain", ""),
+        "reason": research_lens_trace.get("reason", ""),
+    }
+    trace["query_family_planner"] = {
+        **research_lens_trace.get("query_family_planner", {}),
+        "domain": research_lens_trace.get("domain", ""),
+        "reason": research_lens_trace.get("reason", ""),
+    }
+    trace["query_family_retrieval"] = {
+        "enabled": query_provenance.get("enabled", False),
+        "applied": query_provenance.get("applied", False),
+        "reason": query_provenance.get("reason", ""),
+        "domain": query_provenance.get("domain", ""),
+        "provider_query_counts": query_provenance.get("provider_query_counts", {}),
+        "old_planner_query_count": query_provenance.get("old_planner_query_count", 0),
+        "family_candidate_query_count": query_provenance.get(
+            "family_candidate_query_count",
+            0,
+        ),
+        "family_query_count": query_provenance.get("family_query_count", 0),
+        "duplicate_family_query_count": query_provenance.get(
+            "duplicate_family_query_count",
+            0,
+        ),
+    }
+    trace["seed_extraction"] = {
+        "executed": True,
+        "seed_hint_count": len(seed_hints),
+        "artifact": "seed_hints.json",
+        "artifact_only": True,
+        "warning": seed_extraction_warning,
+        "decision": "Seed hints are not converted into seed-paper expansion unless the existing seed-paper mode is explicitly requested.",
+    }
+    trace["paper_role_classifier"] = {
+        "executed": True,
+        "paper_role_count": len(paper_role_records),
+        "artifact": "paper_roles.json",
+        "ranking_unchanged": True,
+        "primary_role_counts": paper_role_summary["primary_role_counts"],
+    }
+    trace["controversy_boundary"] = {
+        "executed": not research_tension_warning,
+        "skipped": bool(research_tension_warning),
+        "domain": research_tension_domain,
+        "tension_count": len(research_tensions),
+        "tension_keys": research_tension_summary["tension_keys"],
+        "artifact": "research_tensions.json",
+        "ranking_unchanged": True,
+        "warning": research_tension_warning,
+    }
     trace["query_pilot"] = query_pilot_diagnostics
     trace["query_repair"] = query_repair_suggestions
     trace["seed_paper_expansion"] = {
@@ -2208,6 +2792,8 @@ def run_pipeline(
     write_json(out / "result_groups.json", result_groups)
     write_json(out / "prisma_like_flow.json", prisma_like_flow)
     write_json(out / "domain_assessments.json", domain_assessments)
+    write_json(out / "paper_roles.json", paper_role_records)
+    write_json(out / "research_tensions.json", research_tensions)
     write_preference_learning_outputs(
         out,
         preference_learning,
@@ -2249,6 +2835,16 @@ def run_pipeline(
         "research_gap_rows": len(decision_artifacts["research_gap_matrix"]),
         "suggested_next_search_count": len(decision_artifacts["suggested_next_searches"]),
     }
+    exploration_quality = compute_exploration_quality(
+        concept_map=concept_map,
+        query_families=query_family_plan,
+        paper_roles=paper_role_records,
+        evidence_functions=evidence_records,
+        gap_matrix=decision_artifacts["research_gap_matrix"],
+        research_tensions=research_tensions,
+        seed_hints=seed_hints,
+    )
+    save_exploration_quality(out / "exploration_quality.json", exploration_quality)
     save_evaluation(out / "evaluation.json", metrics)
 
     write_pipeline_csvs(
@@ -2297,6 +2893,7 @@ def run_pipeline(
         seed_papers=resolved_seed_papers,
         retrieval_paths=retrieval_paths,
         citation_expansion_papers=citation_expansion_papers,
+        research_tensions=research_tensions,
     )
     if progress_callback:
         progress_callback(
@@ -2337,7 +2934,10 @@ def run_pipeline(
         ambiguity_analysis=ambiguity_analysis,
         domain_assessments=domain_assessments,
         screening_decisions=screening_decisions,
+        paper_role_records=paper_role_records,
+        research_tensions=research_tensions,
         seed_papers=resolved_seed_papers,
+        seed_hints=seed_hints,
         retrieval_paths=retrieval_paths,
         citation_expansion_papers=citation_expansion_papers,
         preference_learning=preference_learning,
@@ -2347,6 +2947,9 @@ def run_pipeline(
         question_refinement=question_refinement,
         aspect_coverage_records=aspect_coverage_records,
         result_groups=result_groups,
+        concept_map=concept_map,
+        query_family_plan=query_family_plan,
+        query_provenance=query_provenance,
     )
 
 
@@ -2478,6 +3081,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="Maximum seed papers and linked papers per snowballing stage.",
     )
+    run.add_argument(
+        "--use-query-families",
+        action="store_true",
+        help="Include optional QueryFamilyPlan queries in retrieval.",
+    )
     return parser
 
 
@@ -2527,6 +3135,7 @@ def main(argv: list[str] | None = None) -> int:
                 seed_file=args.seed_file,
                 enable_snowballing=args.enable_snowballing,
                 snowball_top_n=args.snowball_top_n,
+                use_query_families=args.use_query_families,
             )
         except Exception as exc:
             ScreeningRunLogger(args.output_dir).log_exception(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -31,10 +32,15 @@ METHOD_COMPARISON_FIELDS = [
 ]
 
 RESEARCH_GAP_FIELDS = [
+    "gap_key",
+    "gap_label",
     "gap",
+    "evidence_or_reason",
     "supporting_papers",
     "why_gap_remains",
     "possible_project_idea",
+    "suggested_next_searches",
+    "confidence",
     "related_aspects",
 ]
 
@@ -42,6 +48,99 @@ NEXT_SEARCH_FIELDS = [
     "query",
     "reason",
     "source",
+]
+
+MATERIALS_GAP_RULES = [
+    {
+        "gap_key": "finite_temperature_effect",
+        "gap_label": "Finite-temperature surface magnetism is undercovered",
+        "markers": [
+            "finite temperature",
+            "neel temperature",
+            "surface paramagnetism",
+            "thermal",
+        ],
+        "suggested_next_searches": [
+            "Cr2O3 surface paramagnetism finite temperature magnetoelectric antiferromagnet",
+        ],
+        "confidence": 0.86,
+    },
+    {
+        "gap_key": "roughness_and_termination",
+        "gap_label": "Surface roughness and termination robustness are undercovered",
+        "markers": [
+            "roughness",
+            "termination",
+            "step edge",
+            "surface reconstruction",
+            "compensated",
+            "uncompensated",
+        ],
+        "suggested_next_searches": [
+            "surface roughness robust magnetization antiferromagnet",
+        ],
+        "confidence": 0.82,
+    },
+    {
+        "gap_key": "direct_surface_probe_gap",
+        "gap_label": "Direct surface-sensitive probe evidence is undercovered",
+        "markers": [
+            "spleem",
+            "xmcd-peem",
+            "sp-stm",
+            "spin-resolved photoemission",
+            "nv magnetometry",
+        ],
+        "suggested_next_searches": [
+            "SPLEEM chromia spin polarization asymmetry",
+            "NV magnetometry Cr2O3 boundary magnetization",
+        ],
+        "confidence": 0.88,
+    },
+    {
+        "gap_key": "material_coverage_gap",
+        "gap_label": "Material coverage beyond a narrow case set is undercovered",
+        "markers": [
+            "cr2o3",
+            "fef2",
+            "nio",
+            "cumnas",
+            "mn2au",
+        ],
+        "suggested_next_searches": [
+            "Cr2O3 FeF2 NiO CuMnAs Mn2Au surface magnetization antiferromagnet",
+        ],
+        "confidence": 0.74,
+    },
+    {
+        "gap_key": "device_readout_gap",
+        "gap_label": "Device readout and application bridge are undercovered",
+        "markers": [
+            "exchange bias",
+            "memory",
+            "spintronics",
+            "readout",
+        ],
+        "suggested_next_searches": [
+            "Cr2O3 exchange bias surface magnetization magnetoelectric memory",
+        ],
+        "confidence": 0.8,
+    },
+    {
+        "gap_key": "defect_parasitic_magnetism",
+        "gap_label": "Defect and parasitic-magnetism controls are undercovered",
+        "markers": [
+            "defect",
+            "oxygen vacancy",
+            "parasitic magnetization",
+            "ferrimagnetism",
+            "impurity",
+        ],
+        "suggested_next_searches": [
+            "defects parasitic magnetization antiferromagnetic thin films",
+        ],
+        "confidence": 0.84,
+    },
 ]
 
 
@@ -158,6 +257,25 @@ def build_research_gap_matrix(
 ) -> list[dict[str, Any]]:
     """Infer undercovered research gaps from aspect coverage and exclusions."""
 
+    if domain_name(search_contract) == "materials_magnetism":
+        return build_materials_magnetism_gap_matrix(ranked_papers)
+
+    return build_default_research_gap_matrix(
+        ranked_papers,
+        aspect_coverage_records,
+        search_contract,
+        prisma_like_flow,
+    )
+
+
+def build_default_research_gap_matrix(
+    ranked_papers: list[RankedPaper],
+    aspect_coverage_records: list[AspectCoverageRecord],
+    search_contract: SearchContract | None = None,
+    prisma_like_flow: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Infer the legacy literature-screening gaps."""
+
     aspect_records = aspect_coverage_records or []
     gap_counts: Counter[str] = Counter()
     related_aspects: dict[str, set[str]] = {}
@@ -214,6 +332,74 @@ def build_research_gap_matrix(
     return rows
 
 
+def build_materials_magnetism_gap_matrix(
+    ranked_papers: list[RankedPaper],
+) -> list[dict[str, Any]]:
+    """Infer materials-magnetism-specific gaps from retrieved papers."""
+
+    rows: list[dict[str, Any]] = []
+    corpus = materials_corpus(ranked_papers)
+    for rule in MATERIALS_GAP_RULES:
+        key = str(rule["gap_key"])
+        markers = list(rule["markers"])
+        matches = matched_markers(corpus, markers)
+        if key == "material_coverage_gap":
+            covered_materials = material_markers_present(corpus, markers)
+            if len(covered_materials) >= 3:
+                continue
+            evidence_or_reason = (
+                f"Only {len(covered_materials)} material marker(s) found: "
+                + (", ".join(covered_materials) if covered_materials else "none")
+            )
+            confidence = max(0.55, float(rule["confidence"]) - 0.08 * len(covered_materials))
+        else:
+            if matches:
+                continue
+            evidence_or_reason = (
+                "No high-ranked paper title, abstract, or evidence snippet mentions "
+                + ", ".join(markers[:5])
+                + "."
+            )
+            confidence = float(rule["confidence"])
+        suggested = list(rule["suggested_next_searches"])
+        label = str(rule["gap_label"])
+        rows.append(
+            {
+                "gap_key": key,
+                "gap_label": label,
+                "gap": label,
+                "evidence_or_reason": evidence_or_reason,
+                "supporting_papers": "; ".join(materials_supporting_titles(ranked_papers, markers))
+                or "No strong supporting papers in this run",
+                "why_gap_remains": evidence_or_reason,
+                "possible_project_idea": materials_project_idea(key),
+                "suggested_next_searches": "; ".join(suggested),
+                "confidence": f"{confidence:.2f}",
+                "related_aspects": key,
+            }
+        )
+
+    if not rows:
+        rows.append(materials_fallback_gap_row())
+    return rows
+
+
+def materials_fallback_gap_row() -> dict[str, Any]:
+    query = "surface magnetization antiferromagnet direct probe finite temperature"
+    return {
+        "gap_key": "materials_followup",
+        "gap_label": "Focused materials-magnetism follow-up remains useful",
+        "gap": "Focused materials-magnetism follow-up remains useful",
+        "evidence_or_reason": "The current run covered the configured materials-magnetism gap markers reasonably well.",
+        "supporting_papers": "Current retrieved set covers the configured gap markers",
+        "why_gap_remains": "A targeted follow-up search can still validate coverage depth and recent work.",
+        "possible_project_idea": "Audit coverage across temperature, surfaces, probes, readout, and material families.",
+        "suggested_next_searches": query,
+        "confidence": "0.45",
+        "related_aspects": "materials_magnetism",
+    }
+
+
 def build_suggested_next_searches(
     ranked_papers: list[RankedPaper],
     gap_rows: list[dict[str, Any]],
@@ -226,6 +412,12 @@ def build_suggested_next_searches(
 
     searches: list[dict[str, str]] = []
     base_terms = contract_base_terms(search_contract, query_plan)
+    if domain_name(search_contract) == "materials_magnetism":
+        return build_materials_suggested_next_searches(
+            ranked_papers,
+            gap_rows,
+            base_terms,
+        )
     for row in gap_rows:
         query = " ".join([base_terms, search_phrase_for_gap(row["gap"])]).strip()
         add_search(
@@ -286,6 +478,149 @@ def build_suggested_next_searches(
             "search_contract",
         )
     return searches[:12]
+
+
+def build_materials_suggested_next_searches(
+    ranked_papers: list[RankedPaper],
+    gap_rows: list[dict[str, Any]],
+    base_terms: str = "",
+) -> list[dict[str, str]]:
+    """Suggest materials-magnetism follow-up searches from domain gaps."""
+
+    searches: list[dict[str, str]] = []
+    for row in gap_rows:
+        for query in split_suggested_queries(row.get("suggested_next_searches", "")):
+            add_search(
+                searches,
+                query,
+                f"Investigate materials-magnetism gap: {row.get('gap_label') or row.get('gap')}",
+                "research_gap_matrix",
+            )
+    if not searches:
+        add_search(
+            searches,
+            base_terms or "surface magnetization antiferromagnet direct surface probe",
+            "No dominant materials-magnetism gap was detected; rerun a focused coverage check.",
+            "search_contract",
+        )
+    included_keywords = top_included_keywords(ranked_papers)
+    if included_keywords:
+        add_search(
+            searches,
+            " ".join([base_terms, *included_keywords[:3]]).strip(),
+            "Expand around keywords from currently included materials-magnetism papers.",
+            "included_paper_keywords",
+        )
+    return searches[:12]
+
+
+def split_suggested_queries(value: Any) -> list[str]:
+    """Split semicolon-delimited suggested query strings."""
+
+    if isinstance(value, list):
+        return [" ".join(str(item).split()) for item in value if str(item).strip()]
+    return [
+        cleaned
+        for cleaned in (" ".join(part.split()) for part in str(value or "").split(";"))
+        if cleaned
+    ]
+
+
+def domain_name(search_contract: SearchContract | None) -> str:
+    """Return the normalized domain name from a SearchContract."""
+
+    if not search_contract or not getattr(search_contract, "domain_profile", None):
+        return ""
+    return str(search_contract.domain_profile.domain_name or "").strip().lower()
+
+
+def materials_corpus(ranked_papers: list[RankedPaper]) -> str:
+    """Build normalized searchable text for materials gap rules."""
+
+    parts: list[str] = []
+    for item in ranked_papers:
+        parts.extend(
+            [
+                item.paper.title,
+                item.paper.abstract,
+                item.paper.venue,
+                item.paper.tldr,
+                item.evidence.claim,
+                item.evidence.evidence_sentence,
+                item.paper.retrieval_query,
+            ]
+        )
+    return normalize_gap_text(" ".join(parts))
+
+
+def normalize_gap_text(text: str) -> str:
+    """Lowercase and strip accents for robust marker matching."""
+
+    normalized = unicodedata.normalize("NFKD", str(text or ""))
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    return ascii_text.lower()
+
+
+def matched_markers(corpus: str, markers: list[str]) -> list[str]:
+    """Return markers found in a normalized corpus."""
+
+    return [
+        marker
+        for marker in markers
+        if normalize_gap_text(marker) in corpus
+    ]
+
+
+def material_markers_present(corpus: str, markers: list[str]) -> list[str]:
+    """Return material markers found in the corpus with stable display labels."""
+
+    display = {
+        "cr2o3": "Cr2O3",
+        "fef2": "FeF2",
+        "nio": "NiO",
+        "cumnas": "CuMnAs",
+        "mn2au": "Mn2Au",
+    }
+    found = []
+    for marker in markers:
+        normalized = normalize_gap_text(marker)
+        if normalized in corpus:
+            found.append(display.get(normalized, marker))
+    return found
+
+
+def materials_supporting_titles(
+    ranked_papers: list[RankedPaper],
+    markers: list[str],
+    limit: int = 3,
+) -> list[str]:
+    """Return papers that partially mention a materials gap marker."""
+
+    titles: list[str] = []
+    normalized_markers = [normalize_gap_text(marker) for marker in markers]
+    for item in ranked_papers:
+        text = normalize_gap_text(
+            " ".join([item.paper.title, item.paper.abstract, item.evidence.claim])
+        )
+        if any(marker in text for marker in normalized_markers):
+            titles.append(item.paper.title)
+        if len(titles) >= limit:
+            break
+    return titles
+
+
+def materials_project_idea(key: str) -> str:
+    """Return a materials-magnetism project idea for a gap bucket."""
+
+    ideas = {
+        "finite_temperature_effect": "Compare zero-temperature predictions with finite-temperature surface magnetism near the Neel temperature.",
+        "roughness_and_termination": "Test whether boundary magnetization survives realistic terminations, roughness, and step edges.",
+        "direct_surface_probe_gap": "Prioritize surface-sensitive probes such as SPLEEM, XMCD-PEEM, SP-STM, photoemission, and NV magnetometry.",
+        "material_coverage_gap": "Broaden the material set beyond one prototype antiferromagnet and compare symmetry classes.",
+        "device_readout_gap": "Connect boundary magnetization to exchange bias, memory, spintronics, and readout experiments.",
+        "defect_parasitic_magnetism": "Separate intrinsic surface magnetization from defects, oxygen vacancies, impurities, and parasitic moments.",
+    }
+    return ideas.get(key, "Run a targeted materials-magnetism follow-up search.")
 
 
 def infer_problem(item: RankedPaper, aspect: AspectCoverageRecord | None) -> str:

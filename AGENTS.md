@@ -15,10 +15,17 @@ accept human feedback, and write auditable outputs.
 - Preserve backward compatibility for the CLI and Streamlit UI.
 - Add new outputs when needed; do not remove or rename existing outputs unless
   the user explicitly asks.
+- Do not turn small feature requests into one large pipeline rewrite. Add
+  optional artifacts and feature flags in small, reviewable steps, preserving
+  existing retrieval and ranking behavior unless the user explicitly asks for a
+  replacement.
 - Do not implement PDF parsing, vector databases, or a new UI framework unless
   explicitly requested.
 - Keep OpenAlex and Semantic Scholar retrieval modular.
 - Keep external literature-library import modular and dependency-light.
+- Keep domain packs lightweight, JSON/dataclass based, dependency-light, and
+  covered by fixture tests. They should describe terms and guardrails, not hide
+  business logic.
 - Do not hard-code API keys.
 - Do not print API keys or write them into repo files.
 - The core pipeline must run without any LLM key by falling back to rule-based
@@ -29,6 +36,10 @@ accept human feedback, and write auditable outputs.
 - Use dataclasses or similarly simple structured models.
 - Prefer focused tests with fake retrievers, mocked LLM responses, and local
   fixtures. Tests must not require internet access or real API keys.
+- Any new inferred artifact must distinguish verified/span-grounded findings
+  from uncertain hints derived only from titles, query matches, roles, or rules.
+- Do not invent citation relations. Unless a relation is supported by real
+  citation/snowballing artifacts, mark it as not verified.
 - Do not commit `.env`, raw cache files, generated outputs, or local runtime
   artifacts except placeholder `.gitkeep` files.
 
@@ -69,6 +80,11 @@ The pipeline flow is:
 `lit_screening/models.py` defines the shared dataclasses:
 
 - `SearchBrief`: interpreted research intent and inclusion logic.
+- `DomainPack` / `DomainConcept`: lightweight JSON-backed domain terms,
+  synonyms, methods, materials, applications, and false-positive terms.
+- `ResearchLens`, `QueryFamily`, `ResearchLensPlan`, and `QueryFamilyPlan`:
+  optional research-sensemaking structures that explain concept decomposition
+  and query-route purpose without replacing the legacy `QueryPlan` by default.
 - `QueryPlan`: topic terms, provider-specific queries, and search filters.
 - `Paper`: normalized metadata from providers or imported libraries.
 - `EvidenceRecord`: extracted claim and evidence sentence.
@@ -78,6 +94,8 @@ The pipeline flow is:
   and final score.
 - `AspectCoverageRecord`: required-aspect coverage per paper.
 - `FeedbackRecord`: human include/exclude/uncertain signal.
+- `PaperRoleRecord` and `ResearchTension`: optional sensemaking records for
+  research roles, limitations, controversies, and boundary conditions.
 - `RankedPaper`: paper plus evidence, verification, score, and feedback.
 - `PipelineResult`: in-memory summary returned by the pipeline and UI.
 
@@ -87,12 +105,24 @@ Agents live under `lit_screening/agents/`:
 
 - `research_intent.py`: builds the `SearchBrief`.
 - `question_refiner.py`: splits or clarifies broad research questions.
+- `concept_mapper.py`: maps a question and optional seed hints to research
+  lenses using rule-based domain-pack knowledge.
+- `query_family_planner.py`: turns research lenses into provider-aware query
+  families for explanation and optional feature-flagged retrieval.
+- `seed_extraction.py`: extracts title, DOI, arXiv, and author seed hints from
+  the user question without triggering citation expansion.
 - `planner.py`: builds topic-aware structured query plans and provider-specific
   OpenAlex / Semantic Scholar queries.
 - `retriever.py`: runs provider clients and records raw retrieval outputs.
 - `extractor.py`: extracts abstract-grounded claim-level evidence.
 - `verifier.py`: validates whether evidence is grounded in the abstract.
 - `aspect_classifier.py`: evaluates coverage of required research aspects.
+- `paper_role_classifier.py`: assigns rule-based research roles without
+  changing ranking.
+- `evidence_function_classifier.py`: labels evidence function while preserving
+  strict span validation.
+- `controversy_boundary.py`: identifies rule-based tensions, limitations, and
+  boundary conditions.
 - `ranker.py`: ranks papers using the central scoring entrypoint.
 - `human_feedback.py`: reads and applies human feedback CSV records.
 - `snowball.py`: optional Seed Paper Mode and citation snowballing through
@@ -222,12 +252,19 @@ Keep these output files compatible:
 - `search_contract.json`
 - `ambiguity_analysis.json`
 - `question_refinement.json`
+- `concept_map.json`
+- `query_families.json`
+- `seed_hints.json`
+- `query_provenance.json`
 - `raw_openalex_results.json`
 - `raw_semantic_scholar_results.json`
 - `merged_papers.csv`
 - `evidence_table.csv`
+- `evidence_functions.json`
 - `aspect_coverage.csv`
 - `domain_assessments.json`
+- `paper_roles.json`
+- `research_tensions.json`
 - `screening_decisions.csv`
 - `screening_decisions.json`
 - `preference_learning.json`
@@ -257,6 +294,7 @@ Keep these output files compatible:
 - `paper_cards.md`
 - `reading_path.md`
 - `report.md`
+- `exploration_quality.json`
 
 Raw API cache files belong under `data/cache/` and should remain ignored by git.
 Generated output files belong under `outputs/` and should remain ignored by git
