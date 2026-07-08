@@ -23,9 +23,18 @@ except ModuleNotFoundError:
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 ABLATION_CONFIGS: dict[str, dict[str, Any]] = {
+    "deterministic_baseline": {
+        "flags": [],
+        "disabled_modules": [],
+    },
     "full_system": {
         "flags": [],
         "disabled_modules": [],
+    },
+    "llm_intent_frame_only": {
+        "flags": ["--enable-llm-intent-enhancer"],
+        "disabled_modules": [],
+        "enabled_modules_extra": ["llm_intent_frame_enhancer"],
     },
     "legacy_query_planning": {
         "flags": ["--legacy-query-planning"],
@@ -170,7 +179,8 @@ def write_fallback_ablation_config(
                 "group_coverage_ranking",
             ]
             if module not in set(config.get("disabled_modules", []))
-        ],
+        ]
+        + list(config.get("enabled_modules_extra", [])),
         "cli_flags_used": config.get("flags", []),
         "support_status": config.get("support_status", {}),
         "pipeline_command": command,

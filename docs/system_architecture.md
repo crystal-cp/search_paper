@@ -27,6 +27,8 @@ Core boundaries:
 User question
   -> NoviceIntentInterpreter / Intent Repair
   -> ExpertResearchIntent / structured concepts
+  -> optional LLMIntentFrameEnhancer
+  -> deterministic verifier
   -> DomainRouter
   -> SearchContract
   -> QueryFamilyPlanner
@@ -80,6 +82,35 @@ Artifacts:
 
 - `concept_map.json`
 - `search_contract.json`
+
+### Optional LLMIntentFrameEnhancer Phase 1
+
+`LLMIntentFrameEnhancer` is an optional advisory layer between structured
+concept interpretation and SearchContract finalization. The v9 baseline remains
+deterministic: when the enhancer is disabled, no LLM is called and the
+deterministic intent frame and SearchContract remain unchanged.
+
+When explicitly enabled, the enhancer may propose intent-frame suggestions such
+as normalized topic wording, target-context candidates, negative-context
+candidates, aliases, abbreviations, method needs, mechanism needs, application
+needs, and ambiguity notes. A deterministic verifier checks whether each
+suggestion is grounded in the user question, strongly supported by the
+deterministic intent, or a safe alias/normalization. Accepted suggestions can be
+added to the SearchContract with provenance
+`source = llm_suggested_rule_verified`. Rejected suggestions are recorded for
+auditability but are not used as active contract constraints.
+
+The LLM enhancer is advisory only. It must not directly decide paper-level
+labels, evidence validity, reading priority, domain decisions, or scores.
+
+Optional artifacts:
+
+- `intent_frame_before_llm.json`
+- `llm_intent_frame_raw.json`
+- `llm_intent_frame_verified.json`
+- `search_contract_before_llm.json`
+- `search_contract_after_llm.json`
+- `llm_intent_enhancement_trace.json`
 
 ### 3. Search Contract
 

@@ -75,6 +75,34 @@ OpenAlex API requires a free `OPENALEX_API_KEY`; free keys have a daily usage
 budget. Semantic Scholar can be queried without `S2_API_KEY`, but a key is
 recommended to reduce rate-limit failures.
 
+## Optional LLMIntentFrameEnhancer
+
+`LLMIntentFrameEnhancer` is an optional controlled enhancement for intent
+understanding. It is disabled by default, so the v9 deterministic baseline does
+not require an LLM key and does not call an LLM unless the user explicitly
+enables this phase.
+
+When enabled, the enhancer can only propose intent-frame suggestions such as
+normalized topic wording, target-context candidates, negative-context candidates,
+aliases, abbreviations, method needs, mechanism needs, application needs, or
+ambiguity notes. A deterministic verifier decides which suggestions, if any,
+are allowed to enter the `SearchContract`. Rejected LLM suggestions are recorded
+for auditability but are not used as active contract constraints.
+
+The enhancer writes auditable artifacts when requested:
+
+- `intent_frame_before_llm.json`
+- `llm_intent_frame_raw.json`
+- `llm_intent_frame_verified.json`
+- `search_contract_before_llm.json`
+- `search_contract_after_llm.json`
+- `llm_intent_enhancement_trace.json`
+
+The LLMIntentFrameEnhancer must not directly decide `include` / `exclude`,
+`must_read`, `out_of_scope`, `domain_decision`, `final_score`, evidence
+validity, or reading priority. Those remain deterministic, rule-controlled,
+paper-level decisions.
+
 ## Optional DeepSeek LLM Enhancement
 
 The default v9 baseline is deterministic and rule-controlled. You can optionally
@@ -395,10 +423,11 @@ spin-resolved photoemission, and SP-STM routes, while `nanoscale_readout` may
 search NV and scanning diamond magnetometry routes. `QueryFamilyPlanner` writes
 these route explanations to `query_families.json`.
 
-The current default is conservative: query families are documented but do not
-change retrieval unless the query-family feature flag is enabled. When enabled,
-the pipeline writes `query_provenance.json` so each added query records its
-provider, source, family name, lens name, and purpose.
+In the v9 deterministic baseline, QueryFamily planning is enabled by default and
+contributes to the provider-facing query plan. The pipeline writes
+`query_provenance.json` so each query records its provider, source, family name,
+lens name, and purpose. QueryFamily ablation/debug flags can disable this layer
+for pilot evaluation, but the full-system baseline is QueryFamily-on.
 
 ### Seed hints
 

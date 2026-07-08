@@ -30,6 +30,12 @@ Full-run mode evaluates retrieval, deduplication, evidence extraction, span
 validation, domain guardrails, ranking, reading priority, reports, and feedback
 artifacts.
 
+LLMIntentFrameEnhancer phase 1 evaluation is optional and should be compared
+against the frozen v9 deterministic baseline. It evaluates whether a controlled
+LLM advisory layer improves novice intent understanding before SearchContract
+finalization. It does not evaluate LLM ranking, LLM evidence validation,
+LLMQueryPlanCritic, or paper-level LLM decisions.
+
 ## Benchmark Cases
 
 The v9 smoke baseline uses these benchmark cases:
@@ -227,6 +233,36 @@ The evaluator should report these metrics when available.
 | `report_has_user_intent_summary` | Whether report explains the interpreted user intent. |
 | `report_has_coverage_summary` | Whether report explains coverage and remaining gaps or skipped gap status. |
 
+### LLMIntentFrameEnhancer Phase 1 Metrics
+
+Compare these configurations when explicitly evaluating the LLM intent layer:
+
+- `full_system` / v9 deterministic baseline.
+- `llm_intent_frame_only`, which enables only LLMIntentFrameEnhancer.
+
+`llm_intent_frame_only` does not enable LLMQueryPlanCritic, LLM ranking, LLM
+report adaptation, or LLM paper-level decisions. It is a phase 1 diagnostic for
+intent-frame suggestions before SearchContract finalization.
+
+| Metric | Meaning |
+| --- | --- |
+| `verified_candidate_count` | LLM suggestions that passed deterministic verification before any fallback/application decision. |
+| `applied_suggestion_count` | Verified suggestions finally written into active SearchContract provenance or constraint groups. Must be `0` when `fallback_used = true`. |
+| `accepted_suggestion_count` | Backward-compatible alias for suggestions applied into the contract, not merely verifier-approved candidates. |
+| `rejected_suggestion_count` | LLM suggestions rejected by deterministic verification. |
+| `unsupported_suggestion_count` | Suggestions rejected as unsupported by the user question or deterministic intent. |
+| `malformed_output` | Whether the LLM output failed JSON/schema parsing. |
+| `fallback_used` | Whether the deterministic intent frame was kept unchanged because of malformed, unsafe, or unavailable LLM output. |
+| `intent_slot_accuracy` | Human- or fixture-scored accuracy of suggested intent slots when labels are available. |
+| `missing_user_aspect_count` | User-stated aspects missed by the final verified intent frame. |
+| `cross_domain_injection_count` | Unsupported cross-domain additions proposed by the LLM. |
+| `query_quality_score` | Downstream query-quality score after verified intent suggestions, when query planning is run. |
+| `anchor_coverage` | Coverage of benchmark anchors in final planning artifacts. |
+| `overbroad_query_count` | Count of weak or overly broad final queries. |
+
+These metrics are diagnostic. They do not constitute a completed formal LLM
+ablation study.
+
 ## v9 Smoke Baseline Checks
 
 The `baseline_v9_smoke` review completed 11 runs with `returncode=0`.
@@ -271,8 +307,11 @@ Pilot summaries must be diagnostic and cautious.
 
 ## Future LLM Evaluation
 
-Future LLMIntentFrameEnhancer and LLMQueryPlanCritic experiments should be
-measured against this deterministic baseline. LLM variants should be evaluated
-for improved intent understanding, better query critique, lower query weakness,
-and unchanged or improved evidence grounding. They must not bypass rule-owned
-screening, evidence, domain, ranking, or reading-priority decisions.
+LLMIntentFrameEnhancer phase 1 should be measured against this deterministic
+baseline before any stronger LLM components are introduced. The first question is
+whether the LLM helps recover novice intent slots, especially for multilingual
+questions, abbreviations, aliases, target context, and negative context, without
+injecting unsupported domains. LLMQueryPlanCritic remains future work and should
+not be treated as part of the phase 1 intent-frame evaluation. LLM variants must
+not bypass rule-owned screening, evidence, domain, ranking, or reading-priority
+decisions.

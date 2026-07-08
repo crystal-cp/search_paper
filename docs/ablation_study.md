@@ -24,7 +24,7 @@ The pilot framework is meant to:
 
 The first supported configs are:
 
-- `full_system`
+- `full_system` / deterministic baseline
 - `legacy_query_planning`
 - `no_query_family`
 - `no_intent_repair`
@@ -32,6 +32,7 @@ The first supported configs are:
 - `no_domain_guardrail`
 - `no_intent_centrality`
 - `no_group_coverage_ranking`
+- `llm_intent_frame_only`
 
 All configs are debug/evaluation-only. They should be invoked through
 `tools/run_ablations.py` or explicit CLI flags. Default pipeline behavior should
@@ -89,6 +90,14 @@ Hypothesis: papers missing required groups may still become `include` or
 group coverage also influences upstream domain assessment, not only final
 ranking and reading-priority decisions.
 
+`llm_intent_frame_only`
+
+Hypothesis: a controlled LLM intent-frame advisory layer may improve novice
+intent understanding, especially for Chinese novice questions, abbreviations,
+aliases, and target/negative context recovery. This config enables only
+LLMIntentFrameEnhancer. It does not enable LLMQueryPlanCritic, LLM ranking, LLM
+report adaptation, or LLM paper-level decisions.
+
 ## Plan-Only Vs Full-Run
 
 Plan-only runs are best for query-layer questions:
@@ -132,6 +141,8 @@ Support status:
 - `intent_centrality`: supported for ranking score blending.
 - `group_coverage_ranking`: partially supported because group coverage is used
   in both domain assessment and downstream ranking/decision logic.
+- `llm_intent_frame_only`: phase 1 diagnostic support for the optional
+  LLMIntentFrameEnhancer only; not a formal LLM ablation conclusion.
 
 ## Pilot Limitations
 
@@ -141,9 +152,9 @@ Support status:
 - Full retrieval depends on provider availability, API keys, rate limits, and
   metadata quality.
 - Plan-only metrics cannot validate final paper quality.
-- LLM-related ablations are intentionally excluded for now. Future configs may
-  add `no_llm_intent_enhancer` or `no_llm_query_critic` after the LLM path is
-  stable enough for formal comparison.
+- LLMIntentFrameEnhancer phase 1 is available only as a controlled diagnostic
+  config (`llm_intent_frame_only`). Formal LLM ablations and LLMQueryPlanCritic
+  evaluation remain future work.
 
 ## Example Pilot Commands
 

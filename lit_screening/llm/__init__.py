@@ -1,0 +1,41 @@
+"""Optional LLM scaffolding modules."""
+
+from .intent_frame_enhancer import (
+    FORBIDDEN_DECISION_FIELDS,
+    FakeLLMIntentProvider,
+    GenericLLMIntentProvider,
+    LLMIntentEnhancementResult,
+    LLMIntentEnhancementTrace,
+    LLMIntentFrameEnhancer,
+    LLMIntentFrameRaw,
+    LLMIntentFrameSuggestion,
+    LLMIntentProvider,
+    apply_verified_suggestions_to_search_contract,
+    assert_llm_intent_frame_schema_is_non_decisive,
+    build_intent_frame_prompt,
+    find_forbidden_decision_fields,
+    llm_intent_frame_suggestion_fields,
+    parse_llm_intent_frame_json,
+    verify_intent_frame_suggestions,
+    write_intent_enhancement_artifacts,
+)
+
+__all__ = [
+    "FORBIDDEN_DECISION_FIELDS",
+    "FakeLLMIntentProvider",
+    "GenericLLMIntentProvider",
+    "LLMIntentEnhancementResult",
+    "LLMIntentEnhancementTrace",
+    "LLMIntentFrameEnhancer",
+    "LLMIntentFrameRaw",
+    "LLMIntentFrameSuggestion",
+    "LLMIntentProvider",
+    "apply_verified_suggestions_to_search_contract",
+    "assert_llm_intent_frame_schema_is_non_decisive",
+    "build_intent_frame_prompt",
+    "find_forbidden_decision_fields",
+    "llm_intent_frame_suggestion_fields",
+    "parse_llm_intent_frame_json",
+    "verify_intent_frame_suggestions",
+    "write_intent_enhancement_artifacts",
+]

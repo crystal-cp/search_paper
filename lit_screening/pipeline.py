@@ -19,7 +19,7 @@ from .agents.human_feedback import HumanFeedbackAgent
 from .agents.intent_repair import NoviceIntentInterpreter
 from .agents.llm_enhancement import (
     LLMFeedbackInterpreter,
-    LLMIntentFrameEnhancer,
+    LLMIntentFrameEnhancer as AdvisoryLLMIntentFrameEnhancer,
     LLMQueryPlanCritic,
     LLMUserReportAdapter,
 )
@@ -58,6 +58,13 @@ from .evaluation.exploration_quality import (
 )
 from .importers import ImportResult, import_papers_from_file
 from .llm_client import GenericLLMClient
+from .llm.intent_frame_enhancer import (
+    GenericLLMIntentProvider,
+    LLMIntentFrameEnhancer as OptionalLLMIntentFrameEnhancer,
+    LLMIntentProvider,
+    apply_verified_suggestions_to_search_contract,
+    write_intent_enhancement_artifacts,
+)
 from .models import (
     AspectCoverageRecord,
     DomainAssessment,
@@ -2964,6 +2971,7 @@ ABLATION_MODULES = {
     "query_repair": "Query repair suggestions and auto-repair",
     "domain_guardrail": "Domain guardrail scoring and demotion",
     "intent_repair": "Novice intent repair",
+    "llm_intent_frame_enhancer": "Optional LLM intent-frame enhancement",
     "intent_centrality": "Intent centrality score blending",
     "group_coverage_ranking": "Required-group coverage ranking and priority limits",
 }
@@ -2980,6 +2988,7 @@ def build_ablation_config(
     disable_domain_guardrail: bool = False,
     disable_intent_centrality: bool = False,
     disable_group_coverage_ranking: bool = False,
+    enable_llm_intent_enhancer: bool = False,
 ) -> dict[str, Any]:
     """Return a lightweight record of pilot ablation switches."""
 
@@ -3006,10 +3015,18 @@ def build_ablation_config(
     if disable_group_coverage_ranking:
         disabled.append("group_coverage_ranking")
         support["group_coverage_ranking"] = "partially_supported"
+    if enable_llm_intent_enhancer:
+        support["llm_intent_frame_enhancer"] = "supported"
 
     disabled = _unique_strings(disabled)
     enabled = [
-        module for module in ABLATION_MODULES if module not in set(disabled)
+        module
+        for module in ABLATION_MODULES
+        if module not in set(disabled)
+        and (
+            module != "llm_intent_frame_enhancer"
+            or enable_llm_intent_enhancer
+        )
     ]
     return {
         "ablation_config_name": ablation_config_name or "custom_debug",
@@ -3643,6 +3660,8 @@ def run_pipeline(
     ablation_config_name: str = "",
     ablation_cli_flags: list[str] | None = None,
     llm_client: GenericLLMClient | None = None,
+    enable_llm_intent_enhancer: bool = False,
+    llm_intent_provider: LLMIntentProvider | None = None,
     retriever_agent: RetrieverAgent | None = None,
     snowball_agent: CitationSnowballAgent | None = None,
     progress_callback: Callable[[str, str, dict[str, Any]], None] | None = None,
@@ -3669,8 +3688,13 @@ def run_pipeline(
         disable_domain_guardrail=disable_domain_guardrail,
         disable_intent_centrality=disable_intent_centrality,
         disable_group_coverage_ranking=disable_group_coverage_ranking,
+        enable_llm_intent_enhancer=enable_llm_intent_enhancer,
     )
-    ablation_requested = bool(ablation_config_name or ablation_config["disabled_modules"])
+    ablation_requested = bool(
+        ablation_config_name
+        or ablation_config["disabled_modules"]
+        or enable_llm_intent_enhancer
+    )
     if ablation_requested:
         write_json(out / "ablation_config.json", ablation_config)
     run_logger = ScreeningRunLogger(out)
@@ -3840,7 +3864,7 @@ def run_pipeline(
         ambiguity_analysis=ambiguity_analysis,
         expert_intent=expert_research_intent,
     )
-    llm_intent_enhancement = LLMIntentFrameEnhancer().enhance(
+    llm_intent_enhancement = AdvisoryLLMIntentFrameEnhancer().enhance(
         original_question=question,
         rule_based_intent_frame=search_contract.generic_intent_frame,
         structured_concepts=expert_research_intent.structured_concepts
@@ -3851,11 +3875,50 @@ def run_pipeline(
         seed_papers=seed_hints,
         llm_client=active_llm_client,
     )
-    search_contract = LLMIntentFrameEnhancer().apply_to_contract(
+    search_contract = AdvisoryLLMIntentFrameEnhancer().apply_to_contract(
         search_contract,
         llm_intent_enhancement,
     )
     write_json(out / "llm_intent_enhancement.json", llm_intent_enhancement)
+    llm_intent_frame_trace: dict[str, Any] | None = None
+    if enable_llm_intent_enhancer:
+        search_contract_before_llm = search_contract
+        write_json(out / "search_contract_before_llm.json", search_contract_before_llm)
+        resolved_intent_provider = llm_intent_provider
+        if resolved_intent_provider is None and active_llm_client is not None:
+            resolved_intent_provider = GenericLLMIntentProvider(active_llm_client)
+        optional_intent_result = OptionalLLMIntentFrameEnhancer(
+            enabled=True,
+            provider=resolved_intent_provider.provider_name
+            if resolved_intent_provider is not None
+            else active_llm_client.provider_name
+            if active_llm_client is not None
+            else llm_backend,
+            model=resolved_intent_provider.model_name
+            if resolved_intent_provider is not None
+            else getattr(active_llm_client, "model", ""),
+            llm_provider=resolved_intent_provider,
+        ).enhance(
+            search_contract.generic_intent_frame,
+            input_question=question,
+        )
+        write_intent_enhancement_artifacts(
+            out,
+            intent_before_llm=search_contract.generic_intent_frame,
+            raw=optional_intent_result.raw,
+            verified_suggestion=optional_intent_result.verified_suggestion,
+            trace=optional_intent_result.trace,
+            verification_result=optional_intent_result.verification_result,
+        )
+        search_contract = apply_verified_suggestions_to_search_contract(
+            search_contract,
+            optional_intent_result,
+        )
+        write_json(out / "search_contract_after_llm.json", search_contract)
+        llm_intent_frame_trace = {
+            "trace": optional_intent_result.trace,
+            "verification_result": optional_intent_result.verification_result,
+        }
     write_json(out / "search_brief.json", search_brief)
     write_json(out / "question_refinement.json", question_refinement)
     write_json(out / "ambiguity_analysis.json", ambiguity_analysis)
@@ -5386,6 +5449,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use rule-based or LLM-enhanced evidence verification.",
     )
     run.add_argument(
+        "--enable-llm-intent-enhancer",
+        action="store_true",
+        help="Explicit opt-in: run optional LLM intent-frame enhancer before final SearchContract artifacts.",
+    )
+    run.add_argument(
         "--strictness",
         choices=["strict", "balanced", "broad"],
         default="balanced",
@@ -5550,6 +5618,8 @@ def main(argv: list[str] | None = None) -> int:
                 ablation_flags_used.append("--disable-intent-centrality")
             if args.disable_group_coverage_ranking:
                 ablation_flags_used.append("--disable-group-coverage-ranking")
+            if args.enable_llm_intent_enhancer:
+                ablation_flags_used.append("--enable-llm-intent-enhancer")
             result = run_pipeline(
                 question=args.question,
                 providers=args.providers,
@@ -5560,6 +5630,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir=args.output_dir,
                 use_cache=not args.disable_cache,
                 llm_backend=args.llm_backend,
+                enable_llm_intent_enhancer=args.enable_llm_intent_enhancer,
                 planner_mode=args.planner_mode,
                 extractor_mode=args.extractor_mode,
                 verifier_mode=args.verifier_mode,

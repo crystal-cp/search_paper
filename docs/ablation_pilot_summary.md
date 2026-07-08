@@ -123,6 +123,24 @@ interpretation is not "QueryRepair has no value." The summary should report:
 - whether upstream sanitization remained active;
 - whether the no-query-repair run is conclusive.
 
+## Future LLM Evaluation
+
+Future LLMIntentFrameEnhancer evaluation should be measured against the v9
+deterministic baseline. The first phase focuses on novice intent understanding,
+especially Chinese novice questions, abbreviations, aliases, and recovery of
+target and negative context before SearchContract finalization.
+
+The available phase 1 comparison is:
+
+- `full_system` / deterministic baseline.
+- `llm_intent_frame_only`, which enables only LLMIntentFrameEnhancer.
+
+`llm_intent_frame_only` is not LLMQueryPlanCritic, not LLM ranking, and not LLM
+report adaptation. It should be interpreted as a controlled intent-frame
+diagnostic, not as a completed formal LLM ablation study. The LLM will not
+replace evidence validation, domain guardrails, ranking decisions, reading
+priority, or paper-level include/exclude decisions.
+
 ## Partially Supported Ablations
 
 Partially supported ablations must be marked clearly in summaries. In particular,
@@ -144,7 +162,7 @@ Known backlog after the v9 smoke baseline:
 - The benchmark set remains small and diagnostic.
 - Several quality metrics are heuristic.
 - Full retrieval remains sensitive to provider availability, provider metadata, API keys, and rate limits.
-- Future LLMIntentFrameEnhancer and LLMQueryPlanCritic experiments should be evaluated against this deterministic baseline, not against an unstable moving target.
+- Future LLMQueryPlanCritic experiments should be evaluated against this deterministic baseline after the intent-frame phase is stable, not against an unstable moving target.
 
 ## How To Read This Baseline
 

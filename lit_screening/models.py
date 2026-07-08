@@ -248,6 +248,9 @@ class SearchContract:
     success_definition: str = ""
     generic_intent_frame: GenericResearchIntentFrame | None = None
     concept_validation_events: list[dict[str, Any]] = field(default_factory=list)
+    llm_intent_provenance: dict[str, Any] = field(default_factory=dict)
+    llm_verified_suggestions: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    llm_rejected_suggestions: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
