@@ -164,6 +164,32 @@ def test_oer_spin_state_does_not_activate_magnetism_pack(tmp_path):
     )
 
 
+def test_oer_final_queries_have_three_group_intersection(tmp_path):
+    _payload, _concept_map, _family_plan, final_queries, provenance, _trace = _plan_with_families(
+        OER_QUESTION,
+        tmp_path,
+    )
+    unique_queries = sorted(set(_all_queries(final_queries)))
+    intersection_queries = [
+        query
+        for query in unique_queries
+        if _contains_any(query, {"oer", "oxygen evolution reaction"})
+        and _contains_any(
+            query,
+            {"spin state", "surface spin state", "spin polarization", "electronic structure", "orbital occupancy"},
+        )
+        and _contains_any(
+            query,
+            {"transition metal oxide", "oxide catalyst", "catalyst", "electrocatalyst"},
+        )
+    ]
+
+    assert provenance["applied"] is True
+    assert len(intersection_queries) >= 5
+    assert any("controversy" in query.lower() for query in intersection_queries)
+    _assert_no_standalone_query(final_queries, {"oer", "+oer"})
+
+
 def test_ai_literature_screening_stays_out_of_material_domain_packs(tmp_path):
     payload, _concept_map, _family_plan, final_queries, provenance, _trace = _plan_with_families(
         AI_SCREENING_QUESTION,
@@ -188,6 +214,26 @@ def test_ai_literature_screening_stays_out_of_material_domain_packs(tmp_path):
     assert "cr2o3" not in query_text
     assert "sei" not in query_text
     assert "oer" not in query_text
+
+
+def test_ai_screening_no_characterization_template(tmp_path):
+    _payload, _concept_map, _family_plan, final_queries, provenance, _trace = _plan_with_families(
+        AI_SCREENING_QUESTION,
+        tmp_path,
+    )
+    query_text = _query_text(final_queries)
+    multi_agent_queries = [
+        query for query in _all_queries(final_queries) if "multi-agent" in query.lower()
+    ]
+
+    assert provenance["applied"] is True
+    assert "characterization" not in query_text
+    assert "materials" not in query_text
+    assert "systematic review" in query_text
+    assert "literature screening" in query_text
+    assert "human feedback" in query_text or "human-in-the-loop" in query_text
+    assert "evidence validation" in query_text
+    assert len(multi_agent_queries) <= 1
 
 
 def test_general_thin_film_deposition_does_not_activate_ferroelectric_pack(tmp_path):
@@ -219,6 +265,33 @@ def test_general_thin_film_deposition_does_not_activate_ferroelectric_pack(tmp_p
     assert "shg" not in query_text
     assert "batio3" not in query_text
     assert "depolarization field" not in query_text
+
+
+def test_thin_film_method_comparison_query_count_and_no_long_duplicates(tmp_path):
+    _payload, _concept_map, _family_plan, final_queries, provenance, _trace = _plan_with_families(
+        THIN_FILM_QUESTION,
+        tmp_path,
+    )
+    unique_queries = sorted(set(_all_queries(final_queries)))
+    query_text = "\n".join(unique_queries).lower()
+
+    assert provenance["applied"] is True
+    assert len(unique_queries) >= 8
+    assert all(len(query.split()) <= 12 for query in unique_queries)
+    assert any(
+        "ald" in query.lower()
+        and _contains_any(query, {"pld", "pulsed laser deposition"})
+        and "sputtering" in query.lower()
+        and "cvd" in query.lower()
+        and _contains_any(query, {"comparison", "review", "advantages disadvantages"})
+        for query in unique_queries
+    )
+    assert "thin film deposition" in query_text
+    assert "ald" in query_text
+    assert "pld" in query_text or "pulsed laser deposition" in query_text
+    assert "sputtering" in query_text
+    assert "cvd" in query_text
+    _assert_no_standalone_query(final_queries, {"sputtering", "+sputtering"})
 
 
 @pytest.mark.parametrize(
@@ -256,6 +329,30 @@ def test_unknown_domains_still_generate_generic_query_family(question, expected_
     if "钙钛矿" in question:
         assert "battery" not in query_text
         assert "lithium" not in query_text
+
+
+def test_mof_queries_require_mof_co2_anchor(tmp_path):
+    question = (
+        "我想了解 MOF 材料用于 CO2 捕集时孔径、官能团和水稳定性对吸附性能的影响，"
+        "想找理论机制、实验表征、典型材料和应用限制相关论文。"
+    )
+    _payload, _concept_map, _family_plan, final_queries, provenance, _trace = _plan_with_families(
+        question,
+        tmp_path,
+    )
+    queries = sorted(set(_all_queries(final_queries)))
+
+    assert provenance["applied"] is True
+    assert len(queries) >= 8
+    for query in queries:
+        assert _contains_any(query, {"mof", "metal-organic framework"})
+        assert _contains_any(query, {"co2", "carbon dioxide", "capture", "adsorption"})
+    assert not any(
+        "water stability" in query.lower()
+        and "adsorption performance" in query.lower()
+        and not _contains_any(query, {"mof", "metal-organic framework", "co2", "carbon dioxide"})
+        for query in queries
+    )
 
 
 def test_magnetism_pack_regression_not_polluted_by_other_domains(tmp_path):

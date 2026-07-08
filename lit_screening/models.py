@@ -445,6 +445,18 @@ class DomainAssessment:
     required_group_matches: dict[str, bool] = field(default_factory=dict)
     optional_group_matches: dict[str, bool] = field(default_factory=dict)
     intent_centrality_score: float = 0.0
+    required_group_coverage_score: float = 0.0
+    missing_required_group_count: int = 0
+    group_coverage_explanation: list[str] = field(default_factory=list)
+    matched_groups: list[str] = field(default_factory=list)
+    missing_groups: list[str] = field(default_factory=list)
+    target_context_match: list[str] = field(default_factory=list)
+    negative_context_match: list[str] = field(default_factory=list)
+    topic_focus_score: float = 0.0
+    aspect_match_score: float = 0.0
+    target_context_score: float = 1.0
+    negative_context_penalty: float = 0.0
+    peripheral_context_reason: str = ""
 
 
 @dataclass
@@ -468,6 +480,8 @@ class ScoreBreakdown:
     seed_or_title_mention_boost: float = 0.0
     false_positive_penalty: float = 0.0
     intent_centrality_score: float = 0.0
+    required_group_coverage_score: float = 0.0
+    missing_required_group_count: int = 0
 
 
 @dataclass

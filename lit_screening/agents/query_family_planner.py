@@ -131,6 +131,20 @@ def _generic_queries_for_lens(lens: ResearchLens) -> list[str]:
         base = _join_query_terms([*core[:2], *synonyms[:1]])
     lens_name = lens.name
     queries: list[str] = []
+    special_queries = _specialized_generic_queries(
+        lens_name,
+        core,
+        context,
+        methods,
+        applications,
+        tail_terms,
+    )
+    if special_queries:
+        return _sanitize_queries(
+            special_queries,
+            fallback_terms=[*core, *context, *methods, *applications],
+            limit=_special_query_limit(lens_name, special_queries),
+        )
     if base:
         queries.append(base)
     if lens_name in {"background_review", "core_topic"}:
@@ -234,6 +248,104 @@ def _generic_queries_for_lens(lens: ResearchLens) -> list[str]:
     return _sanitize_queries(queries, fallback_terms=[*core, *context, *methods, *applications])
 
 
+def _specialized_generic_queries(
+    lens_name: str,
+    core: list[str],
+    context: list[str],
+    methods: list[str],
+    applications: list[str],
+    tail_terms: list[str],
+) -> list[str]:
+    all_terms = [*core, *context, *methods, *applications, *tail_terms]
+    lower = " ".join(all_terms).lower()
+    if ("oer" in lower or "oxygen evolution reaction" in lower) and (
+        "spin state" in lower or "electronic structure" in lower
+    ):
+        return _oer_intersection_queries(lens_name, all_terms)
+    if "thin film deposition" in lower or "atomic layer deposition" in lower:
+        return _thin_film_method_queries(lens_name, all_terms)
+    if "mof" in lower and (
+        "co2" in lower
+        or "carbon dioxide" in lower
+        or "capture" in lower
+        or "adsorption" in lower
+    ):
+        return _mof_anchor_queries(lens_name, all_terms)
+    if "llm" in lower and (
+        "systematic review" in lower or "literature screening" in lower
+    ):
+        return _ai_screening_queries(lens_name, all_terms)
+    return []
+
+
+def _special_query_limit(lens_name: str, queries: list[str]) -> int:
+    if lens_name == "method_comparison":
+        return 8
+    query_text = " ".join(queries).lower()
+    if "co2 capture" in query_text or "carbon dioxide adsorption" in query_text:
+        return 8
+    return 5
+
+
+def _oer_intersection_queries(lens_name: str, terms: list[str]) -> list[str]:
+    if lens_name not in {
+        "core_topic",
+        "background_review",
+        "theory_mechanism",
+        "characterization_methods",
+        "materials_or_cases",
+        "application_or_performance",
+        "controversy_debate",
+    }:
+        return []
+    return [
+        _join_query_terms(["OER", "spin state", "transition metal oxide"]),
+        _join_query_terms(["oxygen evolution reaction", "spin state", "catalyst"]),
+        _join_query_terms(["OER", "electronic structure", "transition metal oxide"]),
+        _join_query_terms(["OER", "surface spin state", "oxide catalyst"]),
+        _join_query_terms(["OER", "spin state", "oxide catalyst", "controversy mechanism"]),
+    ]
+
+
+def _thin_film_method_queries(lens_name: str, terms: list[str]) -> list[str]:
+    if lens_name not in {"method_comparison", "background_review", "core_topic", "characterization_methods"}:
+        return []
+    return [
+        _join_query_terms(["thin film deposition", "ALD", "PLD", "sputtering", "CVD", "comparison"]),
+        _join_query_terms(["atomic layer deposition", "pulsed laser deposition", "sputtering", "CVD", "review"]),
+        _join_query_terms(["thin film deposition techniques", "advantages disadvantages"]),
+        _join_query_terms(["ALD", "PLD", "sputtering", "CVD", "thin film", "comparison review"]),
+        _join_query_terms(["physical vapor deposition", "chemical vapor deposition", "thin film", "comparison"]),
+        _join_query_terms(["thin film growth methods", "ALD", "PLD", "sputtering", "CVD"]),
+        _join_query_terms(["thin film deposition", "method comparison", "review"]),
+        _join_query_terms(["thin film fabrication", "deposition techniques", "pros cons"]),
+    ]
+
+
+def _mof_anchor_queries(lens_name: str, terms: list[str]) -> list[str]:
+    anchor = ["MOF", "CO2 capture"]
+    return [
+        _join_query_terms([*anchor, "adsorption performance"]),
+        _join_query_terms([*anchor, "pore size"]),
+        _join_query_terms([*anchor, "functional groups"]),
+        _join_query_terms([*anchor, "water stability"]),
+        _join_query_terms(["MOF", "metal-organic framework", "carbon dioxide adsorption", "mechanism"]),
+        _join_query_terms([*anchor, "experimental characterization"]),
+        _join_query_terms([*anchor, "representative materials"]),
+        _join_query_terms([*anchor, "application limitations"]),
+    ]
+
+
+def _ai_screening_queries(lens_name: str, terms: list[str]) -> list[str]:
+    return [
+        _join_query_terms(["LLM", "systematic review screening"]),
+        _join_query_terms(["LLM", "large language model", "literature screening", "human feedback"]),
+        _join_query_terms(["LLM", "systematic review", "evidence validation"]),
+        _join_query_terms(["LLM", "literature screening", "recall accuracy"]),
+        _join_query_terms(["LLM", "human-in-the-loop", "systematic review screening"]),
+    ]
+
+
 def _preferred_full_term(terms: list[str]) -> str:
     for term in terms:
         if " " in term and not is_single_acronym_query(term):
@@ -281,7 +393,11 @@ def _quote_if_needed(value: str) -> str:
     return cleaned
 
 
-def _sanitize_queries(queries: list[str], fallback_terms: list[str]) -> list[str]:
+def _sanitize_queries(
+    queries: list[str],
+    fallback_terms: list[str],
+    limit: int = 5,
+) -> list[str]:
     cleaned = _unique([" ".join(query.split()) for query in queries if query])
     repaired: list[str] = []
     context = [
@@ -296,7 +412,7 @@ def _sanitize_queries(queries: list[str], fallback_terms: list[str]) -> list[str
                 repaired.append(_join_query_terms([query, context_term]))
             continue
         repaired.append(query)
-    return _unique([query for query in repaired if query and not is_single_acronym_query(query)], 5)
+    return _unique([query for query in repaired if query and not is_single_acronym_query(query)], limit)
 
 
 def _generic_expected_roles(lens_name: str) -> list[str]:

@@ -61,6 +61,12 @@ class ScreeningDecisionAgent:
         support_level = item.verification.support_level
         domain_decision = domain.domain_decision if domain else "unknown"
         domain_score = domain.domain_match_score if domain else 0.0
+        missing_required_group_count = (
+            domain.missing_required_group_count if domain else 0
+        )
+        missing_context_or_drift = (
+            group_coverage_limits_priority(domain) if domain else False
+        )
 
         if is_user_seed_paper(item.paper):
             stages = set(source_stage_values(item.paper.source_stage))
@@ -93,6 +99,12 @@ class ScreeningDecisionAgent:
         elif support_level in {"unverified", "llm_invalid_evidence"}:
             decision = "maybe" if score >= 0.45 and domain_decision == "in_scope" else "exclude"
             primary = "weak_evidence_grounding"
+        elif missing_required_group_count > 0:
+            decision = "maybe" if domain_decision != "out_of_scope" and score >= 0.35 else "exclude"
+            primary = "missing_required_group"
+        elif missing_context_or_drift:
+            decision = "maybe"
+            primary = "missing_context_or_non_target_context"
         elif domain_decision == "borderline":
             decision = "maybe"
             primary = "off_topic_domain" if reasons else "borderline_domain"
@@ -123,7 +135,12 @@ class ScreeningDecisionAgent:
             required_aspects_missing=missing,
             domain_match_score=domain_score,
             domain_decision=domain_decision,
-            reading_priority=reading_priority(decision, score, domain_decision),
+            reading_priority=reading_priority(
+                decision,
+                score,
+                domain_decision,
+                domain=domain,
+            ),
             suggested_action=suggested_action(decision, support_level, item.paper.abstract),
         )
 
@@ -146,6 +163,12 @@ def exclusion_reasons_for_item(
             reasons.extend(reason_from_forbidden(term) for term in domain.forbidden_concepts_found)
         if domain.missing_required_concepts:
             reasons.append("missing_required_concept")
+        if getattr(domain, "missing_required_group_count", 0):
+            reasons.append("missing_required_group")
+        if group_coverage_limits_priority(domain):
+            reasons.append("missing_context_or_non_target_context")
+        if getattr(domain, "peripheral_context_reason", ""):
+            reasons.append(domain.peripheral_context_reason)
     if not item.paper.abstract:
         reasons.append("missing_abstract")
     if item.verification.support_level in {
@@ -208,11 +231,21 @@ def decision_confidence(
     return clamp(0.45 + 0.25 * (1 - abs(score - 0.5)) + 0.15 * (1 - abs(domain_score - 0.5)))
 
 
-def reading_priority(decision: str, score: float, domain_decision: str) -> str:
+def reading_priority(
+    decision: str,
+    score: float,
+    domain_decision: str,
+    domain=None,
+) -> str:
     """Map screening decision to reading priority."""
 
     if decision == "exclude":
         return "exclude"
+    if domain and (
+        getattr(domain, "missing_required_group_count", 0)
+        or group_coverage_limits_priority(domain)
+    ):
+        return "optional"
     if decision == "include" and score >= 0.7:
         return "must_read"
     if decision == "include":
@@ -220,6 +253,29 @@ def reading_priority(decision: str, score: float, domain_decision: str) -> str:
     if domain_decision == "borderline":
         return "optional"
     return "read_later"
+
+
+def group_coverage_limits_priority(domain) -> bool:
+    """Return True when context/group coverage should prevent must-read/include."""
+
+    if not domain:
+        return False
+    explanation = [
+        str(item).lower()
+        for item in getattr(domain, "group_coverage_explanation", [])
+    ]
+    if any("non_target_battery_context" in item for item in explanation):
+        return True
+    if getattr(domain, "negative_context_match", None):
+        return True
+    if getattr(domain, "peripheral_context_reason", ""):
+        return True
+    required_matches = getattr(domain, "required_group_matches", {}) or {}
+    for name, matched in required_matches.items():
+        lowered = str(name).lower()
+        if not matched and ("context" in lowered or "spin" in lowered or "oer" in lowered):
+            return True
+    return False
 
 
 def suggested_action(decision: str, support_level: str, abstract: str) -> str:

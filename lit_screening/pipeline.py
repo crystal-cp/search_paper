@@ -17,6 +17,12 @@ from .agents.extractor import ExtractorAgent
 from .agents.generic_intent import is_single_acronym_query
 from .agents.human_feedback import HumanFeedbackAgent
 from .agents.intent_repair import NoviceIntentInterpreter
+from .agents.llm_enhancement import (
+    LLMFeedbackInterpreter,
+    LLMIntentFrameEnhancer,
+    LLMQueryPlanCritic,
+    LLMUserReportAdapter,
+)
 from .agents.planner import PlannerAgent
 from .agents.paper_role_classifier import PaperRoleClassifier
 from .agents.preference_learning import PreferenceLearningAgent
@@ -159,6 +165,19 @@ RANKED_FIELDS = [
     "quality_score",
     "diversity_score",
     "aspect_coverage_score",
+    "intent_centrality_score",
+    "required_group_coverage_score",
+    "missing_required_group_count",
+    "group_coverage_explanation",
+    "matched_groups",
+    "missing_groups",
+    "target_context_match",
+    "negative_context_match",
+    "topic_focus_score",
+    "aspect_match_score",
+    "target_context_score",
+    "negative_context_penalty",
+    "peripheral_context_reason",
     "domain_match_score",
     "domain_decision",
     "off_topic_reason",
@@ -331,6 +350,31 @@ def ranked_to_row(item: RankedPaper) -> dict[str, Any]:
         "quality_score": f"{item.scores.quality_score:.4f}",
         "diversity_score": f"{item.scores.diversity_score:.4f}",
         "aspect_coverage_score": f"{item.scores.aspect_coverage_score:.4f}",
+        "intent_centrality_score": f"{item.scores.intent_centrality_score:.4f}",
+        "required_group_coverage_score": (
+            f"{domain.required_group_coverage_score:.4f}" if domain else ""
+        ),
+        "missing_required_group_count": (
+            domain.missing_required_group_count if domain else ""
+        ),
+        "group_coverage_explanation": (
+            "; ".join(domain.group_coverage_explanation) if domain else ""
+        ),
+        "matched_groups": "; ".join(domain.matched_groups) if domain else "",
+        "missing_groups": "; ".join(domain.missing_groups) if domain else "",
+        "target_context_match": (
+            "; ".join(domain.target_context_match) if domain else ""
+        ),
+        "negative_context_match": (
+            "; ".join(domain.negative_context_match) if domain else ""
+        ),
+        "topic_focus_score": f"{domain.topic_focus_score:.4f}" if domain else "",
+        "aspect_match_score": f"{domain.aspect_match_score:.4f}" if domain else "",
+        "target_context_score": f"{domain.target_context_score:.4f}" if domain else "",
+        "negative_context_penalty": (
+            f"{domain.negative_context_penalty:.4f}" if domain else ""
+        ),
+        "peripheral_context_reason": domain.peripheral_context_reason if domain else "",
         "domain_match_score": f"{domain.domain_match_score:.4f}" if domain else "",
         "domain_decision": domain.domain_decision if domain else "",
         "off_topic_reason": domain.off_topic_reason if domain else "",
@@ -1537,6 +1581,19 @@ def _final_query_quality(
     core_hit_count = _query_anchor_hit_count(cleaned, core_terms)
     has_need = _query_contains_any(cleaned, generic_need_terms)
     has_only_need = _query_contains_any(cleaned, generic_need_terms) and not has_core
+    missing_required_query_groups = [
+        group_name
+        for group_name, group_terms in _required_context_or_process_groups(search_contract)
+        if group_terms and not _query_contains_any(cleaned, group_terms)
+    ]
+    if missing_required_query_groups:
+        return {
+            "keep": False,
+            "reason": "missing_required_context_or_process_anchor",
+            "missing_required_query_groups": missing_required_query_groups,
+            "core_anchor_terms": core_terms,
+            "secondary_anchor_terms": secondary_terms,
+        }
     if has_only_need:
         return {
             "keep": False,
@@ -1592,6 +1649,25 @@ def _anchor_candidates(values: list[str], drop_aspect_only: bool) -> list[str]:
             continue
         terms.append(cleaned)
     return _unique_strings(terms)
+
+
+def _required_context_or_process_groups(
+    search_contract: SearchContract | None,
+) -> list[tuple[str, list[str]]]:
+    if not search_contract:
+        return []
+    groups: list[tuple[str, list[str]]] = []
+    for group in search_contract.constraint_groups:
+        group_name = str(getattr(group, "group_name", "") or "")
+        lowered = group_name.lower()
+        if not getattr(group, "required", False):
+            continue
+        if not any(token in lowered for token in ("context", "process", "property")):
+            continue
+        terms = _anchor_candidates(list(getattr(group, "terms", []) or []), drop_aspect_only=False)
+        if terms:
+            groups.append((group_name, terms))
+    return groups
 
 
 def _query_contains_any(query: str, terms: list[str]) -> bool:
@@ -2614,6 +2690,74 @@ def build_ranking_diagnostics(
             }
             for record in aspect_records
         },
+        "group_coverage_by_paper": {
+            item.paper.paper_id: {
+                "intent_centrality_score": item.scores.intent_centrality_score,
+                "required_group_coverage_score": item.scores.required_group_coverage_score,
+                "missing_required_group_count": item.scores.missing_required_group_count,
+                "required_group_matches": (
+                    item.domain_assessment.required_group_matches
+                    if item.domain_assessment
+                    else {}
+                ),
+                "optional_group_matches": (
+                    item.domain_assessment.optional_group_matches
+                    if item.domain_assessment
+                    else {}
+                ),
+                "group_coverage_explanation": (
+                    item.domain_assessment.group_coverage_explanation
+                    if item.domain_assessment
+                    else []
+                ),
+                "matched_groups": (
+                    item.domain_assessment.matched_groups
+                    if item.domain_assessment
+                    else []
+                ),
+                "missing_groups": (
+                    item.domain_assessment.missing_groups
+                    if item.domain_assessment
+                    else []
+                ),
+                "target_context_match": (
+                    item.domain_assessment.target_context_match
+                    if item.domain_assessment
+                    else []
+                ),
+                "negative_context_match": (
+                    item.domain_assessment.negative_context_match
+                    if item.domain_assessment
+                    else []
+                ),
+                "topic_focus_score": (
+                    item.domain_assessment.topic_focus_score
+                    if item.domain_assessment
+                    else 0.0
+                ),
+                "aspect_match_score": (
+                    item.domain_assessment.aspect_match_score
+                    if item.domain_assessment
+                    else 0.0
+                ),
+                "target_context_score": (
+                    item.domain_assessment.target_context_score
+                    if item.domain_assessment
+                    else 0.0
+                ),
+                "negative_context_penalty": (
+                    item.domain_assessment.negative_context_penalty
+                    if item.domain_assessment
+                    else 0.0
+                ),
+                "peripheral_context_reason": (
+                    item.domain_assessment.peripheral_context_reason
+                    if item.domain_assessment
+                    else ""
+                ),
+            }
+            for item in ranked_papers
+        },
         "seed_or_title_mention_boosts": seed_boosts,
         "false_positive_penalties": false_positive_penalties,
         "acronym_disambiguation_penalties": {
@@ -3130,6 +3274,22 @@ def run_pipeline(
         ambiguity_analysis=ambiguity_analysis,
         expert_intent=expert_research_intent,
     )
+    llm_intent_enhancement = LLMIntentFrameEnhancer().enhance(
+        original_question=question,
+        rule_based_intent_frame=search_contract.generic_intent_frame,
+        structured_concepts=expert_research_intent.structured_concepts
+        if expert_research_intent
+        else [],
+        selected_domain=search_contract.domain_profile.domain_name,
+        domain_candidates=search_contract.domain_profile.candidate_domains,
+        seed_papers=seed_hints,
+        llm_client=active_llm_client,
+    )
+    search_contract = LLMIntentFrameEnhancer().apply_to_contract(
+        search_contract,
+        llm_intent_enhancement,
+    )
+    write_json(out / "llm_intent_enhancement.json", llm_intent_enhancement)
     write_json(out / "search_brief.json", search_brief)
     write_json(out / "question_refinement.json", question_refinement)
     write_json(out / "ambiguity_analysis.json", ambiguity_analysis)
@@ -3397,6 +3557,14 @@ def run_pipeline(
         query_plan_payload["repaired_queries"] = query_repair_suggestions.get(
             "repaired_query_plan"
         )
+    llm_query_critic = LLMQueryPlanCritic().critique(
+        enhanced_intent_frame=llm_intent_enhancement,
+        search_contract=search_contract,
+        candidate_query_families=query_family_plan,
+        final_provider_queries=queries_by_provider,
+        llm_client=active_llm_client,
+    )
+    write_json(out / "llm_query_critic.json", llm_query_critic)
     write_json(out / "planned_queries.json", query_plan_payload)
     write_json(out / "query_provenance.json", query_provenance)
     write_json(out / "query_pilot_diagnostics.json", query_pilot_diagnostics)
@@ -3919,6 +4087,7 @@ def run_pipeline(
         preference_learning
     )
     feedback_applied = False
+    feedback_records: dict[str, FeedbackRecord] = {}
     if feedback_path:
         if progress_callback:
             progress_callback(
@@ -3957,6 +4126,30 @@ def run_pipeline(
                 "Feedback reranking finished",
                 {"feedback_record_count": len(feedback_records)},
             )
+
+    feedback_text = "\n".join(
+        [
+            f"{record.paper_id}: {record.label}; {record.note}"
+            for record in feedback_records.values()
+        ]
+    )
+    llm_feedback_interpretation = LLMFeedbackInterpreter().interpret(
+        feedback_text=feedback_text,
+        accepted_papers=[
+            item.paper
+            for item in ranked_final
+            if item.screening_decision and item.screening_decision.decision == "include"
+        ],
+        rejected_papers=[
+            item.paper
+            for item in ranked_final
+            if item.screening_decision and item.screening_decision.decision == "exclude"
+        ],
+        current_intent_frame=search_contract.generic_intent_frame,
+        ranking_diagnostics=ranking_diagnostics,
+        llm_client=active_llm_client,
+    )
+    write_json(out / "llm_feedback_interpretation.json", llm_feedback_interpretation)
 
     result_groups = group_ranked_papers(
         ranked_final,
@@ -4235,6 +4428,30 @@ def run_pipeline(
         **query_repair_suggestions,
         "trigger_reasons": query_repair_suggestions.get("trigger_reasons", []),
     }
+    trace["llm_intent_enhancement"] = {
+        "artifact": "llm_intent_enhancement.json",
+        "llm_used": llm_intent_enhancement.get("llm_used", False),
+        "fallback_used": llm_intent_enhancement.get("fallback_used", False),
+        "schema_valid": llm_intent_enhancement.get("schema_valid", False),
+        "accepted_suggestions": llm_intent_enhancement.get("accepted_suggestions", []),
+        "rejected_suggestions": llm_intent_enhancement.get("rejected_suggestions", []),
+    }
+    trace["llm_query_critic"] = {
+        "artifact": "llm_query_critic.json",
+        "llm_used": llm_query_critic.get("llm_used", False),
+        "fallback_used": llm_query_critic.get("fallback_used", False),
+        "schema_valid": llm_query_critic.get("schema_valid", False),
+        "accepted_suggestions": llm_query_critic.get("accepted_suggestions", []),
+        "rejected_suggestions": llm_query_critic.get("rejected_suggestions", []),
+    }
+    trace["llm_feedback_interpretation"] = {
+        "artifact": "llm_feedback_interpretation.json",
+        "llm_used": llm_feedback_interpretation.get("llm_used", False),
+        "fallback_used": llm_feedback_interpretation.get("fallback_used", False),
+        "schema_valid": llm_feedback_interpretation.get("schema_valid", False),
+        "accepted_suggestions": llm_feedback_interpretation.get("accepted_suggestions", []),
+        "rejected_suggestions": llm_feedback_interpretation.get("rejected_suggestions", []),
+    }
     trace["seed_paper_expansion"] = {
         "enabled": enable_snowballing,
         "seed_papers": resolved_seed_papers,
@@ -4305,6 +4522,39 @@ def run_pipeline(
         ranking_diagnostics=ranking_diagnostics,
     )
     save_exploration_quality(out / "exploration_quality.json", exploration_quality)
+    user_report_markdown, llm_report_generation_trace = LLMUserReportAdapter().generate(
+        ranked_papers=ranked_final,
+        domain_assessments=domain_assessments,
+        ranking_diagnostics=ranking_diagnostics,
+        paper_roles=paper_role_records,
+        provider_status=provider_status,
+        exploration_quality=exploration_quality,
+        llm_client=active_llm_client,
+    )
+    (out / "user_report.md").write_text(user_report_markdown, encoding="utf-8")
+    write_json(out / "llm_report_generation_trace.json", llm_report_generation_trace)
+    metrics["llm_enhancement"] = {
+        "intent": {
+            "llm_used": bool(llm_intent_enhancement.get("llm_used")),
+            "fallback_used": bool(llm_intent_enhancement.get("fallback_used")),
+            "schema_valid": bool(llm_intent_enhancement.get("schema_valid")),
+        },
+        "query_critic": {
+            "llm_used": bool(llm_query_critic.get("llm_used")),
+            "fallback_used": bool(llm_query_critic.get("fallback_used")),
+            "schema_valid": bool(llm_query_critic.get("schema_valid")),
+        },
+        "feedback": {
+            "llm_used": bool(llm_feedback_interpretation.get("llm_used")),
+            "fallback_used": bool(llm_feedback_interpretation.get("fallback_used")),
+            "schema_valid": bool(llm_feedback_interpretation.get("schema_valid")),
+        },
+        "user_report": {
+            "llm_used": bool(llm_report_generation_trace.get("llm_used")),
+            "fallback_used": bool(llm_report_generation_trace.get("fallback_used")),
+            "schema_valid": bool(llm_report_generation_trace.get("schema_valid")),
+        },
+    }
     save_evaluation(out / "evaluation.json", metrics)
 
     write_pipeline_csvs(

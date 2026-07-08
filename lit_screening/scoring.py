@@ -163,6 +163,8 @@ def compute_final_score(
     preference_score: float | None = None,
     preference_weight: float = 0.10,
     intent_centrality_score: float | None = None,
+    required_group_coverage_score: float = 0.0,
+    missing_required_group_count: int = 0,
 ) -> ScoreBreakdown:
     """Low-level formula helper for combining already-computed score components."""
 
@@ -193,7 +195,7 @@ def compute_final_score(
         else relevance
     )
     pre_domain_final = (
-        clamp(0.52 * centrality + 0.48 * base_final)
+        clamp(0.68 * centrality + 0.32 * base_final)
         if intent_centrality_score is not None
         else base_final
     )
@@ -213,6 +215,8 @@ def compute_final_score(
         preference_score=preference,
         preference_adjustment=preference_adjustment,
         intent_centrality_score=centrality,
+        required_group_coverage_score=clamp(required_group_coverage_score),
+        missing_required_group_count=missing_required_group_count,
     )
 
 
@@ -246,6 +250,16 @@ def compute_score_breakdown(
         if domain_assessment is not None
         else None
     )
+    required_group_coverage = (
+        domain_assessment.required_group_coverage_score
+        if domain_assessment is not None
+        else 0.0
+    )
+    missing_required_group_count = (
+        domain_assessment.missing_required_group_count
+        if domain_assessment is not None
+        else 0
+    )
     return compute_final_score(
         relevance_score=relevance,
         evidence_score=score_evidence(verification, evidence, question),
@@ -259,6 +273,8 @@ def compute_score_breakdown(
         domain_penalty_multiplier=domain_penalty_multiplier(domain_assessment),
         preference_score=preference_score,
         intent_centrality_score=intent_centrality,
+        required_group_coverage_score=required_group_coverage,
+        missing_required_group_count=missing_required_group_count,
     )
 
 

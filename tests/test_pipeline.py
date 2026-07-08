@@ -253,6 +253,9 @@ def test_pipeline_with_fake_retrievers_and_no_internet(tmp_path):
     assert "primary_reason" in ranked_csv_header
     assert "preference_score" in ranked_csv_header
     assert "preference_adjustment" in ranked_csv_header
+    assert "intent_centrality_score" in ranked_csv_header
+    assert "required_group_coverage_score" in ranked_csv_header
+    assert "missing_required_group_count" in ranked_csv_header
     preference = json.loads((output_dir / "preference_learning.json").read_text())
     query_refinement = json.loads((output_dir / "feedback_query_refinement.json").read_text())
     assert preference["enabled"] is True
@@ -285,6 +288,34 @@ def test_pipeline_with_fake_retrievers_and_no_internet(tmp_path):
     assert "## Agent Trace Summary" in report
     assert "- Decision:" in cards
     assert "- Reading priority:" in cards
+
+
+def test_ranked_papers_exports_group_coverage_scores(tmp_path):
+    output_dir = tmp_path / "outputs"
+    retriever = RetrieverAgent(clients={"fake": FakeClient()})
+    run_pipeline(
+        question="How can human feedback improve LLM literature screening?",
+        providers=["fake"],
+        max_per_query=1,
+        from_year=2020,
+        output_dir=str(output_dir),
+        retriever_agent=retriever,
+        legacy_query_planning=True,
+    )
+
+    rows = list(csv.DictReader((output_dir / "ranked_papers.csv").open(encoding="utf-8")))
+    diagnostics = json.loads((output_dir / "ranking_diagnostics.json").read_text())
+
+    assert rows
+    for field in {
+        "intent_centrality_score",
+        "required_group_coverage_score",
+        "missing_required_group_count",
+    }:
+        assert field in rows[0]
+    assert rows[0][field] != ""
+    assert "group_coverage_by_paper" in diagnostics
+    assert rows[0]["paper_id"] in diagnostics["group_coverage_by_paper"]
 
 
 def test_pipeline_applies_hard_local_from_year_filter(tmp_path):
