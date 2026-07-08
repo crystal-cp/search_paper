@@ -36,6 +36,18 @@ ABLATION_CONFIGS: dict[str, dict[str, Any]] = {
         "disabled_modules": [],
         "enabled_modules_extra": ["llm_intent_frame_enhancer"],
     },
+    "llm_query_critic_only": {
+        "flags": [
+            "--enable-llm-query-critic",
+            "--llm-query-critic-provider",
+            "fake",
+            "--fake-llm-query-critic-mode",
+            "valid",
+        ],
+        "disabled_modules": [],
+        "enabled_modules_extra": ["llm_query_plan_critic"],
+        "support_status": {"llm_query_plan_critic": "diagnostic_artifacts_only"},
+    },
     "legacy_query_planning": {
         "flags": ["--legacy-query-planning"],
         "disabled_modules": ["intent_repair", "query_family"],

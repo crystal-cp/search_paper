@@ -65,6 +65,14 @@ from .llm.intent_frame_enhancer import (
     apply_verified_suggestions_to_search_contract,
     write_intent_enhancement_artifacts,
 )
+from .llm.query_plan_critic import (
+    FakeLLMQueryPlanCriticProvider,
+    LLMQueryPlanCritic as OptionalLLMQueryPlanCritic,
+    LLMQueryPlanCriticProvider,
+    apply_verified_query_critic_issues_to_query_plan,
+    empty_query_critic_repair_result,
+    write_query_plan_critic_artifacts,
+)
 from .models import (
     AspectCoverageRecord,
     DomainAssessment,
@@ -2972,6 +2980,7 @@ ABLATION_MODULES = {
     "domain_guardrail": "Domain guardrail scoring and demotion",
     "intent_repair": "Novice intent repair",
     "llm_intent_frame_enhancer": "Optional LLM intent-frame enhancement",
+    "llm_query_plan_critic": "Optional LLM query-plan critique artifacts",
     "intent_centrality": "Intent centrality score blending",
     "group_coverage_ranking": "Required-group coverage ranking and priority limits",
 }
@@ -2989,6 +2998,8 @@ def build_ablation_config(
     disable_intent_centrality: bool = False,
     disable_group_coverage_ranking: bool = False,
     enable_llm_intent_enhancer: bool = False,
+    enable_llm_query_critic: bool = False,
+    apply_llm_query_critic_repairs: bool = False,
 ) -> dict[str, Any]:
     """Return a lightweight record of pilot ablation switches."""
 
@@ -3017,6 +3028,10 @@ def build_ablation_config(
         support["group_coverage_ranking"] = "partially_supported"
     if enable_llm_intent_enhancer:
         support["llm_intent_frame_enhancer"] = "supported"
+    if enable_llm_query_critic:
+        support["llm_query_plan_critic"] = "diagnostic_artifacts_only"
+    if enable_llm_query_critic and apply_llm_query_critic_repairs:
+        support["llm_query_plan_critic_repairs"] = "rule_applier_enabled"
 
     disabled = _unique_strings(disabled)
     enabled = [
@@ -3026,6 +3041,10 @@ def build_ablation_config(
         and (
             module != "llm_intent_frame_enhancer"
             or enable_llm_intent_enhancer
+        )
+        and (
+            module != "llm_query_plan_critic"
+            or enable_llm_query_critic
         )
     ]
     return {
@@ -3662,6 +3681,9 @@ def run_pipeline(
     llm_client: GenericLLMClient | None = None,
     enable_llm_intent_enhancer: bool = False,
     llm_intent_provider: LLMIntentProvider | None = None,
+    enable_llm_query_critic: bool = False,
+    llm_query_critic_provider: LLMQueryPlanCriticProvider | None = None,
+    apply_llm_query_critic_repairs: bool = False,
     retriever_agent: RetrieverAgent | None = None,
     snowball_agent: CitationSnowballAgent | None = None,
     progress_callback: Callable[[str, str, dict[str, Any]], None] | None = None,
@@ -3689,11 +3711,15 @@ def run_pipeline(
         disable_intent_centrality=disable_intent_centrality,
         disable_group_coverage_ranking=disable_group_coverage_ranking,
         enable_llm_intent_enhancer=enable_llm_intent_enhancer,
+        enable_llm_query_critic=enable_llm_query_critic,
+        apply_llm_query_critic_repairs=apply_llm_query_critic_repairs,
     )
     ablation_requested = bool(
         ablation_config_name
         or ablation_config["disabled_modules"]
         or enable_llm_intent_enhancer
+        or enable_llm_query_critic
+        or apply_llm_query_critic_repairs
     )
     if ablation_requested:
         write_json(out / "ablation_config.json", ablation_config)
@@ -4230,6 +4256,83 @@ def run_pipeline(
         query_repair_suggestions,
     )
     write_json(out / "llm_query_critic.json", llm_query_critic)
+    if enable_llm_query_critic:
+        query_plan_critic_input_payload = {
+            "user_question": question,
+            "structured_intent": expert_research_intent,
+            "deterministic_intent": expert_research_intent,
+            "search_contract_summary": search_contract,
+            "query_plan": query_plan_payload,
+            "planned_queries": query_plan_payload.get("queries", []),
+            "query_provenance": query_provenance,
+        }
+        optional_query_critic = OptionalLLMQueryPlanCritic(
+            enabled=True,
+            provider=(
+                getattr(llm_query_critic_provider, "provider_name", "")
+                or llm_backend
+            ),
+            model=getattr(llm_query_critic_provider, "model_name", ""),
+            llm_provider=llm_query_critic_provider,
+        )
+        optional_query_critic_result = optional_query_critic.critique(
+            query_plan_payload,
+            input_question=question,
+            input_payload=query_plan_critic_input_payload,
+        )
+        query_repair_after_llm_critic = empty_query_critic_repair_result(
+            optional_query_critic_result.query_plan_after_llm_critic,
+            apply_enabled=apply_llm_query_critic_repairs,
+        )
+        query_critic_trace = optional_query_critic_result.trace
+        query_plan_after_llm_critic = optional_query_critic_result.query_plan_after_llm_critic
+        if (
+            apply_llm_query_critic_repairs
+            and optional_query_critic_result.verified_critique is not None
+            and not optional_query_critic_result.trace.fallback_used
+        ):
+            query_repair_after_llm_critic = apply_verified_query_critic_issues_to_query_plan(
+                optional_query_critic_result.query_plan_before_llm_critic,
+                optional_query_critic_result.verified_critique,
+                user_question=question,
+                search_contract=search_contract,
+                structured_intent=expert_research_intent,
+                query_provenance=query_provenance,
+            )
+            query_plan_after_llm_critic = query_repair_after_llm_critic.query_plan_after_llm_critic
+            if query_repair_after_llm_critic.applied_issue_count:
+                query_plan_payload = query_plan_after_llm_critic
+                query_plan = query_plan_payload["query_plan"]
+                queries = query_plan_payload["queries"]
+                queries_by_provider = query_plan_payload["final_provider_queries"]
+                query_plan_payload["query_repair_after_llm_critic_applied"] = True
+                query_plan_payload["llm_query_critic_repair_provenance"] = (
+                    query_repair_after_llm_critic.provenance_updates
+                )
+                query_critic_trace = replace(
+                    query_critic_trace,
+                    applied_issue_count=query_repair_after_llm_critic.applied_issue_count,
+                    rejected_for_application_count=query_repair_after_llm_critic.rejected_for_application_count,
+                    query_added_count=query_repair_after_llm_critic.query_added_count,
+                    query_dropped_count=query_repair_after_llm_critic.query_dropped_count,
+                    query_modified_count=query_repair_after_llm_critic.query_modified_count,
+                    reason_if_no_change="llm_query_critic_repairs_applied",
+                )
+            else:
+                query_critic_trace = replace(
+                    query_critic_trace,
+                    rejected_for_application_count=query_repair_after_llm_critic.rejected_for_application_count,
+                    reason_if_no_change="llm_query_critic_no_safe_repairs_applied",
+                )
+        write_query_plan_critic_artifacts(
+            out,
+            query_plan_before_llm_critic=optional_query_critic_result.query_plan_before_llm_critic,
+            raw=optional_query_critic_result.raw,
+            verified_critique=optional_query_critic_result.verified_critique,
+            trace=query_critic_trace,
+            query_plan_after_llm_critic=query_plan_after_llm_critic,
+            query_repair_after_llm_critic=query_repair_after_llm_critic,
+        )
     write_json(out / "planned_queries.json", query_plan_payload)
     write_json(out / "query_provenance.json", query_provenance)
     write_json(out / "query_pilot_diagnostics.json", query_pilot_diagnostics)
@@ -5582,6 +5685,41 @@ def build_parser() -> argparse.ArgumentParser:
         default=18,
         help="Maximum QueryFamily queries added per provider when enabled.",
     )
+    run.add_argument(
+        "--enable-llm-query-critic",
+        action="store_true",
+        help=(
+            "Opt-in diagnostic only: run LLMQueryPlanCritic after query planning "
+            "and write critique artifacts without changing final provider queries."
+        ),
+    )
+    run.add_argument(
+        "--apply-llm-query-critic-repairs",
+        action="store_true",
+        help=(
+            "Opt-in evaluation/debug only: allow deterministic rules to apply "
+            "verified LLMQueryPlanCritic issues as limited query repairs."
+        ),
+    )
+    run.add_argument(
+        "--llm-query-critic-provider",
+        choices=["none", "fake"],
+        default="none",
+        help="Provider for opt-in LLMQueryPlanCritic diagnostics. Defaults to none.",
+    )
+    run.add_argument(
+        "--fake-llm-query-critic-mode",
+        choices=[
+            "valid",
+            "malformed_json",
+            "forbidden_decision_fields",
+            "unsupported_suggestion",
+            "valid_single_acronym_query",
+            "no_issue",
+        ],
+        default="valid",
+        help="Fake LLMQueryPlanCritic response mode for offline tests.",
+    )
     return parser
 
 
@@ -5620,6 +5758,23 @@ def main(argv: list[str] | None = None) -> int:
                 ablation_flags_used.append("--disable-group-coverage-ranking")
             if args.enable_llm_intent_enhancer:
                 ablation_flags_used.append("--enable-llm-intent-enhancer")
+            if args.enable_llm_query_critic:
+                ablation_flags_used.append("--enable-llm-query-critic")
+            if args.apply_llm_query_critic_repairs:
+                ablation_flags_used.append("--apply-llm-query-critic-repairs")
+            llm_query_critic_provider = None
+            if args.llm_query_critic_provider == "fake":
+                ablation_flags_used.extend(
+                    [
+                        "--llm-query-critic-provider",
+                        "fake",
+                        "--fake-llm-query-critic-mode",
+                        args.fake_llm_query_critic_mode,
+                    ]
+                )
+                llm_query_critic_provider = FakeLLMQueryPlanCriticProvider(
+                    response_mode=args.fake_llm_query_critic_mode
+                )
             result = run_pipeline(
                 question=args.question,
                 providers=args.providers,
@@ -5631,6 +5786,9 @@ def main(argv: list[str] | None = None) -> int:
                 use_cache=not args.disable_cache,
                 llm_backend=args.llm_backend,
                 enable_llm_intent_enhancer=args.enable_llm_intent_enhancer,
+                enable_llm_query_critic=args.enable_llm_query_critic,
+                llm_query_critic_provider=llm_query_critic_provider,
+                apply_llm_query_critic_repairs=args.apply_llm_query_critic_repairs,
                 planner_mode=args.planner_mode,
                 extractor_mode=args.extractor_mode,
                 verifier_mode=args.verifier_mode,
