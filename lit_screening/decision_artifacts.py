@@ -32,6 +32,8 @@ METHOD_COMPARISON_FIELDS = [
 ]
 
 RESEARCH_GAP_FIELDS = [
+    "gap_generation_status",
+    "reason",
     "gap_key",
     "gap_label",
     "gap",
@@ -40,6 +42,8 @@ RESEARCH_GAP_FIELDS = [
     "why_gap_remains",
     "possible_project_idea",
     "suggested_next_searches",
+    "coverage_summary",
+    "suggested_action",
     "confidence",
     "related_aspects",
 ]
@@ -143,6 +147,136 @@ MATERIALS_GAP_RULES = [
     },
 ]
 
+DOMAIN_INTENT_GAP_RULES = {
+    "sei_interface": [
+        {
+            "gap_key": "sei_in_situ_operando_evolution",
+            "gap_label": "In situ / operando SEI evolution evidence is undercovered",
+            "markers": ["in situ", "operando", "real time", "evolution", "cycling"],
+            "suggested_next_searches": [
+                '"SEI" "lithium-ion battery" "in situ" operando evolution',
+            ],
+            "possible_project_idea": "Map which in situ or operando methods can follow SEI evolution during cycling instead of only after cell disassembly.",
+            "related_aspects": "in_situ_or_operando_methods; SEI evolution; cycling",
+            "confidence": 0.82,
+        },
+        {
+            "gap_key": "sei_ex_situ_characterization_limits",
+            "gap_label": "Ex situ SEI characterization limitations need clearer separation",
+            "markers": ["ex situ", "post mortem", "limitation", "surface sensitive", "artifact"],
+            "suggested_next_searches": [
+                '"solid electrolyte interphase" "ex situ" characterization limitations',
+            ],
+            "possible_project_idea": "Compare what ex situ SEI composition and structure probes can prove against artifacts introduced by rinsing, transfer, or air exposure.",
+            "related_aspects": "ex_situ_methods; characterization_methods; limitations",
+            "confidence": 0.78,
+        },
+        {
+            "gap_key": "sei_composition_structure_function",
+            "gap_label": "SEI composition-structure-function links are undercovered",
+            "markers": ["composition", "structure", "function", "transport", "property"],
+            "suggested_next_searches": [
+                '"solid electrolyte interphase" composition structure function lithium-ion battery',
+            ],
+            "possible_project_idea": "Synthesize how SEI chemistry and morphology connect to ion transport, impedance, and battery performance.",
+            "related_aspects": "composition; structure; performance relationship",
+            "confidence": 0.8,
+        },
+        {
+            "gap_key": "sei_material_specific_cases",
+            "gap_label": "Material-specific SEI cases are undercovered",
+            "markers": ["graphite", "silicon", "lithium metal", "anode", "electrode"],
+            "suggested_next_searches": [
+                '"SEI" graphite silicon "lithium metal" anode lithium-ion battery',
+            ],
+            "possible_project_idea": "Separate SEI mechanisms by graphite, silicon, lithium metal, and other anode contexts instead of treating SEI as one generic interface.",
+            "related_aspects": "materials_or_cases; graphite; silicon; lithium metal",
+            "confidence": 0.76,
+        },
+        {
+            "gap_key": "sei_failure_degradation_cycling",
+            "gap_label": "SEI failure and degradation pathways under cycling are undercovered",
+            "markers": ["failure", "degradation", "aging", "capacity fade", "cycling"],
+            "suggested_next_searches": [
+                '"SEI" failure degradation cycling "lithium-ion battery"',
+            ],
+            "possible_project_idea": "Build a failure map linking SEI growth, cracking, impedance rise, lithium loss, and capacity fade during cycling.",
+            "related_aspects": "failure_or_limitation; degradation; cycling",
+            "confidence": 0.82,
+        },
+    ],
+    "oer_catalysis": [
+        {
+            "gap_key": "oer_operando_spin_state_evolution",
+            "gap_label": "Operando evidence for OER spin-state evolution is undercovered",
+            "markers": ["operando", "in situ", "spin state", "spin-state", "evolution"],
+            "suggested_next_searches": [
+                '"oxygen evolution reaction" operando "spin state" catalyst',
+            ],
+            "possible_project_idea": "Compare direct and indirect evidence for spin-state changes under OER operating conditions.",
+            "related_aspects": "in_situ_or_operando_methods; spin state; OER",
+            "confidence": 0.84,
+        },
+        {
+            "gap_key": "oer_spin_vs_surface_reconstruction",
+            "gap_label": "Spin-state effects need separation from surface reconstruction",
+            "markers": ["surface reconstruction", "reconstruction", "amorphization", "oxyhydroxide"],
+            "suggested_next_searches": [
+                '"oxygen evolution reaction" "spin state" "surface reconstruction"',
+            ],
+            "possible_project_idea": "Identify experiments that distinguish intrinsic spin/electronic descriptors from reconstructed active surfaces.",
+            "related_aspects": "controversy_debate; surface reconstruction; spin state",
+            "confidence": 0.82,
+        },
+        {
+            "gap_key": "oer_lom_vs_aem",
+            "gap_label": "Lattice oxygen mechanism vs adsorbate evolution mechanism remains undercovered",
+            "markers": [
+                "lattice oxygen mechanism",
+                "adsorbate evolution mechanism",
+                "lattice oxygen",
+                "adsorbate",
+            ],
+            "suggested_next_searches": [
+                '"oxygen evolution reaction" "lattice oxygen mechanism" "adsorbate evolution mechanism"',
+            ],
+            "possible_project_idea": "Compare whether spin/electronic descriptors support lattice-oxygen or adsorbate-evolution pathways across catalyst classes.",
+            "related_aspects": "theory_mechanism; controversy_debate; OER pathway",
+            "confidence": 0.8,
+        },
+        {
+            "gap_key": "oer_material_specificity",
+            "gap_label": "OER spin/electronic mechanisms need material-specific comparison",
+            "markers": [
+                "perovskite",
+                "oxyhydroxide",
+                "cobalt",
+                "nickel",
+                "iron",
+                "coooh",
+                "niooh",
+            ],
+            "suggested_next_searches": [
+                '"oxygen evolution reaction" "spin state" perovskite oxyhydroxide cobalt nickel iron',
+            ],
+            "possible_project_idea": "Compare whether spin/electronic activity descriptors behave similarly in perovskites, oxyhydroxides, and Co/Ni/Fe oxides.",
+            "related_aspects": "materials_or_cases; catalyst class; electronic descriptors",
+            "confidence": 0.76,
+        },
+        {
+            "gap_key": "oer_descriptor_transferability",
+            "gap_label": "Transferability of OER spin/electronic descriptors is undercovered",
+            "markers": ["descriptor", "transfer", "generality", "class", "electronic descriptor"],
+            "suggested_next_searches": [
+                '"oxygen evolution reaction" "electronic structure" descriptor transferability catalyst',
+            ],
+            "possible_project_idea": "Audit whether spin state, orbital occupancy, and metal-oxygen covalency transfer across catalyst families or only explain narrow cases.",
+            "related_aspects": "application_or_performance; theory_mechanism; transferability",
+            "confidence": 0.78,
+        },
+    ],
+}
+
 
 def write_decision_artifacts(
     output_dir: str | Path,
@@ -152,6 +286,7 @@ def write_decision_artifacts(
     query_plan: QueryPlan | None = None,
     query_pilot_diagnostics: dict[str, Any] | None = None,
     prisma_like_flow: dict[str, Any] | None = None,
+    retrieval_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write decision matrices and next-search suggestions."""
 
@@ -165,6 +300,7 @@ def write_decision_artifacts(
         aspect_coverage_records,
         search_contract,
         prisma_like_flow,
+        retrieval_context,
     )
     next_searches = build_suggested_next_searches(
         ranked_papers,
@@ -173,6 +309,7 @@ def write_decision_artifacts(
         query_plan,
         query_pilot_diagnostics,
         prisma_like_flow,
+        retrieval_context,
     )
 
     write_csv(
@@ -254,11 +391,23 @@ def build_research_gap_matrix(
     aspect_coverage_records: list[AspectCoverageRecord],
     search_contract: SearchContract | None = None,
     prisma_like_flow: dict[str, Any] | None = None,
+    retrieval_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Infer undercovered research gaps from aspect coverage and exclusions."""
 
+    skip_reason = gap_skip_reason(retrieval_context, ranked_papers)
+    if skip_reason:
+        return [gap_generation_skipped_row(skip_reason)]
+
     if domain_name(search_contract) == "materials_magnetism":
         return build_materials_magnetism_gap_matrix(ranked_papers)
+
+    intent_rows = build_domain_intent_gap_matrix(
+        ranked_papers,
+        search_contract,
+    )
+    if intent_rows:
+        return intent_rows
 
     return build_default_research_gap_matrix(
         ranked_papers,
@@ -310,6 +459,10 @@ def build_default_research_gap_matrix(
         support = supporting_papers_for_gap(ranked_papers, key)
         rows.append(
             {
+                "gap_generation_status": "generated",
+                "reason": "",
+                "gap_key": key,
+                "gap_label": gap_label(key),
                 "gap": gap_label(key),
                 "supporting_papers": "; ".join(support) or "No strong supporting papers in this run",
                 "why_gap_remains": (
@@ -323,6 +476,10 @@ def build_default_research_gap_matrix(
     if not rows:
         rows.append(
             {
+                "gap_generation_status": "generated",
+                "reason": "",
+                "gap_key": "evaluation",
+                "gap_label": gap_label("evaluation"),
                 "gap": gap_label("evaluation"),
                 "supporting_papers": "No strong supporting papers in this run",
                 "why_gap_remains": "The current run did not expose a specific undercovered aspect, so evaluation remains the safest follow-up gap.",
@@ -366,6 +523,8 @@ def build_materials_magnetism_gap_matrix(
         label = str(rule["gap_label"])
         rows.append(
             {
+                "gap_generation_status": "generated",
+                "reason": "",
                 "gap_key": key,
                 "gap_label": label,
                 "gap": label,
@@ -388,6 +547,8 @@ def build_materials_magnetism_gap_matrix(
 def materials_fallback_gap_row() -> dict[str, Any]:
     query = "surface magnetization antiferromagnet direct probe finite temperature"
     return {
+        "gap_generation_status": "generated",
+        "reason": "",
         "gap_key": "materials_followup",
         "gap_label": "Focused materials-magnetism follow-up remains useful",
         "gap": "Focused materials-magnetism follow-up remains useful",
@@ -408,8 +569,14 @@ def build_suggested_next_searches(
     query_plan: QueryPlan | None = None,
     query_pilot_diagnostics: dict[str, Any] | None = None,
     prisma_like_flow: dict[str, Any] | None = None,
+    retrieval_context: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Suggest follow-up searches from gaps, drift, and included-paper keywords."""
+
+    if gap_skip_reason(retrieval_context, ranked_papers) or any(
+        row.get("gap_generation_status") == "skipped" for row in gap_rows
+    ):
+        return []
 
     searches: list[dict[str, str]] = []
     base_terms = contract_base_terms(search_contract, query_plan)
@@ -420,6 +587,21 @@ def build_suggested_next_searches(
             base_terms,
         )
     for row in gap_rows:
+        explicit_queries = split_suggested_queries(row.get("suggested_next_searches", ""))
+        if explicit_queries:
+            status = str(row.get("gap_generation_status") or "")
+            if status == "no_clear_gap":
+                reason = "Optional follow-up to check depth and recency for a specific user-requested aspect."
+            else:
+                reason = f"Investigate undercovered gap: {row.get('gap_label') or row.get('gap')}"
+            for explicit_query in explicit_queries:
+                add_search(
+                    searches,
+                    explicit_query,
+                    reason,
+                    "research_gap_matrix",
+                )
+            continue
         query = " ".join([base_terms, search_phrase_for_gap(row["gap"])]).strip()
         add_search(
             searches,
@@ -479,6 +661,178 @@ def build_suggested_next_searches(
             "search_contract",
         )
     return searches[:12]
+
+
+def gap_skip_reason(
+    retrieval_context: dict[str, Any] | None,
+    ranked_papers: list[RankedPaper],
+) -> str:
+    """Return the reason research-gap inference should be skipped, if any."""
+
+    context = retrieval_context or {}
+    status = str(context.get("retrieval_status") or "").strip().lower()
+    reason = str(context.get("reason") or "").strip()
+    if status == "planning_only":
+        return reason or "retrieval_not_performed"
+    if context.get("ranked_papers_based_on_real_retrieval") is False:
+        return reason or "retrieval_not_performed"
+    merged_count = context.get("merged_paper_count")
+    if merged_count == 0:
+        return reason or "insufficient_screened_papers"
+    if not ranked_papers and context:
+        return reason or "insufficient_screened_papers"
+    return ""
+
+
+def gap_generation_skipped_row(reason: str) -> dict[str, Any]:
+    """Create a status-only gap row that cannot be mistaken for an undercovered aspect."""
+
+    if reason == "retrieval_not_performed":
+        why = "本次只完成 query planning，未执行论文检索，因此不生成 research gaps。"
+    else:
+        why = "No screened papers were available, so the system cannot infer research gaps from evidence."
+    return {
+        "gap_generation_status": "skipped",
+        "reason": reason,
+        "gap_key": "gap_generation_skipped",
+        "gap_label": "Research gap generation skipped",
+        "gap": "gap_generation_status=skipped",
+        "evidence_or_reason": reason,
+        "supporting_papers": "",
+        "why_gap_remains": why,
+        "possible_project_idea": "",
+        "suggested_next_searches": "",
+        "coverage_summary": "",
+        "suggested_action": "",
+        "confidence": "0.00",
+        "related_aspects": "",
+    }
+
+
+def build_domain_intent_gap_matrix(
+    ranked_papers: list[RankedPaper],
+    search_contract: SearchContract | None = None,
+) -> list[dict[str, Any]]:
+    """Build topic-specific gaps from the active intent and screened-paper corpus."""
+
+    profile = gap_profile(search_contract)
+    rules = DOMAIN_INTENT_GAP_RULES.get(profile, [])
+    if not rules:
+        return []
+    corpus = materials_corpus(ranked_papers)
+    rows: list[dict[str, Any]] = []
+    for rule in rules:
+        markers = list(rule.get("markers", []))
+        matches = matched_markers(corpus, markers)
+        if len(matches) >= min(2, len(markers)):
+            continue
+        missing_markers = [marker for marker in markers if marker not in matches]
+        evidence_or_reason = (
+            "Screened titles, abstracts, and evidence snippets weakly covered: "
+            + (", ".join(matches) if matches else "none")
+            + ". Missing or thin markers include: "
+            + ", ".join(missing_markers[:5])
+            + "."
+        )
+        rows.append(
+            {
+                "gap_generation_status": "generated",
+                "reason": "",
+                "gap_key": rule["gap_key"],
+                "gap_label": rule["gap_label"],
+                "gap": rule["gap_label"],
+                "evidence_or_reason": evidence_or_reason,
+                "supporting_papers": "; ".join(materials_supporting_titles(ranked_papers, markers))
+                or "No strong supporting papers in this run",
+                "why_gap_remains": evidence_or_reason,
+                "possible_project_idea": rule["possible_project_idea"],
+                "suggested_next_searches": "; ".join(rule["suggested_next_searches"]),
+                "coverage_summary": "",
+                "suggested_action": "targeted_gap_search",
+                "confidence": f"{float(rule.get('confidence', 0.7)):.2f}",
+                "related_aspects": rule["related_aspects"],
+            }
+        )
+    if rows:
+        return rows
+    return [no_clear_gap_row(profile, corpus, search_contract)]
+
+
+def no_clear_gap_row(
+    profile: str,
+    corpus: str,
+    search_contract: SearchContract | None,
+) -> dict[str, Any]:
+    """Return a coverage-summary row when no clear low-coverage gap is visible."""
+
+    return {
+        "gap_generation_status": "no_clear_gap",
+        "reason": "current_screened_set_covers_configured_markers",
+        "gap_key": f"{profile}_coverage_summary",
+        "gap_label": "Coverage summary",
+        "gap": "",
+        "evidence_or_reason": "The current screened set covers the configured intent-specific markers reasonably well.",
+        "supporting_papers": "Current retrieved set covers the configured markers",
+        "why_gap_remains": "No clear research gap can be asserted from this run alone.",
+        "possible_project_idea": "",
+        "suggested_next_searches": "; ".join(optional_depth_queries(profile, search_contract)),
+        "coverage_summary": coverage_summary_for_profile(profile, corpus),
+        "suggested_action": "optional_depth_check; optional_recency_check",
+        "confidence": "0.45",
+        "related_aspects": profile,
+    }
+
+
+def coverage_summary_for_profile(profile: str, corpus: str) -> str:
+    """Summarize which user-requested aspects the screened set appears to cover."""
+
+    if profile == "sei_interface":
+        covered = []
+        if matched_markers(corpus, ["formation", "progress", "evolution", "cycling"]):
+            covered.append("已覆盖 SEI formation/progress/evolution")
+        if matched_markers(corpus, ["lithium-ion", "graphite", "silicon", "lithium metal"]):
+            covered.append("已覆盖 lithium-ion / graphite / silicon / lithium metal context")
+        if matched_markers(corpus, ["characterization", "composition", "structure"]):
+            covered.append("已覆盖 characterization, composition, and structure papers")
+        if matched_markers(corpus, ["failure", "degradation", "aging", "capacity fade"]):
+            covered.append("已覆盖 failure/degradation pathways")
+        return "; ".join(covered) or "当前结果已覆盖 SEI interface 的 configured markers"
+    if profile == "oer_catalysis":
+        covered = []
+        if matched_markers(corpus, ["oer", "oxygen evolution", "spin state", "electronic structure"]):
+            covered.append("已覆盖 OER + spin-state/electronic structure mechanism papers")
+        if matched_markers(corpus, ["cobalt", "coooh", "perovskite", "transition metal", "oxyhydroxide"]):
+            covered.append("已覆盖 cobalt oxyhydroxide / perovskite / transition-metal catalyst cases")
+        if matched_markers(corpus, ["mechanism", "activity", "performance", "covalency"]):
+            covered.append("已覆盖 mechanism/performance papers")
+        if matched_markers(corpus, ["surface reconstruction", "lattice oxygen", "adsorbate"]):
+            covered.append("已触及 surface reconstruction 或 OER pathway controversy")
+        return "; ".join(covered) or "当前结果已覆盖 OER spin/electronic catalyst 的 configured markers"
+    return "The current screened set covers the configured intent markers reasonably well."
+
+
+def optional_depth_queries(
+    profile: str,
+    search_contract: SearchContract | None,
+) -> list[str]:
+    """Return aspect-specific optional follow-up queries for no-clear-gap runs."""
+
+    if profile == "sei_interface":
+        return [
+            'SEI "in situ" characterization "lithium-ion battery"',
+            'SEI "ex situ" characterization "lithium-ion battery"',
+            '"solid electrolyte interphase" composition evolution "lithium-ion battery"',
+            'SEI failure mechanism "lithium-ion battery"',
+        ]
+    if profile == "oer_catalysis":
+        return [
+            'OER "spin state" operando spectroscopy',
+            'OER "surface reconstruction" "spin state" catalyst',
+            'OER "lattice oxygen mechanism" "spin state"',
+            '"oxygen evolution reaction" "electronic structure" perovskite oxide',
+        ]
+    base = contract_base_terms(search_contract, None)
+    return [base] if base else []
 
 
 def build_materials_suggested_next_searches(

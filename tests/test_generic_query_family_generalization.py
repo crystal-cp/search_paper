@@ -236,6 +236,39 @@ def test_ai_screening_no_characterization_template(tmp_path):
     assert len(multi_agent_queries) <= 1
 
 
+def test_ai_screening_query_count_and_coverage(tmp_path):
+    _payload, _concept_map, _family_plan, final_queries, provenance, _trace = _plan_with_families(
+        AI_SCREENING_QUESTION,
+        tmp_path,
+    )
+    queries = sorted(set(_all_queries(final_queries)))
+    query_text = "\n".join(queries).lower()
+
+    assert provenance["applied"] is True
+    assert len(queries) >= 8
+    assert "systematic review screening" in query_text
+    assert "title abstract screening" in query_text
+    assert "study selection" in query_text
+    assert "human-in-the-loop" in query_text
+    assert "human feedback" in query_text
+    assert "evidence validation" in query_text or "evidence verification" in query_text
+    assert "recall accuracy" in query_text or "recall precision" in query_text
+    assert "active learning" in query_text
+
+
+def test_ai_screening_no_material_template_terms(tmp_path):
+    _payload, _concept_map, _family_plan, final_queries, provenance, _trace = _plan_with_families(
+        AI_SCREENING_QUESTION,
+        tmp_path,
+    )
+    query_text = _query_text(final_queries)
+
+    assert provenance["applied"] is True
+    assert "representative materials" not in query_text
+    assert "experimental characterization" not in query_text
+    assert "materials_or_cases" not in query_text
+
+
 def test_general_thin_film_deposition_does_not_activate_ferroelectric_pack(tmp_path):
     payload, _concept_map, _family_plan, final_queries, provenance, _trace = _plan_with_families(
         THIN_FILM_QUESTION,
@@ -292,6 +325,28 @@ def test_thin_film_method_comparison_query_count_and_no_long_duplicates(tmp_path
     assert "sputtering" in query_text
     assert "cvd" in query_text
     _assert_no_standalone_query(final_queries, {"sputtering", "+sputtering"})
+
+
+def test_thin_film_queries_cover_multiple_methods(tmp_path):
+    _payload, _concept_map, _family_plan, final_queries, provenance, _trace = _plan_with_families(
+        THIN_FILM_QUESTION,
+        tmp_path,
+    )
+    queries = sorted(set(_all_queries(final_queries)))
+    query_text = "\n".join(queries).lower()
+
+    assert provenance["applied"] is True
+    assert len(queries) >= 8
+    assert "ald" in query_text or "atomic layer deposition" in query_text
+    assert "pld" in query_text or "pulsed laser deposition" in query_text
+    assert "sputtering" in query_text
+    assert "cvd" in query_text or "chemical vapor deposition" in query_text
+    assert sum(
+        1
+        for query in queries
+        if _contains_any(query, {"comparison", "review", "advantages", "disadvantages", "pros cons", "methods", "techniques"})
+        and _contains_any(query, {"thin film", "deposition", "fabrication"})
+    ) >= 6
 
 
 @pytest.mark.parametrize(
@@ -353,6 +408,96 @@ def test_mof_queries_require_mof_co2_anchor(tmp_path):
         and not _contains_any(query, {"mof", "metal-organic framework", "co2", "carbon dioxide"})
         for query in queries
     )
+
+
+def test_mof_queries_require_mof_co2_adsorption_anchor(tmp_path):
+    question = (
+        "我想了解 MOF 材料用于 CO2 捕集时孔径、官能团和水稳定性对吸附性能的影响，"
+        "想找理论机制、实验表征、典型材料和应用限制相关论文。"
+    )
+    _payload, _concept_map, _family_plan, final_queries, provenance, _trace = _plan_with_families(
+        question,
+        tmp_path,
+    )
+    queries = sorted(set(_all_queries(final_queries)))
+
+    assert provenance["applied"] is True
+    assert len(queries) >= 8
+    assert all(_contains_any(query, {"mof", "metal-organic framework"}) for query in queries)
+    assert all(
+        _contains_any(query, {"co2", "carbon dioxide", "carbon capture", "adsorption", "capture"})
+        for query in queries
+    )
+    assert any("co2 adsorption" in query.lower() for query in queries)
+
+
+def test_mof_overbroad_queries_dropped(tmp_path):
+    question = (
+        "我想了解 MOF 材料用于 CO2 捕集时孔径、官能团和水稳定性对吸附性能的影响，"
+        "想找理论机制、实验表征、典型材料和应用限制相关论文。"
+    )
+    _payload, _concept_map, _family_plan, final_queries, provenance, _trace = _plan_with_families(
+        question,
+        tmp_path,
+    )
+    queries = {query.strip().strip('"').lower() for query in _all_queries(final_queries)}
+    dropped = provenance["dropped_queries"]
+    dropped_text = "\n".join(str(item) for item in dropped).lower()
+
+    assert "capture mof" not in queries
+    assert "mof capture" not in queries
+    assert "mof co2" not in queries
+    assert not any("representative materials" in query for query in queries)
+    assert "accepted_critic_issue" in dropped_text
+    assert "mof_short_anchor_only" in dropped_text or "mof_missing" in dropped_text
+
+
+def test_query_critic_issues_affect_final_queries(tmp_path):
+    question = (
+        "我想了解 MOF 材料用于 CO2 捕集时孔径、官能团和水稳定性对吸附性能的影响，"
+        "想找理论机制、实验表征、典型材料和应用限制相关论文。"
+    )
+    payload, _concept_map, _family_plan, final_queries, provenance, _trace = _plan_with_families(
+        question,
+        tmp_path,
+    )
+    repair = build_auto_query_repair_suggestions(payload["query_plan"], provenance)
+    final_query_text = "\n".join(_all_queries(final_queries)).lower()
+    critic_actions = [
+        action
+        for action in repair["query_actions"]
+        if action["action"] == "drop" and action.get("accepted_critic_issue")
+    ]
+
+    assert critic_actions
+    assert all(action["original_query"].lower() not in final_query_text for action in critic_actions)
+    assert any("overbroad_queries" in action["accepted_critic_issue"] for action in critic_actions)
+
+
+def test_planned_queries_records_dropped_and_repaired_queries(tmp_path):
+    output_dir = tmp_path / "outputs"
+    question = (
+        "我想了解 MOF 材料用于 CO2 捕集时孔径、官能团和水稳定性对吸附性能的影响，"
+        "想找理论机制、实验表征、典型材料和应用限制相关论文。"
+    )
+    run_pipeline(
+        question,
+        providers=["openalex"],
+        max_per_query=0,
+        output_dir=str(output_dir),
+        use_query_families=True,
+        retriever_agent=RetrieverAgent(clients={"openalex": EmptyOpenAlexClient()}),
+    )
+    planned = json.loads((output_dir / "planned_queries.json").read_text())
+    provenance = json.loads((output_dir / "query_provenance.json").read_text())
+    repairs = json.loads((output_dir / "query_repair_suggestions.json").read_text())
+
+    assert planned["dropped_queries"] == provenance["dropped_queries"]
+    assert "repaired_queries" in planned
+    assert "query_repair_actions" in planned
+    assert repairs["query_actions"]
+    assert any(action["action"] == "drop" for action in repairs["query_actions"])
+    assert any(action.get("accepted_critic_issue") for action in repairs["query_actions"])
 
 
 def test_magnetism_pack_regression_not_polluted_by_other_domains(tmp_path):

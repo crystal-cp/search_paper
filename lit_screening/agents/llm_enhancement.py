@@ -382,6 +382,9 @@ class LLMUserReportAdapter:
         paper_roles: list[PaperRoleRecord],
         provider_status: dict[str, Any],
         exploration_quality: dict[str, Any],
+        search_contract: SearchContract | None = None,
+        research_gap_matrix: list[dict[str, Any]] | None = None,
+        suggested_next_searches: list[dict[str, Any]] | None = None,
         llm_client: GenericLLMClient | None = None,
     ) -> tuple[str, dict[str, Any]]:
         artifact_input = verified_report_input(
@@ -391,6 +394,9 @@ class LLMUserReportAdapter:
             paper_roles,
             provider_status,
             exploration_quality,
+            search_contract=search_contract,
+            research_gap_matrix=research_gap_matrix,
+            suggested_next_searches=suggested_next_searches,
         )
         fallback_md = render_user_report_markdown(artifact_input)
         fallback_trace = {
@@ -668,24 +674,52 @@ def verified_report_input(
     paper_roles: list[PaperRoleRecord],
     provider_status: dict[str, Any],
     exploration_quality: dict[str, Any],
+    search_contract: SearchContract | None = None,
+    research_gap_matrix: list[dict[str, Any]] | None = None,
+    suggested_next_searches: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     roles_by_id = {record.paper_id: record for record in paper_roles}
+    retrieval_summary = report_retrieval_summary(provider_status, len(ranked_papers))
+    task_profile = report_task_profile(search_contract, ranked_papers)
     rows = []
     for item in ranked_papers[:12]:
         role = roles_by_id.get(item.paper.paper_id)
+        assessment = item.domain_assessment
+        decision = item.screening_decision
+        matched_groups = list(assessment.matched_groups) if assessment else []
+        missing_groups = list(assessment.missing_groups) if assessment else []
+        target_context = list(assessment.target_context_match) if assessment else []
+        negative_context = list(assessment.negative_context_match) if assessment else []
+        peripheral_reason = assessment.peripheral_context_reason if assessment else ""
+        topic_focus = assessment.topic_focus_score if assessment else 0.0
+        domain_decision = assessment.domain_decision if assessment else ""
+        primary_role = role.primary_role if role else ""
+        reading_priority = decision.reading_priority if decision else ""
         rows.append(
             {
                 "rank": item.rank,
                 "title": item.paper.title,
                 "evidence_grounding": item.verification.support_level,
                 "intent_match": item.scores.intent_centrality_score,
-                "reading_priority": item.screening_decision.reading_priority
-                if item.screening_decision
-                else "",
-                "domain_decision": item.domain_assessment.domain_decision
-                if item.domain_assessment
-                else "",
-                "primary_role": role.primary_role if role else "",
+                "reading_priority": reading_priority,
+                "domain_decision": domain_decision,
+                "primary_role": primary_role,
+                "matched_groups": matched_groups,
+                "missing_groups": missing_groups,
+                "target_context_match": target_context,
+                "negative_context_match": negative_context,
+                "topic_focus_score": topic_focus,
+                "peripheral_context_reason": peripheral_reason,
+                "why_read_now": why_read_now_summary(
+                    primary_role,
+                    reading_priority,
+                    domain_decision,
+                    matched_groups,
+                    missing_groups,
+                    target_context,
+                    negative_context,
+                    peripheral_reason,
+                ),
                 "evidence_sentence": item.evidence.evidence_sentence,
             }
         )
@@ -695,39 +729,69 @@ def verified_report_input(
         "ranking_diagnostics": ranking_diagnostics,
         "paper_roles": to_plain_data(paper_roles[:20]),
         "provider_status": provider_status,
+        "retrieval_summary": retrieval_summary,
         "exploration_quality": exploration_quality,
+        "research_gap_matrix": research_gap_matrix or [],
+        "suggested_next_searches": suggested_next_searches or [],
+        "task_profile": task_profile,
     }
 
 
 def render_user_report_markdown(artifact_input: dict[str, Any]) -> str:
+    retrieval_summary = artifact_input.get("retrieval_summary") or {}
     lines = [
         "# User-Friendly Literature Screening Summary",
+        "",
+        "## Retrieval status",
+        "",
+        f"- retrieval_status: {retrieval_summary.get('retrieval_status', 'unknown')}",
+        f"- provider_summary: {retrieval_summary.get('provider_summary', 'not available')}",
+        f"- ranked papers based on real retrieval: {retrieval_summary.get('ranked_papers_based_on_real_retrieval', False)}",
         "",
         "## How the system interpreted the task",
         "",
         "The system split the question into intent groups, query families, domain checks, and evidence-grounded paper summaries.",
         "",
+    ]
+    if retrieval_summary.get("retrieval_status") == "planning_only":
+        lines.extend(
+            [
+                "本次只完成 query planning，未执行论文检索，因此不生成 research gaps，也不会把任何论文标成核心必读。",
+                "",
+            ]
+        )
+    lines.extend(
+        [
         "## What to read first",
         "",
-        "| Rank | Paper | Evidence grounding | Intent match | Reading priority | Why this is shown |",
-        "| ---: | --- | --- | ---: | --- | --- |",
-    ]
+        "| Rank | Paper | Role | Evidence grounding | Intent match | Reading priority | Intent match summary | Matched groups | Missing groups | Context warning | Why read now |",
+        "| ---: | --- | --- | --- | ---: | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
     for row in artifact_input.get("ranked_papers", [])[:8]:
+        context_warning = context_warning_summary(row)
         lines.append(
             "| "
             f"{row.get('rank', '')} | "
             f"{_escape_md(row.get('title', ''))} | "
+            f"{_escape_md(row.get('primary_role', '') or row.get('domain_decision', ''))} | "
             f"{_escape_md(row.get('evidence_grounding', ''))} | "
             f"{float(row.get('intent_match') or 0):.3f} | "
             f"{_escape_md(row.get('reading_priority', ''))} | "
-            f"{_escape_md(row.get('primary_role', '') or row.get('domain_decision', ''))} |"
+            f"{_escape_md(intent_match_summary(row))} | "
+            f"{_escape_md('; '.join(row.get('matched_groups') or []))} | "
+            f"{_escape_md('; '.join(row.get('missing_groups') or []))} | "
+            f"{_escape_md(context_warning)} | "
+            f"{_escape_md(row.get('why_read_now', ''))} |"
         )
+    lines.extend(render_coverage_gap_section(artifact_input))
     lines.extend(
         [
             "",
             "## Important caveat",
             "",
             "`strict_support` means the evidence sentence is grounded in the abstract. It does not by itself mean the paper is highly relevant.",
+            "A paper can have `strict_support` but still be background or peripheral if it misses required concept groups or has non-target context.",
             "",
             "## Provider status",
             "",
@@ -743,10 +807,223 @@ def render_user_report_markdown(artifact_input: dict[str, Any]) -> str:
             "",
             "## How to narrow the next run",
             "",
-            "Use feedback such as 'exclude sodium batteries' or 'show more in situ characterization methods' to refine the next pass.",
         ]
     )
+    for example in feedback_examples_for_task(str(artifact_input.get("task_profile") or "")):
+        lines.append(f"- {example}")
     return "\n".join(lines) + "\n"
+
+
+def render_coverage_gap_section(artifact_input: dict[str, Any]) -> list[str]:
+    """Render novice-facing coverage, gap, and next-search guidance."""
+
+    retrieval_summary = artifact_input.get("retrieval_summary") or {}
+    gap_rows = artifact_input.get("research_gap_matrix") or []
+    next_searches = artifact_input.get("suggested_next_searches") or []
+    lines = ["", "## Coverage and remaining gaps", ""]
+    if retrieval_summary.get("retrieval_status") == "planning_only":
+        lines.append(
+            "本次只完成 query planning，未执行论文检索，因此不生成 coverage 或 research gap 结论。"
+        )
+        return lines
+    if gap_rows and gap_rows[0].get("gap_generation_status") == "skipped":
+        lines.append(
+            "Research gaps were not generated because retrieval was not performed or there were not enough screened papers."
+        )
+        return lines
+    if gap_rows and gap_rows[0].get("gap_generation_status") == "no_clear_gap":
+        row = gap_rows[0]
+        lines.extend(
+            [
+                f"- Coverage summary: {row.get('coverage_summary', '')}",
+                "- No clear research gap is asserted from this run alone; the screened set covers the configured markers reasonably well.",
+                f"- Suggested action: {row.get('suggested_action', 'optional_depth_check')}",
+            ]
+        )
+        if next_searches:
+            lines.append("- Optional follow-up directions:")
+            for item in next_searches[:5]:
+                lines.append(
+                    f"  - `{item.get('query', '')}`: {item.get('reason', 'Optional follow-up')}"
+                )
+        return lines
+    if gap_rows:
+        lines.append("- Low-coverage gaps inferred from this run:")
+        for row in gap_rows[:5]:
+            lines.append(
+                f"  - {row.get('gap_label') or row.get('gap')}: "
+                f"{row.get('evidence_or_reason') or row.get('why_gap_remains', '')}"
+            )
+        if next_searches:
+            lines.append("- Suggested next searches:")
+            for item in next_searches[:5]:
+                lines.append(
+                    f"  - `{item.get('query', '')}`: {item.get('reason', '')}"
+                )
+        return lines
+    lines.append("No coverage or gap artifact was generated for this run.")
+    return lines
+
+
+def report_task_profile(
+    search_contract: SearchContract | None,
+    ranked_papers: list[RankedPaper],
+) -> str:
+    """Infer a lightweight report profile for feedback examples."""
+
+    parts: list[str] = []
+    if search_contract:
+        frame = search_contract.generic_intent_frame
+        parts.extend(search_contract.must_include_concepts)
+        parts.extend(search_contract.optional_concepts)
+        parts.extend(search_contract.required_aspects)
+        if frame:
+            parts.extend(frame.research_object)
+            parts.extend(frame.domain_context)
+            parts.extend(frame.target_process_or_property)
+            parts.extend(frame.method_terms)
+    for item in ranked_papers[:5]:
+        parts.extend([item.paper.title, item.paper.abstract, item.evidence.evidence_sentence])
+    text = " ".join(parts).lower()
+    if "solid electrolyte interphase" in text or " sei" in f" {text}":
+        return "sei_interface"
+    if "oxygen evolution" in text or " oer" in f" {text}" or "water oxidation" in text:
+        return "oer_catalysis"
+    if "systematic review" in text or "literature screening" in text or "title abstract screening" in text:
+        return "ai_literature_screening"
+    if "mof" in text or "metal-organic framework" in text or "co2 capture" in text:
+        return "mof_co2_capture"
+    if "thin film" in text or "sputtering" in text or "atomic layer deposition" in text:
+        return "thin_film_fabrication"
+    return "generic_science"
+
+
+def feedback_examples_for_task(task_profile: str) -> list[str]:
+    """Return task-specific feedback examples for the next run."""
+
+    examples = {
+        "sei_interface": [
+            "exclude non-lithium battery systems",
+            "show more in situ / operando characterization",
+            "focus on graphite / silicon / lithium metal anodes",
+            "show fewer modeling papers",
+        ],
+        "oer_catalysis": [
+            "focus on operando spectroscopy",
+            "focus on perovskite oxides / cobalt oxyhydroxides",
+            "compare spin-state effects with surface reconstruction",
+            "exclude ORR-only / CO2-reduction papers",
+            "show more controversy papers",
+        ],
+        "ai_literature_screening": [
+            "focus on recall / precision evaluation",
+            "exclude generic AI review papers",
+            "show more human feedback workflows",
+        ],
+        "mof_co2_capture": [
+            "focus on water stability",
+            "focus on functionalized MOFs",
+            "show more experimental CO2 adsorption papers",
+        ],
+        "thin_film_fabrication": [
+            "compare ALD vs PLD vs sputtering vs CVD",
+            "focus on review papers",
+            "focus on deposition quality / scalability / cost",
+        ],
+    }
+    return examples.get(
+        task_profile,
+        [
+            "show more papers that cover all required concept groups",
+            "exclude broad background papers",
+            "focus on methods, mechanisms, or controversies",
+        ],
+    )
+
+
+def report_retrieval_summary(
+    provider_status: dict[str, Any],
+    ranked_count: int,
+) -> dict[str, Any]:
+    states = [
+        str(status.get("status") or "")
+        for status in (provider_status or {}).values()
+        if isinstance(status, dict)
+    ]
+    if states and all(state == "not_attempted" for state in states):
+        retrieval_status = "planning_only"
+    elif any(state in {"success", "success_no_results"} for state in states) and any(
+        state in {"failed", "rate_limited", "partial_success", "partial_success_rate_limited"}
+        for state in states
+    ):
+        retrieval_status = "partial_success"
+    elif any(state in {"success", "success_no_results", "partial_success", "partial_success_rate_limited"} for state in states):
+        retrieval_status = "success" if ranked_count else "failed"
+    elif states:
+        retrieval_status = "failed"
+    else:
+        retrieval_status = "planning_only"
+    provider_bits = [
+        f"{provider}:{status.get('status', 'unknown')}({status.get('returned_paper_count', 0)} papers)"
+        for provider, status in (provider_status or {}).items()
+        if isinstance(status, dict)
+    ]
+    return {
+        "retrieval_status": retrieval_status,
+        "provider_summary": "; ".join(provider_bits) or "no providers requested",
+        "ranked_papers_based_on_real_retrieval": retrieval_status
+        in {"success", "partial_success"}
+        and ranked_count > 0,
+    }
+
+
+def intent_match_summary(row: dict[str, Any]) -> str:
+    matched = row.get("matched_groups") or []
+    missing = row.get("missing_groups") or []
+    focus = _float(row.get("topic_focus_score"), 0.0)
+    parts = []
+    if matched:
+        parts.append("covers " + ", ".join(matched[:4]))
+    if missing:
+        parts.append("missing " + ", ".join(missing[:3]))
+    parts.append(f"topic focus {focus:.2f}")
+    return "; ".join(parts)
+
+
+def context_warning_summary(row: dict[str, Any]) -> str:
+    negative = row.get("negative_context_match") or []
+    target = row.get("target_context_match") or []
+    peripheral = str(row.get("peripheral_context_reason") or "").strip()
+    if negative or peripheral:
+        return "peripheral/caution: " + "; ".join([*negative[:3], peripheral]).strip("; ")
+    if target:
+        return "target context: " + ", ".join(target[:3])
+    return ""
+
+
+def why_read_now_summary(
+    primary_role: str,
+    reading_priority: str,
+    domain_decision: str,
+    matched_groups: list[str],
+    missing_groups: list[str],
+    target_context: list[str],
+    negative_context: list[str],
+    peripheral_reason: str,
+) -> str:
+    if negative_context or peripheral_reason or domain_decision in {"borderline", "out_of_scope"}:
+        return (
+            "Use as peripheral/background only: it touches the topic but has non-target or borderline context."
+        )
+    if reading_priority == "must_read" and matched_groups and not missing_groups:
+        return (
+            "Read early: it covers the required concept groups and is treated as a core paper for this intent."
+        )
+    if "review" in primary_role or reading_priority == "read_later":
+        return "Good background: useful for orientation, but not necessarily the central intersection paper."
+    if target_context:
+        return "Relevant candidate: it matches the target context and can support a focused reading pass."
+    return "Shown because it has evidence or role signals, but verify fit before treating it as central."
 
 
 def report_markdown_is_grounded(markdown: str, artifact_input: dict[str, Any]) -> bool:

@@ -80,7 +80,7 @@ def _fallback_family(lens: ResearchLens) -> QueryFamily:
         exclusion_terms=list(lens.exclusion_risks),
         stop_condition="Stop when the lens has at least a small set of relevant papers.",
         priority=_generic_family_priority(lens.name),
-        budget=min(5, max(1, len(queries))),
+        budget=_generic_family_budget(lens.name, queries),
     )
 
 
@@ -284,6 +284,8 @@ def _special_query_limit(lens_name: str, queries: list[str]) -> int:
     query_text = " ".join(queries).lower()
     if "co2 capture" in query_text or "carbon dioxide adsorption" in query_text:
         return 8
+    if "systematic review screening" in query_text or "literature screening" in query_text:
+        return 10
     return 5
 
 
@@ -323,26 +325,31 @@ def _thin_film_method_queries(lens_name: str, terms: list[str]) -> list[str]:
 
 
 def _mof_anchor_queries(lens_name: str, terms: list[str]) -> list[str]:
-    anchor = ["MOF", "CO2 capture"]
     return [
-        _join_query_terms([*anchor, "adsorption performance"]),
-        _join_query_terms([*anchor, "pore size"]),
-        _join_query_terms([*anchor, "functional groups"]),
-        _join_query_terms([*anchor, "water stability"]),
+        _join_query_terms(["MOF", "CO2 adsorption", "pore size"]),
+        _join_query_terms(["MOF", "CO2 capture", "functional groups"]),
+        _join_query_terms(["MOF", "CO2 adsorption", "water stability"]),
+        _join_query_terms(["MOF", "CO2 capture", "adsorption performance"]),
         _join_query_terms(["MOF", "metal-organic framework", "carbon dioxide adsorption", "mechanism"]),
-        _join_query_terms([*anchor, "experimental characterization"]),
-        _join_query_terms([*anchor, "representative materials"]),
-        _join_query_terms([*anchor, "application limitations"]),
+        _join_query_terms(["MOF", "CO2 capture", "structure property relationship"]),
+        _join_query_terms(["MOF", "CO2 adsorption", "review"]),
+        _join_query_terms(["MOF", "CO2 capture", "representative frameworks"]),
     ]
 
 
 def _ai_screening_queries(lens_name: str, terms: list[str]) -> list[str]:
     return [
         _join_query_terms(["LLM", "systematic review screening"]),
-        _join_query_terms(["LLM", "large language model", "literature screening", "human feedback"]),
+        _join_query_terms(["large language model", "title abstract screening", "systematic review"]),
+        _join_query_terms(["LLM", "study selection", "systematic review"]),
+        _join_query_terms(["LLM", "literature screening", "human-in-the-loop"]),
+        _join_query_terms(["LLM-assisted", "systematic review screening", "human feedback"]),
+        _join_query_terms(["large language model", "evidence validation", "literature screening"]),
+        _join_query_terms(["LLM", "semi-automated screening", "systematic review", "active learning"]),
+        _join_query_terms(["large language model", "evidence verification", "literature screening"]),
         _join_query_terms(["LLM", "systematic review", "evidence validation"]),
         _join_query_terms(["LLM", "literature screening", "recall accuracy"]),
-        _join_query_terms(["LLM", "human-in-the-loop", "systematic review screening"]),
+        _join_query_terms(["AI-assisted screening", "systematic review", "recall precision"]),
     ]
 
 
@@ -446,6 +453,19 @@ def _generic_family_priority(lens_name: str) -> int:
         "method_comparison": 82,
     }
     return priorities.get(lens_name, 50)
+
+
+def _generic_family_budget(lens_name: str, queries: list[str]) -> int:
+    if not queries:
+        return 1
+    query_text = " ".join(queries).lower()
+    if lens_name == "method_comparison":
+        return min(8, len(queries))
+    if "systematic review screening" in query_text or "literature screening" in query_text:
+        return min(10, len(queries))
+    if "co2 capture" in query_text or "co2 adsorption" in query_text:
+        return min(8, len(queries))
+    return min(5, max(1, len(queries)))
 
 
 def _seed_context_family(seed_hints: list[SeedHint] | None) -> QueryFamily | None:

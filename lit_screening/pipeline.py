@@ -1543,6 +1543,13 @@ def _final_query_quality(
     frame = search_contract.generic_intent_frame if search_contract else None
     if frame is None:
         return {"keep": True, "reason": "no_generic_frame_available"}
+    critic_issue = _rule_query_critic_issue(cleaned, search_contract)
+    if critic_issue:
+        return {
+            "keep": False,
+            "reason": "accepted_rule_query_critic_issue",
+            "accepted_critic_issue": critic_issue,
+        }
     core_terms = _anchor_candidates(
         [
             *frame.research_object,
@@ -1615,6 +1622,13 @@ def _final_query_quality(
             "core_anchor_terms": core_terms,
             "secondary_anchor_terms": secondary_terms,
         }
+    if _is_thin_film_method_comparison_query(cleaned, search_contract):
+        return {
+            "keep": True,
+            "reason": "thin_film_method_comparison_anchor_passed",
+            "core_anchor_terms": core_terms,
+            "secondary_anchor_terms": secondary_terms,
+        }
     if not secondary_terms and core_hit_count < 2 and not has_need:
         return {
             "keep": False,
@@ -1649,6 +1663,153 @@ def _anchor_candidates(values: list[str], drop_aspect_only: bool) -> list[str]:
             continue
         terms.append(cleaned)
     return _unique_strings(terms)
+
+
+def _rule_query_critic_issue(
+    query: str,
+    search_contract: SearchContract | None,
+) -> str:
+    """Return a deterministic critic issue that should affect final selection."""
+
+    if not search_contract or search_contract.generic_intent_frame is None:
+        return ""
+    frame = search_contract.generic_intent_frame
+    lowered = _normalized_query_text(query)
+    tokens = tokenize(lowered)
+    research_blob = _normalized_query_text(
+        " ".join(
+            [
+                *frame.research_object,
+                *frame.domain_context,
+                *frame.target_process_or_property,
+                *frame.method_terms,
+                *frame.application_or_metric_terms,
+            ]
+        )
+    )
+    if "llm" in research_blob or "systematic review" in research_blob or "literature screening" in research_blob:
+        if "representative material" in lowered or "experimental characterization" in lowered or "materials" in lowered:
+            return "cross_domain_pollution:ai_screening_material_template_terms"
+    if "mof" in research_blob and (
+        "co2" in research_blob
+        or "carbon dioxide" in research_blob
+        or "capture" in research_blob
+        or "adsorption" in research_blob
+    ):
+        has_mof = "mof" in tokens or "metal organic framework" in lowered
+        has_context = any(
+            marker in lowered
+            for marker in ["co2", "carbon dioxide", "carbon capture", "co2 capture", "co2 adsorption", "adsorption"]
+        )
+        has_specific_aspect = any(
+            marker in lowered
+            for marker in [
+                "pore",
+                "functional",
+                "water stability",
+                "adsorption performance",
+                "structure property",
+                "review",
+                "framework",
+                "case stud",
+            ]
+        )
+        if "representative materials" in lowered:
+            return "cross_domain_pollution:mof_representative_materials_template"
+        if has_mof and len(tokens) <= 3:
+            return "overbroad_queries:mof_short_anchor_only"
+        if has_mof and not has_context:
+            return "overbroad_queries:mof_missing_co2_adsorption_context"
+        if has_mof and not has_specific_aspect and len(tokens) <= 4:
+            return "overbroad_queries:mof_missing_aspect_or_review_intent"
+    if (
+        "thin film deposition" in research_blob
+        or "atomic layer deposition" in research_blob
+        or "sputtering" in research_blob
+    ):
+        method_hits = sum(
+            1
+            for marker in [
+                "ald",
+                "atomic layer deposition",
+                "pld",
+                "pulsed laser deposition",
+                "sputtering",
+                "cvd",
+                "chemical vapor deposition",
+            ]
+            if marker in lowered
+        )
+        has_thin_anchor = any(
+            marker in lowered
+            for marker in [
+                "thin film",
+                "deposition",
+                "fabrication",
+                "physical vapor deposition",
+                "chemical vapor deposition",
+            ]
+        )
+        has_comparison = any(
+            marker in lowered
+            for marker in ["comparison", "review", "advantages", "disadvantages", "pros cons", "techniques", "methods"]
+        )
+        ald_only_bias = (
+            ("atomic layer deposition" in lowered or "ald" in tokens)
+            and method_hits < 3
+        )
+        if ald_only_bias:
+            return "diversity_suggestions:thin_film_ald_bias"
+        if method_hits >= 2 and not has_comparison and "thin film" not in lowered:
+            return "diversity_suggestions:thin_film_missing_comparison_intent"
+        if method_hits < 2 and not has_comparison:
+            return "overbroad_queries:thin_film_single_method_query"
+        if not has_thin_anchor and not has_comparison:
+            return "overbroad_queries:thin_film_missing_method_comparison_anchor"
+    return ""
+
+
+def _is_thin_film_method_comparison_query(
+    query: str,
+    search_contract: SearchContract | None,
+) -> bool:
+    if not search_contract or search_contract.generic_intent_frame is None:
+        return False
+    frame = search_contract.generic_intent_frame
+    research_blob = _normalized_query_text(
+        " ".join([*frame.research_object, *frame.domain_context, *frame.method_terms])
+    )
+    if "thin film" not in research_blob and "atomic layer deposition" not in research_blob:
+        return False
+    lowered = _normalized_query_text(query)
+    has_anchor = "thin film" in lowered or "deposition" in lowered or "fabrication" in lowered
+    has_comparison = any(
+        marker in lowered
+        for marker in [
+            "comparison",
+            "review",
+            "advantages",
+            "disadvantages",
+            "pros cons",
+            "techniques",
+            "methods",
+        ]
+    )
+    method_hits = sum(
+        1
+        for marker in [
+            "ald",
+            "atomic layer deposition",
+            "pld",
+            "pulsed laser deposition",
+            "sputtering",
+            "cvd",
+            "chemical vapor deposition",
+            "physical vapor deposition",
+        ]
+        if marker in lowered
+    )
+    return has_anchor and (has_comparison or method_hits >= 4)
 
 
 def _required_context_or_process_groups(
@@ -1921,6 +2082,10 @@ def build_query_provenance(
                         "query": query,
                         "source_stage": "old_planner",
                         "reason": quality.get("reason", "anchor_rule_failed"),
+                        "accepted_critic_issue": quality.get(
+                            "accepted_critic_issue",
+                            "",
+                        ),
                     }
                 )
                 continue
@@ -2026,6 +2191,10 @@ def build_query_provenance(
                                     "source_stage": "query_family",
                                     "family_name": family.name,
                                     "reason": quality.get("reason", "anchor_rule_failed"),
+                                    "accepted_critic_issue": quality.get(
+                                        "accepted_critic_issue",
+                                        "",
+                                    ),
                                 }
                             )
                             continue
@@ -2061,6 +2230,7 @@ def build_query_provenance(
                         "query": query,
                         "source_stage": "old_planner",
                         "reason": "query_family_queries_sufficient",
+                        "accepted_critic_issue": "",
                     }
                 )
                 continue
@@ -2083,6 +2253,7 @@ def build_query_provenance(
         "provider_queries_by_family": provider_queries_by_family,
         "removed_single_acronym_queries": removed_single_acronym_queries,
         "dropped_queries": dropped_queries,
+        "repaired_queries": [],
         "dropped_query_count": len(dropped_queries),
         "single_acronym_query_count": len(removed_single_acronym_queries),
         "records": records,
@@ -2151,9 +2322,10 @@ def build_auto_query_repair_suggestions(
         openalex_queries=final_openalex or query_plan.openalex_queries,
         semantic_scholar_queries=final_semantic or query_plan.semantic_scholar_queries,
     )
+    repair_applied = bool(removed or dropped or added)
     return {
         "enabled": True,
-        "applied": False,
+        "applied": repair_applied,
         "trigger_reasons": trigger_reasons,
         "original_query_count": len(original_queries),
         "repaired_query_count": len(repaired_queries),
@@ -2171,6 +2343,7 @@ def build_auto_query_repair_suggestions(
                 "serializer": "provider-neutral generic combinations; no mechanical +term fallback",
             },
         },
+        "query_actions": _query_repair_actions(query_provenance),
         "expected_effect": (
             "Replace isolated acronym/short-token queries with context-combined "
             "generic or domain-enhanced query families."
@@ -2184,6 +2357,93 @@ def build_auto_query_repair_suggestions(
         ],
         "repaired_query_plan": repaired_plan,
     }
+
+
+def sync_query_critic_with_repair(
+    critic: dict[str, Any],
+    repair: dict[str, Any],
+) -> dict[str, Any]:
+    """Record repair-accepted critic issues in the query critic artifact."""
+
+    if not repair:
+        return critic
+    updated = dict(critic)
+    accepted_actions: list[dict[str, Any]] = []
+    issue_fields = {
+        "missing_user_aspects",
+        "overbroad_queries",
+        "overconstrained_queries",
+        "repetition_issues",
+        "cross_domain_pollution",
+        "diversity_suggestions",
+    }
+    for action in repair.get("query_actions", []) or []:
+        if not isinstance(action, dict):
+            continue
+        issue = str(action.get("accepted_critic_issue") or "").strip()
+        if not issue:
+            continue
+        field, _, reason = issue.partition(":")
+        if field not in issue_fields:
+            field = "overbroad_queries"
+        value = reason or issue
+        original_query = str(action.get("original_query") or "").strip()
+        if original_query:
+            value = f"{value} | {original_query}"
+        values = list(updated.get(field, []) or [])
+        if value not in values:
+            values.append(value)
+        updated[field] = values
+        accepted_actions.append(
+            {
+                "type": field,
+                "value": value,
+                "accepted_reason": "accepted_by_query_repair",
+                "action": action.get("action", ""),
+            }
+        )
+    if accepted_actions:
+        accepted = list(updated.get("accepted_suggestions", []) or [])
+        accepted.extend(accepted_actions)
+        updated["accepted_suggestions"] = accepted
+        updated["accepted_repair_issues"] = accepted_actions
+    return updated
+
+
+def _query_repair_actions(query_provenance: dict[str, Any]) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for record in query_provenance.get("dropped_queries", []):
+        if not isinstance(record, dict):
+            continue
+        query = str(record.get("query") or "")
+        if not query:
+            continue
+        actions.append(
+            {
+                "original_query": query,
+                "action": "drop",
+                "repaired_query": "",
+                "reason": record.get("reason", "dropped_by_query_quality_gate"),
+                "accepted_critic_issue": record.get("accepted_critic_issue", ""),
+            }
+        )
+    for record in query_provenance.get("records", []):
+        if not isinstance(record, dict):
+            continue
+        query = str(record.get("raw_query") or "")
+        if not query:
+            continue
+        quality = record.get("query_quality", {}) if isinstance(record.get("query_quality"), dict) else {}
+        actions.append(
+            {
+                "original_query": query,
+                "action": "keep",
+                "repaired_query": query,
+                "reason": quality.get("reason", "kept_final_query"),
+                "accepted_critic_issue": quality.get("accepted_critic_issue", ""),
+            }
+        )
+    return actions
 
 
 def _context_terms_added(original_queries: list[str], added_queries: list[str]) -> list[str]:
@@ -2488,6 +2748,69 @@ def build_provider_status(
             "errors": errors,
         }
     return status
+
+
+def build_retrieval_context(
+    provider_status: dict[str, Any],
+    merged_paper_count: int,
+    ranked_paper_count: int,
+    max_per_query: int,
+) -> dict[str, Any]:
+    """Summarize whether downstream artifacts are based on screened papers."""
+
+    states = [
+        str(status.get("status") or "")
+        for status in provider_status.values()
+        if isinstance(status, dict)
+    ]
+    attempted = [
+        status
+        for status in provider_status.values()
+        if isinstance(status, dict)
+        and int(status.get("attempted_query_count", 0) or 0) > 0
+    ]
+    successes = [
+        state
+        for state in states
+        if state
+        in {"success", "success_no_results", "partial_success", "partial_success_rate_limited"}
+    ]
+    failures = [
+        state
+        for state in states
+        if state in {"failed", "rate_limited", "partial_success", "partial_success_rate_limited"}
+    ]
+    if max_per_query <= 0 or (states and all(state == "not_attempted" for state in states)):
+        retrieval_status = "planning_only"
+        reason = "retrieval_not_performed"
+    elif not attempted and not states:
+        retrieval_status = "planning_only"
+        reason = "retrieval_not_performed"
+    elif successes and failures:
+        retrieval_status = "partial_success"
+        reason = ""
+    elif successes:
+        retrieval_status = "success" if merged_paper_count else "failed"
+        reason = "" if merged_paper_count else "insufficient_screened_papers"
+    else:
+        retrieval_status = "failed"
+        reason = "insufficient_screened_papers"
+    provider_bits = [
+        f"{provider}:{status.get('status', 'unknown')}({status.get('returned_paper_count', 0)} papers)"
+        for provider, status in provider_status.items()
+        if isinstance(status, dict)
+    ]
+    return {
+        "retrieval_status": retrieval_status,
+        "provider_summary": "; ".join(provider_bits) or "no providers requested",
+        "ranked_papers_based_on_real_retrieval": retrieval_status
+        in {"success", "partial_success"}
+        and merged_paper_count > 0
+        and ranked_paper_count > 0,
+        "merged_paper_count": merged_paper_count,
+        "ranked_paper_count": ranked_paper_count,
+        "reason": reason,
+    }
 
 
 def build_domain_guardrail_summary(
@@ -3553,16 +3876,24 @@ def run_pipeline(
         "removed_single_acronym_queries",
         [],
     )
-    if query_repair_suggestions.get("repaired_query_plan") is not None:
-        query_plan_payload["repaired_queries"] = query_repair_suggestions.get(
-            "repaired_query_plan"
-        )
+    query_plan_payload["repaired_queries"] = query_repair_suggestions.get(
+        "added_queries",
+        [],
+    )
+    query_plan_payload["query_repair_actions"] = query_repair_suggestions.get(
+        "query_actions",
+        [],
+    )
     llm_query_critic = LLMQueryPlanCritic().critique(
         enhanced_intent_frame=llm_intent_enhancement,
         search_contract=search_contract,
         candidate_query_families=query_family_plan,
         final_provider_queries=queries_by_provider,
         llm_client=active_llm_client,
+    )
+    llm_query_critic = sync_query_critic_with_repair(
+        llm_query_critic,
+        query_repair_suggestions,
     )
     write_json(out / "llm_query_critic.json", llm_query_critic)
     write_json(out / "planned_queries.json", query_plan_payload)
@@ -4172,6 +4503,12 @@ def run_pipeline(
             "Computing evaluation metrics",
             {"gold_labels_path": gold_labels_path or ""},
         )
+    retrieval_context = build_retrieval_context(
+        provider_status=provider_status,
+        merged_paper_count=len(merged_papers),
+        ranked_paper_count=len(ranked_final),
+        max_per_query=max_per_query,
+    )
     metrics = compute_evaluation(
         retrieval_counts=retrieval_counts,
         original_paper_count=raw_paper_count_before_year_filter,
@@ -4184,6 +4521,12 @@ def run_pipeline(
     )
     metrics["duplicate_count"] = duplicate_count
     metrics["provider_status"] = provider_status
+    metrics["retrieval_status"] = retrieval_context["retrieval_status"]
+    metrics["provider_summary"] = retrieval_context["provider_summary"]
+    metrics["ranked_papers_based_on_real_retrieval"] = retrieval_context[
+        "ranked_papers_based_on_real_retrieval"
+    ]
+    metrics["retrieval_context"] = retrieval_context
     metrics["year_filter"] = year_filter_stats
     metrics["imported_library"] = import_result.diagnostics()
     metrics["scoring_weights"] = active_scoring_weights
@@ -4503,6 +4846,7 @@ def run_pipeline(
         query_plan=query_plan,
         query_pilot_diagnostics=query_pilot_diagnostics,
         prisma_like_flow=prisma_like_flow,
+        retrieval_context=retrieval_context,
     )
     metrics["decision_artifacts"] = {
         "method_comparison_rows": len(decision_artifacts["method_comparison_matrix"]),
@@ -4529,6 +4873,9 @@ def run_pipeline(
         paper_roles=paper_role_records,
         provider_status=provider_status,
         exploration_quality=exploration_quality,
+        search_contract=search_contract,
+        research_gap_matrix=decision_artifacts["research_gap_matrix"],
+        suggested_next_searches=decision_artifacts["suggested_next_searches"],
         llm_client=active_llm_client,
     )
     (out / "user_report.md").write_text(user_report_markdown, encoding="utf-8")

@@ -643,11 +643,23 @@ def _append_controversies_and_gaps(
         lines.append(f"- Research tensions: {MISSING_ARTIFACT_MESSAGE}")
     if gaps_generated:
         for row in gap_rows[:6]:
-            lines.append(
-                "- Gap: "
-                f"{row.get('gap_label') or row.get('gap') or row.get('gap_key')}: "
-                f"{row.get('evidence_or_reason') or row.get('why_gap_remains', '')}"
-            )
+            status = row.get("gap_generation_status", "")
+            if status == "skipped":
+                lines.append(
+                    "- Research gaps were not generated in this planning-only run because retrieval was not performed."
+                )
+            elif status == "no_clear_gap":
+                lines.append(
+                    "- Coverage summary: "
+                    f"{row.get('coverage_summary') or row.get('evidence_or_reason', '')} "
+                    f"Suggested action: {row.get('suggested_action', 'optional_depth_check')}."
+                )
+            else:
+                lines.append(
+                    "- Gap: "
+                    f"{row.get('gap_label') or row.get('gap') or row.get('gap_key')}: "
+                    f"{row.get('evidence_or_reason') or row.get('why_gap_remains', '')}"
+                )
     else:
         lines.append(f"- Gap matrix: {MISSING_ARTIFACT_MESSAGE}")
     lines.append("")
@@ -668,12 +680,25 @@ def _append_missing_keywords_methods_authors(
         lines.append("")
         return
     if gaps_generated and gap_rows:
-        lines.append("- Gap-derived missing directions:")
-        for row in gap_rows[:6]:
-            suggestions = row.get("suggested_next_searches", "")
+        actionable_rows = [
+            row for row in gap_rows if row.get("gap_generation_status") != "skipped"
+        ]
+        if actionable_rows:
+            if all(row.get("gap_generation_status") == "no_clear_gap" for row in actionable_rows):
+                lines.append("- Optional follow-up directions:")
+            else:
+                lines.append("- Gap-derived missing directions:")
+            for row in actionable_rows[:6]:
+                suggestions = row.get("suggested_next_searches", "")
+                label = (
+                    row.get("coverage_summary")
+                    if row.get("gap_generation_status") == "no_clear_gap"
+                    else row.get("gap_label") or row.get("gap") or row.get("gap_key")
+                )
+                lines.append(f"  - {label}: {suggestions}")
+        else:
             lines.append(
-                f"  - {row.get('gap_label') or row.get('gap') or row.get('gap_key')}: "
-                f"{suggestions}"
+                "- Research gaps were not generated in this planning-only run because retrieval was not performed."
             )
     else:
         lines.append(f"- Gap-derived missing directions: {MISSING_ARTIFACT_MESSAGE}")
@@ -1135,6 +1160,21 @@ def generate_report(
                 "",
             ]
         )
+    retrieval_status = retrieval_statistics.get("retrieval_status", "")
+    provider_summary = retrieval_statistics.get("provider_summary", "")
+    real_retrieval = retrieval_statistics.get("ranked_papers_based_on_real_retrieval")
+    lines.extend(
+        [
+            "",
+            "## Retrieval Status Summary",
+            "",
+            f"- retrieval_status: {retrieval_status or 'unknown'}",
+            f"- provider_summary: {provider_summary or 'not available'}",
+            f"- ranked papers based on real retrieval: {real_retrieval}",
+            "",
+        ]
+    )
+
     lines.extend(
         [
             "",
@@ -1368,7 +1408,25 @@ def generate_report(
 
     gap_rows = research_gap_matrix or []
     lines.extend(["", "## Research Gap Matrix", ""])
-    if gap_rows:
+    gap_skipped = bool(gap_rows and gap_rows[0].get("gap_generation_status") == "skipped")
+    gap_no_clear = bool(gap_rows and gap_rows[0].get("gap_generation_status") == "no_clear_gap")
+    if gap_skipped:
+        reason = gap_rows[0].get("reason", "retrieval_not_performed")
+        lines.append(
+            "- Research gap generation was skipped because "
+            f"`{_escape_table(reason)}`. 本次只完成 query planning 或没有足够 screened papers，因此不生成 research gaps。"
+        )
+    elif gap_no_clear:
+        row = gap_rows[0]
+        lines.extend(
+            [
+                "- No clear research gap was inferred from this full run.",
+                f"- Coverage summary: {_escape_table(row.get('coverage_summary', ''))}",
+                f"- Suggested action: {_escape_table(row.get('suggested_action', 'optional_depth_check'))}",
+                "- This is a coverage summary, not a claim that the field has no remaining gaps.",
+            ]
+        )
+    elif gap_rows:
         lines.extend(
             [
                 "| Gap | Supporting papers | Why gap remains | Possible project idea | Related aspects |",
@@ -1391,7 +1449,9 @@ def generate_report(
 
     next_searches = suggested_next_searches or []
     lines.extend(["", "## Suggested Next Searches", ""])
-    if next_searches:
+    if gap_skipped and not next_searches:
+        lines.append("- Not generated because research-gap generation was skipped.")
+    elif next_searches:
         lines.extend(
             [
                 "| Query | Reason | Source |",
