@@ -154,6 +154,9 @@ class SearchContractAgent:
                 intent_constraint_groups = _relaxed_constraint_groups(
                     intent_constraint_groups
                 )
+                generic_constraint_groups = _relaxed_constraint_groups(
+                    generic_constraint_groups
+                )
             constraint_groups = _unique_constraint_groups(
                 [
                     *pack_constraint_groups,
@@ -183,12 +186,15 @@ class SearchContractAgent:
             optional_concepts = []
             uncertain_concepts = []
             dropped_downweighted = []
+            pack_groups = _constraint_groups_from_domain_pack(domain_pack)
+            generic_groups = _constraint_groups_from_generic_frame(generic_frame)
+            fallback_groups = (
+                []
+                if any(group.required for group in [*pack_groups, *generic_groups])
+                else _fallback_constraint_groups(must_include)
+            )
             constraint_groups = _unique_constraint_groups(
-                [
-                    *_constraint_groups_from_domain_pack(domain_pack),
-                    *_constraint_groups_from_generic_frame(generic_frame),
-                    *_fallback_constraint_groups(must_include),
-                ]
+                [*pack_groups, *generic_groups, *fallback_groups]
             )
             assumptions = []
         must_exclude = _unique(
@@ -710,9 +716,25 @@ def _constraint_groups_from_generic_frame(
 
     if frame is None:
         return []
+    core_groups = _semantic_required_core_groups(frame)
+    groups: list[SearchConstraintGroup] = []
+    for index, terms in enumerate(core_groups, start=1):
+        groups.append(
+            SearchConstraintGroup(
+                group_name=(
+                    "core_object_group"
+                    if len(core_groups) == 1
+                    else f"core_object_group_{index}"
+                ),
+                operator="OR",
+                terms=terms,
+                source="generic_intent_frame",
+                required=True,
+            )
+        )
+    context_terms = _constraint_context_terms(frame.domain_context)
     specs = [
-        ("core_object_group", frame.research_object or frame.core_terms, True),
-        ("domain_context_group", frame.domain_context, False),
+        ("domain_context_group", context_terms, bool(context_terms)),
         ("process_or_property_group", frame.target_process_or_property, False),
         ("method_group", frame.method_terms, False),
         ("mechanism_group", frame.mechanism_terms, False),
@@ -721,7 +743,6 @@ def _constraint_groups_from_generic_frame(
         ("failure_or_limitation_group", frame.failure_or_limitation_terms, False),
         ("controversy_group", frame.controversy_terms, False),
     ]
-    groups: list[SearchConstraintGroup] = []
     for name, terms, required in specs:
         cleaned = _unique(
             [
@@ -743,6 +764,87 @@ def _constraint_groups_from_generic_frame(
             )
         )
     return groups
+
+
+def _semantic_required_core_groups(
+    frame: GenericResearchIntentFrame,
+) -> list[list[str]]:
+    """Split core research axes into required groups while keeping aliases together."""
+
+    terms = _unique(frame.research_object or frame.core_terms, 8)
+    if not terms:
+        return []
+    target_terms = _unique(frame.target_process_or_property, 8)
+    groups: list[list[str]] = []
+    for term in terms:
+        placed = False
+        for group in groups:
+            if _terms_are_aliases(term, group[0]):
+                group.append(term)
+                placed = True
+                break
+        if not placed:
+            groups.append([term])
+    for term in target_terms:
+        if _is_generic_property_axis(term):
+            continue
+        for group in groups:
+            if any(_terms_are_aliases(term, existing) for existing in group):
+                group.append(term)
+                break
+    return [_unique(group, 8) for group in groups if group]
+
+
+def _constraint_context_terms(terms: list[str]) -> list[str]:
+    cleaned = _unique(terms, 12)
+    if len(cleaned) <= 1:
+        return cleaned
+    weak_context = {"interface", "surface", "system", "material"}
+    strong = [
+        term
+        for term in cleaned
+        if " ".join(term.lower().split()) not in weak_context
+    ]
+    return strong or cleaned
+
+
+def _is_generic_property_axis(term: str) -> bool:
+    cleaned = " ".join(str(term or "").lower().split())
+    return any(
+        marker in cleaned
+        for marker in [
+            "activity",
+            "accuracy",
+            "recall",
+            "performance",
+            "composition",
+            "structure",
+            "evolution",
+            "pore size",
+            "functional group",
+            "water stability",
+            "stability",
+        ]
+    )
+
+
+def _terms_are_aliases(left: str, right: str) -> bool:
+    left_clean = " ".join(str(left or "").lower().split())
+    right_clean = " ".join(str(right or "").lower().split())
+    if not left_clean or not right_clean:
+        return False
+    if left_clean == right_clean:
+        return True
+    if left_clean in right_clean or right_clean in left_clean:
+        return True
+    return _initialism(left_clean) == right_clean or _initialism(right_clean) == left_clean
+
+
+def _initialism(value: str) -> str:
+    tokens = [token for token in value.replace("-", " ").split() if token]
+    if len(tokens) < 2:
+        return ""
+    return "".join(token[0] for token in tokens).lower()
 
 
 def _constraint_groups_from_domain_pack(

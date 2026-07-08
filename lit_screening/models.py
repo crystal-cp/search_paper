@@ -100,11 +100,14 @@ class GenericResearchIntentFrame:
     in_situ_or_operando_need: bool = False
     ex_situ_need: bool = False
     material_case_need: bool = False
+    case_or_system_need: bool = False
     application_or_performance_need: bool = False
     failure_or_limitation_need: bool = False
     controversy_need: bool = False
     review_background_need: bool = False
+    theory_background_need: bool = False
     core_terms: list[str] = field(default_factory=list)
+    method_scope: list[str] = field(default_factory=list)
     method_terms: list[str] = field(default_factory=list)
     mechanism_terms: list[str] = field(default_factory=list)
     material_or_case_terms: list[str] = field(default_factory=list)
@@ -439,6 +442,9 @@ class DomainAssessment:
     negative_domain_matches: list[str] = field(default_factory=list)
     missing_required_concepts: list[str] = field(default_factory=list)
     forbidden_concepts_found: list[str] = field(default_factory=list)
+    required_group_matches: dict[str, bool] = field(default_factory=dict)
+    optional_group_matches: dict[str, bool] = field(default_factory=dict)
+    intent_centrality_score: float = 0.0
 
 
 @dataclass
@@ -461,6 +467,7 @@ class ScoreBreakdown:
     lane_adjustment: float = 0.0
     seed_or_title_mention_boost: float = 0.0
     false_positive_penalty: float = 0.0
+    intent_centrality_score: float = 0.0
 
 
 @dataclass

@@ -3,6 +3,8 @@
     "锂离子电池": "lithium-ion battery",
     "电池": "battery",
     "界面": "interface",
+    "负极": "anode",
+    "电解液": "electrolyte",
     "组成": "composition",
     "结构": "structure",
     "演化": "evolution",
@@ -21,6 +23,7 @@
     "自旋态": "spin state",
     "电子结构": "electronic structure",
     "析氧反应": "oxygen evolution reaction",
+    "电催化剂": "electrocatalyst",
     "活性": "activity",
     "争议点": "controversy",
     "争议": "controversy",
@@ -38,6 +41,7 @@
     "优缺点": "advantages disadvantages",
     "比较": "comparison",
     "综述": "review",
+    "捕集": "capture",
     "孔径": "pore size",
     "官能团": "functional groups",
     "水稳定性": "water stability",
@@ -51,7 +55,12 @@
     "载流子复合": "carrier recombination"
   },
   "phrase_expansions": {
+    "SEI": "SEI; solid electrolyte interphase",
+    "OER": "OER; oxygen evolution reaction",
     "CO2": "CO2; carbon dioxide",
-    "LLM": "LLM; large language model"
+    "LLM": "LLM; large language model",
+    "ALD": "ALD; atomic layer deposition",
+    "PLD": "PLD; pulsed laser deposition",
+    "CVD": "CVD; chemical vapor deposition"
   }
 }

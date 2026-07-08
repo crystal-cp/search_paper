@@ -280,20 +280,21 @@ def build_default_research_gap_matrix(
     gap_counts: Counter[str] = Counter()
     related_aspects: dict[str, set[str]] = {}
     total = max(1, len(aspect_records))
+    profile = gap_profile(search_contract)
     for record in aspect_records:
         for aspect in record.missing_aspects:
-            key = gap_key(aspect)
+            key = gap_key(aspect, profile)
             gap_counts[key] += 1
             related_aspects.setdefault(key, set()).add(aspect)
 
     for reason, count in (prisma_like_flow or {}).get("common_exclusion_reasons", {}).items():
-        key = gap_key(reason)
+        key = gap_key(reason, profile)
         if key != "general_relevance":
             gap_counts[key] += int(count)
             related_aspects.setdefault(key, set()).add(str(reason))
 
     for aspect in (search_contract.required_aspects if search_contract else []):
-        key = gap_key(aspect)
+        key = gap_key(aspect, profile)
         related_aspects.setdefault(key, set()).add(aspect)
         if key not in gap_counts and not supporting_papers_for_gap(ranked_papers, key):
             gap_counts[key] += 1
@@ -732,10 +733,60 @@ def evidence_verification_summary(item: RankedPaper) -> str:
     )
 
 
-def gap_key(text: str) -> str:
+def gap_profile(search_contract: SearchContract | None) -> str:
+    if not search_contract:
+        return "ai_literature_screening"
+    domain = domain_name(search_contract)
+    if domain == "ai_literature_screening":
+        return "ai_literature_screening"
+    frame = search_contract.generic_intent_frame
+    corpus = " ".join(
+        [
+            domain,
+            *search_contract.must_include_concepts,
+            *search_contract.optional_concepts,
+            *(frame.core_terms if frame else []),
+            *(frame.domain_context if frame else []),
+            *(frame.target_process_or_property if frame else []),
+        ]
+    ).lower()
+    if "llm" in corpus or "systematic review" in corpus or "literature screening" in corpus:
+        return "ai_literature_screening"
+    if "solid electrolyte interphase" in corpus or "sei" in corpus:
+        return "sei_interface"
+    if "oxygen evolution reaction" in corpus or "oer" in corpus or "water oxidation" in corpus:
+        return "oer_catalysis"
+    return "generic_science"
+
+
+def gap_key(text: str, profile: str = "ai_literature_screening") -> str:
     """Map aspect or reason text into a stable research-gap bucket."""
 
     lowered = text.lower().replace("_", " ")
+    if profile != "ai_literature_screening":
+        if "in situ" in lowered or "operando" in lowered or "real time" in lowered or "evolution" in lowered:
+            return "in_situ_operando_evolution"
+        if "composition" in lowered or "structure" in lowered or "correlation" in lowered:
+            return "composition_structure_correlation"
+        if "ex situ" in lowered or "post mortem" in lowered:
+            return "ex_situ_limitations"
+        if "failure" in lowered or "degradation" in lowered or "aging" in lowered:
+            return "failure_mechanisms"
+        if "reconstruction" in lowered or "lattice oxygen" in lowered or "adsorbate" in lowered:
+            return "mechanism_controversy"
+        if "spin" in lowered or "electronic" in lowered or "orbital" in lowered:
+            return "electronic_mechanism"
+        if "characterization" in lowered or "method" in lowered or "probe" in lowered:
+            return "characterization_methods"
+        if "theory" in lowered or "mechanism" in lowered or "model" in lowered:
+            return "theory_mechanism"
+        if "material" in lowered or "case" in lowered or "system" in lowered:
+            return "materials_cases"
+        if "application" in lowered or "performance" in lowered or "activity" in lowered:
+            return "application_performance"
+        if "controversy" in lowered or "debate" in lowered or "competing" in lowered:
+            return "mechanism_controversy"
+        return "general_relevance"
     if "human" in lowered and ("feedback" in lowered or "loop" in lowered):
         return "human_feedback"
     if "feedback" in lowered:
@@ -762,6 +813,16 @@ def gap_label(key: str) -> str:
         "evaluation": "Evaluation protocol is undercovered",
         "multi_agent": "Multi-agent coordination is undercovered",
         "retrieval": "Query refinement and retrieval control are undercovered",
+        "in_situ_operando_evolution": "In situ or operando evolution evidence is undercovered",
+        "composition_structure_correlation": "Composition-structure correlation is undercovered",
+        "ex_situ_limitations": "Ex situ limitations are undercovered",
+        "failure_mechanisms": "Failure mechanisms are undercovered",
+        "mechanism_controversy": "Competing mechanisms remain undercovered",
+        "electronic_mechanism": "Electronic or spin-state mechanism evidence is undercovered",
+        "characterization_methods": "Characterization methods are undercovered",
+        "theory_mechanism": "Theory and mechanism background is undercovered",
+        "materials_cases": "Representative material cases are undercovered",
+        "application_performance": "Application or performance evidence is undercovered",
     }
     return labels.get(key, "Research relevance is undercovered")
 
@@ -775,6 +836,16 @@ def gap_project_idea(key: str) -> str:
         "evaluation": "Benchmarking and evaluation protocol for literature screening agents.",
         "multi_agent": "Agent coordination and task allocation for screening, extraction, and verification.",
         "retrieval": "Pilot-search query repair with ambiguity-aware provider-specific search.",
+        "in_situ_operando_evolution": "Design a focused review of real-time evolution evidence under realistic operating conditions.",
+        "composition_structure_correlation": "Compare how composition, structure, and evolution are linked across characterization methods.",
+        "ex_situ_limitations": "Separate what post-mortem methods can prove from what they may miss during dynamic operation.",
+        "failure_mechanisms": "Map failure, degradation, and aging pathways to material systems and diagnostics.",
+        "mechanism_controversy": "Contrast competing mechanisms and identify experiments that distinguish them.",
+        "electronic_mechanism": "Connect electronic or spin-state descriptors with measured activity and operando evidence.",
+        "characterization_methods": "Build a method-comparison table across direct, indirect, in situ, and ex situ probes.",
+        "theory_mechanism": "Synthesize theoretical background with experimentally grounded mechanism evidence.",
+        "materials_cases": "Benchmark representative materials or systems rather than relying on one prototype.",
+        "application_performance": "Trace how mechanism or characterization evidence connects to performance metrics.",
     }
     return ideas.get(key, "Run a narrower follow-up review around the missing concept.")
 
@@ -793,6 +864,22 @@ def search_phrase_for_gap(gap: str) -> str:
         return '"multi-agent" "task allocation"'
     if "query" in lowered or "retrieval" in lowered:
         return '"query repair" "retrieval diagnostics"'
+    if "in situ" in lowered or "operando" in lowered:
+        return '"in situ" operando evolution characterization'
+    if "composition" in lowered or "structure" in lowered:
+        return 'composition structure evolution correlation'
+    if "ex situ" in lowered:
+        return '"ex situ" characterization limitation'
+    if "failure" in lowered:
+        return '"failure mechanism" degradation'
+    if "electronic" in lowered or "spin" in lowered:
+        return '"electronic structure" "spin state" mechanism'
+    if "characterization" in lowered or "method" in lowered:
+        return 'characterization method comparison'
+    if "material" in lowered or "case" in lowered:
+        return 'representative material case study'
+    if "application" in lowered or "performance" in lowered:
+        return 'application performance metric'
     return '"research gap"'
 
 
@@ -809,6 +896,16 @@ def supporting_papers_for_gap(
         "evaluation": ["evaluation", "benchmark", "metric", "dataset"],
         "multi_agent": ["multi-agent", "multi agent", "agent coordination"],
         "retrieval": ["retrieval", "query", "search"],
+        "in_situ_operando_evolution": ["in situ", "operando", "evolution", "real-time"],
+        "composition_structure_correlation": ["composition", "structure", "correlation"],
+        "ex_situ_limitations": ["ex situ", "post mortem", "limitation"],
+        "failure_mechanisms": ["failure", "degradation", "aging"],
+        "mechanism_controversy": ["controversy", "competing", "lattice oxygen", "adsorbate"],
+        "electronic_mechanism": ["electronic", "spin", "orbital"],
+        "characterization_methods": ["characterization", "method", "probe", "spectroscopy"],
+        "theory_mechanism": ["theory", "mechanism", "model"],
+        "materials_cases": ["material", "case", "system"],
+        "application_performance": ["application", "performance", "activity"],
     }.get(key, [])
     titles: list[str] = []
     for item in ranked_papers:

@@ -1482,6 +1482,223 @@ def _remove_single_acronym_queries(queries: list[str]) -> tuple[list[str], list[
     return kept, removed
 
 
+def _final_query_quality(
+    query: str,
+    search_contract: SearchContract | None,
+    source: str,
+) -> dict[str, Any]:
+    """Return a deterministic keep/drop decision for final provider queries."""
+
+    cleaned = " ".join(str(query or "").split())
+    if not cleaned:
+        return {"keep": False, "reason": "empty_query"}
+    if source == "seed_context":
+        return {"keep": True, "reason": "seed_context"}
+    if is_single_acronym_query(cleaned):
+        return {"keep": False, "reason": "single_acronym_only_query"}
+    frame = search_contract.generic_intent_frame if search_contract else None
+    if frame is None:
+        return {"keep": True, "reason": "no_generic_frame_available"}
+    core_terms = _anchor_candidates(
+        [
+            *frame.research_object,
+            *frame.core_terms,
+        ],
+        drop_aspect_only=True,
+    )
+    secondary_terms = _anchor_candidates(
+        [
+            *frame.domain_context,
+            *frame.target_process_or_property,
+            *frame.material_or_case_terms,
+            *frame.application_or_metric_terms,
+            *frame.failure_or_limitation_terms,
+            *frame.controversy_terms,
+        ],
+        drop_aspect_only=False,
+    )
+    core_lower = {_normalized_query_text(term) for term in core_terms}
+    secondary_terms = [
+        term
+        for term in secondary_terms
+        if _normalized_query_text(term) not in core_lower
+    ]
+    generic_need_terms = _anchor_candidates(
+        [
+            *frame.method_terms,
+            *frame.mechanism_terms,
+            *frame.relation_or_effect,
+            *frame.downweighted_terms,
+        ],
+        drop_aspect_only=False,
+    )
+    has_core = _query_contains_any(cleaned, core_terms)
+    has_secondary = _query_contains_any(cleaned, secondary_terms)
+    core_hit_count = _query_anchor_hit_count(cleaned, core_terms)
+    has_need = _query_contains_any(cleaned, generic_need_terms)
+    has_only_need = _query_contains_any(cleaned, generic_need_terms) and not has_core
+    if has_only_need:
+        return {
+            "keep": False,
+            "reason": "method_or_need_only_query",
+            "core_anchor_terms": core_terms,
+            "secondary_anchor_terms": secondary_terms,
+        }
+    if core_terms and not has_core:
+        return {
+            "keep": False,
+            "reason": "missing_core_object_anchor",
+            "core_anchor_terms": core_terms,
+            "secondary_anchor_terms": secondary_terms,
+        }
+    if secondary_terms and not has_secondary:
+        return {
+            "keep": False,
+            "reason": "missing_context_or_process_anchor",
+            "core_anchor_terms": core_terms,
+            "secondary_anchor_terms": secondary_terms,
+        }
+    if not secondary_terms and core_hit_count < 2 and not has_need:
+        return {
+            "keep": False,
+            "reason": "missing_second_anchor",
+            "core_anchor_terms": core_terms,
+            "secondary_anchor_terms": secondary_terms,
+        }
+    if not secondary_terms and _looks_broad_standalone_query(cleaned):
+        return {
+            "keep": False,
+            "reason": "broad_standalone_query",
+            "core_anchor_terms": core_terms,
+            "secondary_anchor_terms": secondary_terms,
+        }
+    return {
+        "keep": True,
+        "reason": "anchor_rule_passed",
+        "core_anchor_terms": core_terms,
+        "secondary_anchor_terms": secondary_terms,
+    }
+
+
+def _anchor_candidates(values: list[str], drop_aspect_only: bool) -> list[str]:
+    terms: list[str] = []
+    for value in values:
+        cleaned = " ".join(str(value or "").split())
+        if not cleaned:
+            continue
+        if drop_aspect_only and _looks_like_need_or_aspect_term(cleaned):
+            continue
+        if cleaned.lower() in {"importance", "significance", "background", "review"}:
+            continue
+        terms.append(cleaned)
+    return _unique_strings(terms)
+
+
+def _query_contains_any(query: str, terms: list[str]) -> bool:
+    query_lower = _normalized_query_text(query)
+    query_tokens = set(tokenize(query_lower))
+    for term in terms:
+        term_lower = _normalized_query_text(term)
+        if not term_lower:
+            continue
+        if term_lower in query_lower:
+            return True
+        term_tokens = set(tokenize(term_lower))
+        if term_tokens and term_tokens <= query_tokens:
+            return True
+        if len(term_tokens) > 2 and len(term_tokens & query_tokens) >= 2:
+            return True
+    return False
+
+
+def _query_anchor_hit_count(query: str, terms: list[str]) -> int:
+    query_lower = _normalized_query_text(query)
+    query_tokens = set(tokenize(query_lower))
+    count = 0
+    seen: set[str] = set()
+    for term in terms:
+        term_lower = _normalized_query_text(term)
+        if not term_lower or term_lower in seen:
+            continue
+        term_tokens = set(tokenize(term_lower))
+        if term_lower in query_lower or (term_tokens and term_tokens <= query_tokens):
+            count += 1
+            seen.add(term_lower)
+    return count
+
+
+def _normalized_query_text(value: str) -> str:
+    return " ".join(
+        str(value or "")
+        .lower()
+        .replace('"', " ")
+        .replace("+", " ")
+        .replace("(", " ")
+        .replace(")", " ")
+        .split()
+    )
+
+
+def _looks_like_need_or_aspect_term(value: str) -> bool:
+    lowered = _normalized_query_text(value)
+    if lowered in {
+        "in situ",
+        "ex situ",
+        "operando",
+        "post mortem",
+        "failure mechanism",
+        "theoretical mechanism",
+        "experimental characterization",
+        "characterization",
+        "comparison",
+        "advantages disadvantages",
+        "review",
+        "background",
+    }:
+        return True
+    return any(
+        marker in lowered
+        for marker in [
+            "characterization",
+            "mechanism",
+            "measurement",
+            "importance",
+            "significance",
+        ]
+    ) and not any(
+        anchor in lowered
+        for anchor in [
+            "reaction",
+            "interface",
+            "cell",
+            "screening",
+            "deposition",
+            "capture",
+            "passivation",
+        ]
+    )
+
+
+def _looks_broad_standalone_query(query: str) -> bool:
+    lowered = _normalized_query_text(query)
+    tokens = tokenize(lowered)
+    if len(tokens) <= 2:
+        return True
+    broad_markers = {
+        "review",
+        "background",
+        "comparison",
+        "characterization",
+        "mechanism",
+        "battery",
+        "thin",
+        "film",
+        "carbon",
+        "dioxide",
+    }
+    return len(tokens) <= 4 and bool(set(tokens) & broad_markers)
+
+
 def _query_concepts_for_provenance(
     query: str,
     search_contract: SearchContract | None = None,
@@ -1567,6 +1784,8 @@ def build_query_provenance(
     query_family_queries: list[dict[str, Any]] = []
     provider_queries_by_family: dict[str, dict[str, list[str]]] = {}
     removed_single_acronym_queries: list[dict[str, str]] = []
+    dropped_queries: list[dict[str, Any]] = []
+    delayed_old_planner_records: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     domain_name = query_family_plan.domain if query_family_plan else (
         search_contract.domain_profile.domain_name if search_contract else ""
@@ -1589,27 +1808,52 @@ def build_query_provenance(
 
     for provider in providers:
         provider_queries = list(old_planner_queries.get(provider, []))
-        merged_queries[provider] = list(provider_queries)
+        merged_queries[provider] = []
+        strict_old_planner_filter = (
+            use_query_families
+            and query_family_plan is not None
+            and provider in {"openalex", "semantic_scholar"}
+        )
         for query in provider_queries:
-            seen.add((provider, query))
-            records.append(
-                _query_provenance_record(
-                    provider=provider,
-                    raw_query=query,
-                    source="old_planner",
-                    concepts=_query_concepts_for_provenance(
-                        query,
-                        search_contract=search_contract,
-                        lens=None,
-                    ),
-                    provider_serializer_changes=_provider_serializer_changes(
-                        provider,
-                        query,
-                        source="old_planner",
-                    ),
-                    domain_pack_enhanced=domain_pack_enhanced,
-                )
+            quality = (
+                _final_query_quality(query, search_contract, source="old_planner")
+                if strict_old_planner_filter
+                else {"keep": True, "reason": "legacy_or_custom_provider_query_preserved"}
             )
+            record = _query_provenance_record(
+                provider=provider,
+                raw_query=query,
+                source="old_planner",
+                concepts=_query_concepts_for_provenance(
+                    query,
+                    search_contract=search_contract,
+                    lens=None,
+                ),
+                provider_serializer_changes=_provider_serializer_changes(
+                    provider,
+                    query,
+                    source="old_planner",
+                ),
+                domain_pack_enhanced=domain_pack_enhanced,
+            )
+            record["source_stage"] = "old_planner"
+            record["query_quality"] = quality
+            if not quality.get("keep"):
+                dropped_queries.append(
+                    {
+                        "provider": provider,
+                        "query": query,
+                        "source_stage": "old_planner",
+                        "reason": quality.get("reason", "anchor_rule_failed"),
+                    }
+                )
+                continue
+            if strict_old_planner_filter:
+                delayed_old_planner_records.append(record)
+                continue
+            seen.add((provider, query))
+            merged_queries.setdefault(provider, []).append(query)
+            records.append(record)
 
     family_candidate_count = 0
     family_added_count = 0
@@ -1658,6 +1902,22 @@ def build_query_provenance(
                             family_skipped_by_cap_count += 1
                             continue
                         key = (provider, query)
+                        quality = (
+                            {
+                                "keep": True,
+                                "reason": "domain_pack_query_template",
+                            }
+                            if domain_pack_enhanced and family.name != "seed_context"
+                            else _final_query_quality(
+                                query,
+                                search_contract,
+                                source=(
+                                    family.name
+                                    if family.name == "seed_context"
+                                    else "query_family"
+                                ),
+                            )
+                        )
                         family_record = _query_provenance_record(
                             provider=provider,
                             raw_query=query,
@@ -1679,7 +1939,20 @@ def build_query_provenance(
                             ),
                             domain_pack_enhanced=domain_pack_enhanced,
                         )
+                        family_record["source_stage"] = "query_family"
+                        family_record["query_quality"] = quality
                         query_family_queries.append(family_record)
+                        if not quality.get("keep"):
+                            dropped_queries.append(
+                                {
+                                    "provider": provider,
+                                    "query": query,
+                                    "source_stage": "query_family",
+                                    "family_name": family.name,
+                                    "reason": quality.get("reason", "anchor_rule_failed"),
+                                }
+                            )
+                            continue
                         if key in seen:
                             duplicate_family_records.append(family_record)
                             continue
@@ -1698,6 +1971,27 @@ def build_query_provenance(
                     if family_skipped_by_cap_count
                     else "all_family_queries_already_present"
                 )
+    if use_query_families and query_family_plan is not None:
+        for record in delayed_old_planner_records:
+            query = str(record.get("raw_query") or "")
+            provider = str(record.get("provider") or "")
+            key = (provider, query)
+            if not query or key in seen:
+                continue
+            if family_added_by_provider.get(provider, 0) >= 6:
+                dropped_queries.append(
+                    {
+                        "provider": provider,
+                        "query": query,
+                        "source_stage": "old_planner",
+                        "reason": "query_family_queries_sufficient",
+                    }
+                )
+                continue
+            seen.add(key)
+            merged_queries.setdefault(provider, []).append(query)
+            record["source_stage"] = "old_planner_supplemental"
+            records.append(record)
 
     payload = {
         "enabled": bool(use_query_families),
@@ -1712,6 +2006,8 @@ def build_query_provenance(
         "final_semantic_scholar_queries": merged_queries.get("semantic_scholar", []),
         "provider_queries_by_family": provider_queries_by_family,
         "removed_single_acronym_queries": removed_single_acronym_queries,
+        "dropped_queries": dropped_queries,
+        "dropped_query_count": len(dropped_queries),
         "single_acronym_query_count": len(removed_single_acronym_queries),
         "records": records,
         "duplicate_family_records": duplicate_family_records,
@@ -1745,6 +2041,8 @@ def build_auto_query_repair_suggestions(
         trigger_reasons.append("provider_query_count_lt_6")
     if query_provenance.get("single_acronym_query_count", 0):
         trigger_reasons.append("single_acronym_query_removed")
+    if query_provenance.get("dropped_query_count", 0):
+        trigger_reasons.append("static_query_quality_repair")
     if not trigger_reasons:
         return {
             "enabled": True,
@@ -1766,6 +2064,11 @@ def build_auto_query_repair_suggestions(
         for record in query_provenance.get("removed_single_acronym_queries", [])
         if isinstance(record, dict)
     ]
+    dropped = [
+        record.get("query", "")
+        for record in query_provenance.get("dropped_queries", [])
+        if isinstance(record, dict)
+    ]
     added = [query for query in repaired_queries if query not in original_queries]
     repaired_plan = replace(
         query_plan,
@@ -1778,7 +2081,8 @@ def build_auto_query_repair_suggestions(
         "trigger_reasons": trigger_reasons,
         "original_query_count": len(original_queries),
         "repaired_query_count": len(repaired_queries),
-        "removed_queries": _unique_strings([str(query) for query in removed]),
+        "removed_queries": _unique_strings([str(query) for query in [*removed, *dropped]]),
+        "dropped_queries": query_provenance.get("dropped_queries", []),
         "added_queries": added,
         "acronym_expansions": [],
         "context_terms_added": _context_terms_added(original_queries, added),
@@ -2058,6 +2362,58 @@ def build_retrieval_diagnostics(
     }
 
 
+def build_provider_status(
+    providers: list[str],
+    queries_by_provider: dict[str, list[str]],
+    raw_by_provider: dict[str, list[dict]],
+    retrieval_counts: dict[str, int],
+) -> dict[str, Any]:
+    """Summarize provider-level success, partial failure, and rate limits."""
+
+    status: dict[str, Any] = {}
+    for provider in providers:
+        bundles = raw_by_provider.get(provider, [])
+        requested = len(queries_by_provider.get(provider, []))
+        attempted = len(bundles)
+        errors: list[dict[str, Any]] = []
+        rate_limited = False
+        for bundle in bundles:
+            response = bundle.get("response") or {}
+            if response.get("error") or response.get("status_code"):
+                error = {
+                    "query": bundle.get("query", ""),
+                    "retrieval_stage": bundle.get("retrieval_stage", provider),
+                    "error": response.get("error", ""),
+                    "status_code": response.get("status_code", ""),
+                    "error_message": response.get("error_message", ""),
+                }
+                errors.append(error)
+                if response.get("status_code") == 429:
+                    rate_limited = True
+        returned = int(retrieval_counts.get(provider, 0) or 0)
+        stopped_early = requested > 0 and attempted < requested
+        if rate_limited:
+            state = "partial_success_rate_limited" if returned else "rate_limited"
+        elif errors:
+            state = "partial_success" if returned else "failed"
+        elif returned:
+            state = "success"
+        elif attempted:
+            state = "success_no_results"
+        else:
+            state = "not_attempted"
+        status[provider] = {
+            "status": state,
+            "requested_query_count": requested,
+            "attempted_query_count": attempted,
+            "returned_paper_count": returned,
+            "stopped_after_query_count": attempted if stopped_early or rate_limited else None,
+            "rate_limited": rate_limited,
+            "errors": errors,
+        }
+    return status
+
+
 def build_domain_guardrail_summary(
     assessments: list[DomainAssessment],
     ranked_papers: list[RankedPaper],
@@ -2312,6 +2668,21 @@ def _role_adjustment(record: PaperRoleRecord | None, domain: str = "") -> float:
         return round(value * 0.4, 4) if record.overbroad_role_warning else value
     if record.overbroad_role_warning:
         return 0.0
+    generic_values = {
+        "theory_mechanism": 0.012,
+        "characterization_method": 0.012,
+        "in_situ_operando": 0.014,
+        "ex_situ_post_mortem": 0.010,
+        "material_case": 0.008,
+        "application_performance": 0.008,
+        "failure_limitation": 0.010,
+        "controversy_debate": 0.010,
+        "review_background": 0.003,
+        "peripheral_background": -0.004,
+        "out_of_scope": -0.02,
+    }
+    if any(role in generic_values for role in record.roles):
+        return round(max(generic_values.get(role, 0.0) for role in record.roles), 4)
     if record.primary_role == "review_background":
         return 0.003
     if record.primary_role in {"material_case", "limitation_or_challenge"}:
@@ -2577,7 +2948,7 @@ def run_pipeline(
     seed_file: str | None = None,
     enable_snowballing: bool = False,
     snowball_top_n: int = 3,
-    use_query_families: bool | None = None,
+    use_query_families: bool | None = True,
     intent_repair: bool = True,
     legacy_query_planning: bool = False,
     query_family_provider_cap: int = 18,
@@ -2971,8 +3342,24 @@ def run_pipeline(
         and not query_repair_suggestions.get("enabled")
     ):
         query_repair_suggestions = auto_query_repair
+    query_plan.openalex_queries = list(query_provenance.get("final_openalex_queries", []))
+    query_plan.semantic_scholar_queries = list(
+        query_provenance.get("final_semantic_scholar_queries", [])
+    )
+    queries = _unique_strings(
+        [
+            query
+            for provider in providers
+            for query in queries_by_provider.get(provider, [])
+        ]
+    )
     query_plan.query_families_applied = bool(query_provenance.get("applied"))
     query_plan_payload["query_plan"] = query_plan
+    query_plan_payload["queries"] = queries
+    query_plan_payload["queries_by_provider"] = {
+        provider: list(queries_by_provider.get(provider, []))
+        for provider in providers
+    }
     query_plan_payload["query_families_applied"] = query_plan.query_families_applied
     query_plan_payload["selected_domain"] = search_contract.domain_profile.domain_name
     query_plan_payload["candidate_domains"] = search_contract.domain_profile.candidate_domains
@@ -2984,6 +3371,18 @@ def run_pipeline(
         "provider_queries_by_family",
         {},
     )
+    query_plan_payload["old_planner_queries"] = query_provenance.get(
+        "old_planner_queries",
+        {},
+    )
+    query_plan_payload["query_family_queries"] = query_provenance.get(
+        "query_family_queries",
+        [],
+    )
+    query_plan_payload["final_provider_queries"] = queries_by_provider
+    query_plan_payload["final_openalex_queries"] = query_plan.openalex_queries
+    query_plan_payload["final_semantic_scholar_queries"] = query_plan.semantic_scholar_queries
+    query_plan_payload["dropped_queries"] = query_provenance.get("dropped_queries", [])
     query_plan_payload["generic_fallback_used"] = bool(
         research_lens_trace.get("generic_fallback_used")
     )
@@ -3086,6 +3485,13 @@ def run_pipeline(
         sort_mode=sort_preference,
         openalex_mode=openalex_mode,
     )
+    provider_status = build_provider_status(
+        providers=providers,
+        queries_by_provider=queries_by_provider,
+        raw_by_provider=raw_by_provider,
+        retrieval_counts=retrieval_counts,
+    )
+    write_json(out / "provider_status.json", provider_status)
     if seed_exact_papers:
         raw_papers = [*seed_exact_papers, *raw_papers]
         retrieval_counts["seed_exact"] = len(seed_exact_papers)
@@ -3432,6 +3838,7 @@ def run_pipeline(
     paper_role_records = PaperRoleClassifier().classify_many(
         merged_papers,
         query_provenance=query_provenance,
+        search_contract=search_contract,
     )
     write_json(out / "paper_roles.json", paper_role_records)
     paper_role_summary = summarize_paper_roles(paper_role_records)
@@ -3583,6 +3990,7 @@ def run_pipeline(
         gold_labels_path=gold_labels_path,
     )
     metrics["duplicate_count"] = duplicate_count
+    metrics["provider_status"] = provider_status
     metrics["year_filter"] = year_filter_stats
     metrics["imported_library"] = import_result.diagnostics()
     metrics["scoring_weights"] = active_scoring_weights
@@ -3858,6 +4266,7 @@ def run_pipeline(
         year_filter_stats=year_filter_stats,
         import_diagnostics=import_result.diagnostics(),
     )
+    retrieval_diagnostics["provider_status"] = provider_status
     write_json(out / "retrieval_diagnostics.json", retrieval_diagnostics)
     generate_paper_cards(
         out / "paper_cards.md",

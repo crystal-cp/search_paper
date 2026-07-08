@@ -162,6 +162,7 @@ def compute_final_score(
     domain_penalty_multiplier: float = 1.0,
     preference_score: float | None = None,
     preference_weight: float = 0.10,
+    intent_centrality_score: float | None = None,
 ) -> ScoreBreakdown:
     """Low-level formula helper for combining already-computed score components."""
 
@@ -177,7 +178,7 @@ def compute_final_score(
         if preference_score is not None
         else 0.0
     )
-    pre_domain_final = (
+    base_final = (
         score_weights["relevance"] * relevance
         + score_weights["evidence"] * evidence
         + score_weights["recency"] * recency
@@ -185,6 +186,16 @@ def compute_final_score(
         + score_weights["diversity"] * diversity
         + human_feedback_adjustment
         + preference_adjustment
+    )
+    centrality = (
+        clamp(intent_centrality_score)
+        if intent_centrality_score is not None
+        else relevance
+    )
+    pre_domain_final = (
+        clamp(0.52 * centrality + 0.48 * base_final)
+        if intent_centrality_score is not None
+        else base_final
     )
     penalty = clamp(domain_penalty_multiplier, 0.0, 1.0)
     final = pre_domain_final * penalty
@@ -201,6 +212,7 @@ def compute_final_score(
         pre_domain_final_score=pre_domain_final,
         preference_score=preference,
         preference_adjustment=preference_adjustment,
+        intent_centrality_score=centrality,
     )
 
 
@@ -229,6 +241,11 @@ def compute_score_breakdown(
     relevance = score_relevance(paper, evidence, question, query_plan=query_plan)
     if aspect_coverage_score:
         relevance = clamp(0.85 * relevance + 0.15 * aspect_coverage_score)
+    intent_centrality = (
+        domain_assessment.intent_centrality_score
+        if domain_assessment is not None
+        else None
+    )
     return compute_final_score(
         relevance_score=relevance,
         evidence_score=score_evidence(verification, evidence, question),
@@ -241,6 +258,7 @@ def compute_score_breakdown(
         aspect_coverage_score=aspect_coverage_score,
         domain_penalty_multiplier=domain_penalty_multiplier(domain_assessment),
         preference_score=preference_score,
+        intent_centrality_score=intent_centrality,
     )
 
 

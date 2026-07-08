@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from lit_screening.models import Paper, PaperRoleRecord
+from lit_screening.models import Paper, PaperRoleRecord, SearchContract
 
 
 ROLE_PRIORITY = [
+    "theory_mechanism",
+    "characterization_method",
+    "in_situ_operando",
+    "ex_situ_post_mortem",
+    "application_performance",
+    "failure_limitation",
+    "controversy_debate",
+    "peripheral_background",
+    "out_of_scope",
     "theory_origin",
     "conceptual_framework",
     "nanoscale_readout",
@@ -23,7 +33,19 @@ ROLE_PRIORITY = [
     "review_background",
 ]
 
-TEXT_RULES = [
+GENERIC_TEXT_RULES = [
+    ("review_background", ["review", "survey", "perspective", "overview", "roadmap"]),
+    ("theory_mechanism", ["theory", "mechanism", "model", "descriptor", "electronic structure", "orbital occupancy"]),
+    ("characterization_method", ["characterization", "spectroscopy", "microscopy", "measurement", "TEM", "STEM", "XPS", "XAS", "RIXS"]),
+    ("in_situ_operando", ["in situ", "operando", "real-time", "real time"]),
+    ("ex_situ_post_mortem", ["ex situ", "post mortem"]),
+    ("material_case", ["case study", "representative material", "catalyst", "oxide", "anode", "perovskite", "mof"]),
+    ("application_performance", ["application", "performance", "activity", "accuracy", "recall", "capacity", "efficiency"]),
+    ("failure_limitation", ["failure", "limitation", "degradation", "aging", "stability", "reconstruction"]),
+    ("controversy_debate", ["controversy", "debate", "competing mechanism", "open question"]),
+]
+
+DOMAIN_TEXT_RULES = [
     (
         "theory_origin",
         [
@@ -206,11 +228,16 @@ class PaperRoleClassifier:
         self,
         papers: list[Paper],
         query_provenance: dict[str, Any] | None = None,
+        search_contract: SearchContract | None = None,
     ) -> list[PaperRoleRecord]:
         """Classify a list of papers without changing ranking."""
 
         records = [
-            self.classify(paper, query_provenance=query_provenance)
+            self.classify(
+                paper,
+                query_provenance=query_provenance,
+                search_contract=search_contract,
+            )
             for paper in papers
         ]
         _mark_overbroad_roles(records)
@@ -220,6 +247,7 @@ class PaperRoleClassifier:
         self,
         paper: Paper,
         query_provenance: dict[str, Any] | None = None,
+        search_contract: SearchContract | None = None,
     ) -> PaperRoleRecord:
         """Return one role record for a paper."""
 
@@ -230,9 +258,13 @@ class PaperRoleClassifier:
             query_provenance,
         )
         text = _paper_text(paper)
+        active_domain = _active_domain(query_provenance, search_contract, text)
+        text_rules = list(GENERIC_TEXT_RULES)
+        if active_domain in {"materials_magnetism", "ferroelectric_polarization"}:
+            text_rules.extend(DOMAIN_TEXT_RULES)
 
-        for role, markers in TEXT_RULES:
-            matches = [marker for marker in markers if marker in text]
+        for role, markers in text_rules:
+            matches = [marker for marker in markers if _marker_matches(marker, text)]
             if matches:
                 roles.append(role)
                 reasons.append(
@@ -265,10 +297,72 @@ def _paper_text(paper: Paper) -> str:
     fields = [
         paper.title,
         paper.abstract,
-        paper.venue,
-        str(paper.year or ""),
     ]
     return " ".join(fields).lower()
+
+
+def _active_domain(
+    query_provenance: dict[str, Any] | None,
+    search_contract: SearchContract | None,
+    text: str = "",
+) -> str:
+    if search_contract is not None:
+        return str(search_contract.domain_profile.domain_name or "").strip().lower()
+    if query_provenance:
+        domain = str(query_provenance.get("domain") or "").strip().lower()
+        if domain:
+            return domain
+    if _looks_like_materials_magnetism_text(text):
+        return "materials_magnetism"
+    if _looks_like_ferroelectric_text(text):
+        return "ferroelectric_polarization"
+    return ""
+
+
+def _looks_like_materials_magnetism_text(text: str) -> bool:
+    markers = [
+        "surface magnetization",
+        "boundary magnetization",
+        "magnetoelectric antiferromagnet",
+        "antiferromagnetic surface",
+        "spin polarization asymmetry",
+        "cr2o3",
+        "chromia",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _looks_like_ferroelectric_text(text: str) -> bool:
+    markers = [
+        "ferroelectric",
+        "depolarization field",
+        "piezoresponse force microscopy",
+        "second harmonic generation",
+        "kelvin probe force microscopy",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _marker_matches(marker: str, text: str) -> bool:
+    raw_marker = str(marker or "").strip()
+    if not raw_marker:
+        return False
+    marker_lower = raw_marker.lower()
+    if re.fullmatch(r"[A-Z0-9\-]{2,8}", raw_marker):
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(marker_lower)}(?![a-z0-9])",
+                text,
+            )
+        )
+    if len(marker_lower) <= 5 and marker_lower.replace("-", "").isalnum():
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(marker_lower)}(?![a-z0-9])",
+                text,
+            )
+        )
+    return marker_lower in text
 
 
 def _linked_provenance(

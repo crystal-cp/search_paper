@@ -34,6 +34,75 @@ GENERIC_NOISY_TERMS = {
     "survey",
 }
 
+ENGLISH_STOPWORDS = {
+    "about",
+    "also",
+    "among",
+    "and",
+    "are",
+    "based",
+    "been",
+    "between",
+    "can",
+    "could",
+    "does",
+    "find",
+    "for",
+    "from",
+    "have",
+    "how",
+    "into",
+    "more",
+    "paper",
+    "papers",
+    "related",
+    "than",
+    "that",
+    "their",
+    "them",
+    "these",
+    "this",
+    "those",
+    "through",
+    "used",
+    "using",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "with",
+    "without",
+}
+
+ASPECT_ONLY_MARKERS = {
+    "in situ",
+    "ex situ",
+    "operando",
+    "post mortem",
+    "characterization",
+    "experimental characterization",
+    "characterization method",
+    "measurement",
+    "spectroscopy",
+    "microscopy",
+    "theoretical mechanism",
+    "theoretical background",
+    "failure mechanism",
+    "background",
+    "review",
+    "importance",
+    "significance",
+    "controversy",
+    "comparison",
+    "advantages disadvantages",
+    "deposition methods",
+    "representative materials",
+    "representative material systems",
+    "representative systems",
+    "application limitations",
+}
+
 ASPECT_CUES = {
     "mechanism": [
         "mechanism",
@@ -177,8 +246,17 @@ def build_generic_intent_frame(
     mechanism_terms = _terms_for_categories(concept_by_category, {"mechanism"})
     material_terms = _terms_for_categories(concept_by_category, {"material"})
     application_terms = _terms_for_categories(concept_by_category, {"application"})
+    method_scope = _method_scope_terms(lowered, text)
     if _has_cue(lowered, text, ASPECT_CUES["method"]):
-        method_terms = _unique([*method_terms, *_aspect_terms(active_terms, "method")], 12)
+        method_terms = _unique(
+            [
+                *method_terms,
+                *method_scope,
+                *_aspect_terms(active_terms, "method"),
+                *_unclassified_method_terms(active_terms, [*core_terms, *context_terms]),
+            ],
+            12,
+        )
     if _has_cue(lowered, text, ASPECT_CUES["mechanism"]):
         mechanism_terms = _unique([*mechanism_terms, *_aspect_terms(active_terms, "mechanism")], 12)
     if _has_cue(lowered, text, ASPECT_CUES["case"]):
@@ -199,11 +277,14 @@ def build_generic_intent_frame(
         in_situ_or_operando_need=_has_cue(lowered, text, ASPECT_CUES["in_situ"]),
         ex_situ_need=_has_cue(lowered, text, ASPECT_CUES["ex_situ"]),
         material_case_need=bool(material_terms) or _has_cue(lowered, text, ASPECT_CUES["case"]),
+        case_or_system_need=bool(material_terms) or _has_cue(lowered, text, ASPECT_CUES["case"]),
         application_or_performance_need=bool(application_terms) or _has_cue(lowered, text, ASPECT_CUES["application"]),
         failure_or_limitation_need=bool(failure_terms) or _has_cue(lowered, text, ASPECT_CUES["failure"]),
         controversy_need=bool(controversy_terms) or _has_cue(lowered, text, ASPECT_CUES["controversy"]),
         review_background_need=_has_cue(lowered, text, ASPECT_CUES["review"]),
+        theory_background_need=_has_cue(lowered, text, ASPECT_CUES["mechanism"]) or _has_cue(lowered, text, ASPECT_CUES["review"]),
         core_terms=_unique([*core_terms, *target_terms], 12),
+        method_scope=method_scope,
         method_terms=method_terms,
         mechanism_terms=mechanism_terms,
         material_or_case_terms=material_terms,
@@ -264,16 +345,68 @@ def is_single_acronym_query(query: str) -> bool:
     return len(token) <= 12 and token.lower() not in {"review", "mechanism", "method"}
 
 
+def is_artificial_acronym_chain(term: str) -> bool:
+    """Return True for accidental phrases made by adjacent acronyms/tokens.
+
+    These phrases are usually produced by loose English n-gram extraction from
+    mixed Chinese/English questions, for example an acronym next to another
+    acronym or a bare method token. They should be decomposed into concepts and
+    recombined by query templates, not promoted as a single research object.
+    """
+
+    cleaned = " ".join(str(term or "").split())
+    tokens = cleaned.split()
+    if len(tokens) < 2:
+        return False
+    acronym_like = [
+        token
+        for token in tokens
+        if _looks_like_scientific_acronym(token)
+        or re.fullmatch(r"[A-Z]{1,3}\d+[A-Z0-9\-]*", token or "")
+    ]
+    if not acronym_like:
+        return False
+    lowercase_tokens = [
+        token
+        for token in tokens
+        if token.lower() == token and token.lower() not in GENERIC_NOISY_TERMS
+    ]
+    return len(acronym_like) >= 2 or (
+        len(acronym_like) == 1
+        and len(tokens) == 2
+        and bool(lowercase_tokens)
+    )
+
+
 def _glossary_terms(text: str) -> list[str]:
     glossary = _load_glossary()
     terms: list[str] = []
-    for source, target in glossary.get("translations", {}).items():
-        if str(source) in text:
+    matched_ranges: list[tuple[int, int]] = []
+    translations = sorted(
+        glossary.get("translations", {}).items(),
+        key=lambda item: len(str(item[0])),
+        reverse=True,
+    )
+    for source, target in translations:
+        source_text = str(source)
+        if not source_text:
+            continue
+        for match in re.finditer(re.escape(source_text), text):
+            span = match.span()
+            if _range_covered(span, matched_ranges):
+                continue
             terms.extend(_split_expansion(str(target)))
+            matched_ranges.append(span)
+            break
     for source, target in glossary.get("phrase_expansions", {}).items():
         if str(source) in text:
             terms.extend(_split_expansion(str(target)))
     return _unique(terms, 32)
+
+
+def _range_covered(span: tuple[int, int], ranges: list[tuple[int, int]]) -> bool:
+    start, end = span
+    return any(start >= seen_start and end <= seen_end for seen_start, seen_end in ranges)
 
 
 def _load_glossary() -> dict[str, Any]:
@@ -300,14 +433,34 @@ def _explicit_english_terms(text: str) -> list[str]:
     terms: list[str] = []
     for match in re.finditer(r"\b[A-Z][A-Z0-9\-]{1,8}\b", text):
         terms.append(match.group(0))
+    for match in re.finditer(r"\b[a-z][a-z0-9\-]{3,}\b", text):
+        token = match.group(0)
+        lower = token.lower()
+        if lower not in GENERIC_NOISY_TERMS and lower not in ENGLISH_STOPWORDS:
+            terms.append(token)
     for match in re.finditer(r"\b[A-Za-z][A-Za-z0-9\-]*(?:\s+[A-Za-z][A-Za-z0-9\-]*){1,4}\b", text):
         phrase = " ".join(match.group(0).split())
         lower = phrase.lower()
         if any(word in GENERIC_NOISY_TERMS for word in tokenize(lower)):
             continue
+        if is_artificial_acronym_chain(phrase):
+            terms.extend(_split_acronym_chain_terms(phrase))
+            continue
         if len(tokenize(lower)) >= 2:
             terms.append(phrase)
     return _unique(terms, 24)
+
+
+def _split_acronym_chain_terms(phrase: str) -> list[str]:
+    terms: list[str] = []
+    for token in str(phrase or "").split():
+        cleaned = token.strip(" ,;:/()[]{}")
+        lower = cleaned.lower()
+        if not cleaned or lower in GENERIC_NOISY_TERMS:
+            continue
+        if _looks_like_scientific_acronym(cleaned) or len(cleaned) >= 4:
+            terms.append(cleaned)
+    return terms
 
 
 def _concept_terms(expert_intent: ExpertResearchIntent | None) -> list[str]:
@@ -358,21 +511,38 @@ def _core_terms(
     preferred = _unique(
         [
             *concept_by_category.get("object", []),
-            *concept_by_category.get("property", []),
             *concept_by_category.get("mechanism", []),
         ],
         12,
     )
+    preferred = [
+        term
+        for term in preferred
+        if not _is_aspect_only_term(term)
+        and not is_artificial_acronym_chain(term)
+        and not _is_property_or_target_term(term)
+    ]
     if preferred:
         return preferred
     ranked = sorted(
-        active_terms,
+        [
+            term
+            for term in active_terms
+            if not _is_aspect_only_term(term)
+            and not is_generic_noisy_term(term)
+            and not is_artificial_acronym_chain(term)
+            and not _is_property_or_target_term(term)
+        ],
         key=lambda term: (
+            0 if _looks_like_named_process_or_object(term) else 1,
             0 if _looks_like_scientific_acronym(term) else 1,
             0 if len(tokenize(term)) >= 2 else 1,
             len(term),
         ),
     )
+    non_context = [term for term in ranked if not _is_context_like_term(term)]
+    if non_context:
+        return _unique(non_context, 6)
     return _unique(ranked, 6)
 
 
@@ -383,14 +553,28 @@ def _context_terms(
 ) -> list[str]:
     core_lower = {term.lower() for term in core_terms}
     values = [
-        *concept_by_category.get("material", []),
-        *concept_by_category.get("application", []),
+        *[
+            term
+            for term in concept_by_category.get("material", [])
+            if not _is_aspect_only_term(term)
+            and not is_artificial_acronym_chain(term)
+        ],
+        *[
+            term
+            for term in concept_by_category.get("application", [])
+            if not _is_aspect_only_term(term)
+            and not is_artificial_acronym_chain(term)
+        ],
     ]
     for term in active_terms:
         lower = term.lower()
         if lower in core_lower:
             continue
-        if any(marker in lower for marker in ["battery", "catalyst", "oxide", "review", "screening", "solar cell", "thin film", "mof", "co2", "interface"]):
+        if _is_aspect_only_term(term):
+            continue
+        if is_artificial_acronym_chain(term):
+            continue
+        if _is_context_like_term(term):
             values.append(term)
     return _unique(values, 8)
 
@@ -405,6 +589,7 @@ def _target_terms(
         term
         for term in active_terms
         if term.lower() not in excluded
+        and not is_artificial_acronym_chain(term)
         and any(
             marker in term.lower()
             for marker in [
@@ -419,6 +604,11 @@ def _target_terms(
                 "defect",
                 "recombination",
                 "adsorption",
+                "pore size",
+                "functional",
+                "water stability",
+                "passivation",
+                "capture",
             ]
         )
     ]
@@ -438,9 +628,54 @@ def _aspect_terms(active_terms: list[str], aspect: str) -> list[str]:
         [
             term
             for term in active_terms
+            if not is_artificial_acronym_chain(term)
             if any(marker in term.lower() for marker in markers)
         ],
         10,
+    )
+
+
+def _method_scope_terms(lowered: str, text: str) -> list[str]:
+    values: list[str] = []
+    if _has_cue(lowered, text, ASPECT_CUES["in_situ"]):
+        values.append("in situ characterization")
+    if "operando" in lowered:
+        values.append("operando characterization")
+    if _has_cue(lowered, text, ASPECT_CUES["ex_situ"]):
+        values.append("ex situ characterization")
+    if "post mortem" in lowered:
+        values.append("post mortem characterization")
+    return _unique(values, 8)
+
+
+def _unclassified_method_terms(
+    active_terms: list[str],
+    excluded_terms: list[str],
+) -> list[str]:
+    excluded = {term.lower() for term in excluded_terms}
+    return _unique(
+        [
+            term
+            for term in active_terms
+            if term.lower() not in excluded
+            and not _is_aspect_only_term(term)
+            and not _is_property_or_target_term(term)
+            and not _is_context_like_term(term)
+            and not _looks_like_named_process_or_object(term)
+            and not is_artificial_acronym_chain(term)
+            and not _is_fragmentary_unclassified_term(term)
+        ],
+        10,
+    )
+
+
+def _is_fragmentary_unclassified_term(term: str) -> bool:
+    cleaned = " ".join(str(term or "").split())
+    return bool(
+        cleaned
+        and cleaned.lower() == cleaned
+        and len(tokenize(cleaned)) == 1
+        and len(cleaned) < 9
     )
 
 
@@ -468,8 +703,112 @@ def _repair_sparse_frame(
             term
             for term in active_terms
             if term.lower() not in {value.lower() for value in frame.core_terms}
+            and not _is_aspect_only_term(term)
+            and not is_artificial_acronym_chain(term)
+            and _is_context_like_term(term)
         ][:4]
     return frame
+
+
+def _is_aspect_only_term(term: str) -> bool:
+    cleaned = " ".join(str(term or "").lower().split())
+    if not cleaned:
+        return True
+    if cleaned in ASPECT_ONLY_MARKERS:
+        return True
+    if cleaned in GENERIC_NOISY_TERMS:
+        return True
+    return any(
+        marker in cleaned
+        for marker in [
+            "characterization",
+            "mechanism",
+            "measurement",
+            "review",
+            "background",
+            "comparison",
+            "limitation",
+            "representative material",
+            "representative system",
+        ]
+    ) and not any(
+        anchor in cleaned
+        for anchor in [
+            "reaction",
+            "cell",
+            "mof",
+            "interface",
+            "deposition",
+            "screening",
+            "passivation",
+            "capture",
+        ]
+    )
+
+
+def _is_context_like_term(term: str) -> bool:
+    cleaned = " ".join(str(term or "").lower().split())
+    if not cleaned:
+        return False
+    if any(marker in cleaned for marker in ["interphase", "passivation", "reaction"]):
+        return False
+    if "thin film deposition" in cleaned:
+        return False
+    return any(
+        marker in cleaned
+        for marker in [
+            "battery",
+            "anode",
+            "electrolyte",
+            "catalyst",
+            "oxide",
+            "solar cell",
+            "systematic review",
+            "scientific literature",
+            "co2",
+            "carbon dioxide",
+            "capture",
+            "adsorption",
+            "interface",
+        ]
+    )
+
+
+def _is_property_or_target_term(term: str) -> bool:
+    cleaned = " ".join(str(term or "").lower().split())
+    if not cleaned:
+        return False
+    return any(
+        marker in cleaned
+        for marker in [
+            "composition",
+            "structure",
+            "evolution",
+            "pore size",
+            "functional group",
+            "water stability",
+            "adsorption performance",
+            "activity",
+            "accuracy",
+            "recall",
+        ]
+    )
+
+
+def _looks_like_named_process_or_object(term: str) -> bool:
+    cleaned = " ".join(str(term or "").lower().split())
+    return any(
+        marker in cleaned
+        for marker in [
+            "reaction",
+            "interphase",
+            "interface",
+            "deposition",
+            "screening",
+            "capture",
+            "passivation",
+        ]
+    )
 
 
 def _term_sources(

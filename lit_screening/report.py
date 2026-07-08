@@ -25,10 +25,9 @@ from .utils import ensure_dir, to_plain_data
 
 
 SCORING_FORMULA = (
-    "final_score = 0.40 * relevance_score + 0.25 * evidence_score "
-    "+ 0.15 * recency_score + 0.15 * quality_score "
-    "+ 0.05 * diversity_score + human_feedback_adjustment "
-    "+ preference_adjustment, then domain penalty is applied"
+    "base_score = weighted relevance/evidence/recency/quality/diversity; "
+    "pre_domain_score = 0.52 * intent_centrality_score + 0.48 * base_score "
+    "when intent centrality is available; then domain penalty is applied"
 )
 
 
@@ -1168,6 +1167,31 @@ def generate_report(
             f"- Excluded or low confidence: {(prisma_like_flow or {}).get('records_excluded_or_low_confidence', 0)}",
             f"- Common exclusion reasons: {(prisma_like_flow or {}).get('common_exclusion_reasons', {})}",
             "",
+            "## Provider Status",
+            "",
+        ]
+    )
+    provider_status = retrieval_statistics.get("provider_status", {})
+    if provider_status:
+        lines.extend(["| Provider | Status | Queries attempted | Papers returned | Notes |", "| --- | --- | ---: | ---: | --- |"])
+        for provider, status in provider_status.items():
+            notes = "rate limited" if status.get("rate_limited") else ""
+            stopped = status.get("stopped_after_query_count")
+            if stopped is not None:
+                notes = (notes + f"; stopped after {stopped} queries").strip("; ")
+            lines.append(
+                "| "
+                f"{_escape_table(provider)} | "
+                f"{_escape_table(status.get('status', ''))} | "
+                f"{status.get('attempted_query_count', 0)} | "
+                f"{status.get('returned_paper_count', 0)} | "
+                f"{_escape_table(notes)} |"
+            )
+    else:
+        lines.append("- Provider status was not generated for this run.")
+    lines.extend(
+        [
+            "",
             "## LLM Settings",
             "",
             f"- Backend requested: {retrieval_statistics.get('llm', {}).get('backend_requested', 'none')}",
@@ -1178,6 +1202,8 @@ def generate_report(
             f"- Invalid LLM output count: {retrieval_statistics.get('llm', {}).get('invalid_llm_output_count', 0)}",
             "",
             "## Evidence Validation",
+            "",
+            "`strict_support` means the evidence sentence was grounded in the abstract. It is not a claim that the paper is highly relevant; use intent match and reading priority separately.",
             "",
             f"- Strict supported count: {retrieval_statistics.get('strict_supported_count', 0)}",
             f"- Weak support count: {retrieval_statistics.get('weak_support_count', 0)}",
@@ -1204,8 +1230,8 @@ def generate_report(
             "",
             "## Top 10 Ranked Papers",
             "",
-            "| Rank | Decision | Score | Domain | Year | Title | Venue | DOI |",
-            "| --- | --- | ---: | --- | ---: | --- | --- | --- |",
+            "| Rank | Decision | Score | Evidence grounding | Intent match | Reading priority | Domain | Year | Title | Venue | DOI |",
+            "| --- | --- | ---: | --- | ---: | --- | --- | ---: | --- | --- | --- |",
         ]
     )
 
@@ -1217,6 +1243,9 @@ def generate_report(
             f"{item.rank} | "
             f"{_escape_table(decision.decision if decision else '')} | "
             f"{item.scores.final_score:.3f} | "
+            f"{_escape_table(item.verification.support_level)} | "
+            f"{item.scores.intent_centrality_score:.3f} | "
+            f"{_escape_table(decision.reading_priority if decision else '')} | "
             f"{_escape_table(domain.domain_decision if domain else '')} | "
             f"{item.paper.year or ''} | "
             f"{_escape_table(item.paper.title)} | "

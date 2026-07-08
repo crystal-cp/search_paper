@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from lit_screening.agents.generic_intent import is_single_acronym_query
+from lit_screening.agents.generic_intent import (
+    is_artificial_acronym_chain,
+    is_single_acronym_query,
+)
 from lit_screening.domain_packs import load_domain_pack
 from lit_screening.models import (
     QueryFamily,
@@ -77,7 +80,7 @@ def _fallback_family(lens: ResearchLens) -> QueryFamily:
         exclusion_terms=list(lens.exclusion_risks),
         stop_condition="Stop when the lens has at least a small set of relevant papers.",
         priority=_generic_family_priority(lens.name),
-        budget=min(3, max(1, len(queries))),
+        budget=min(5, max(1, len(queries))),
     )
 
 
@@ -112,7 +115,18 @@ def _generic_queries_for_lens(lens: ResearchLens) -> list[str]:
     methods = _query_terms(lens.methods, limit=8)
     applications = _query_terms(lens.applications, limit=4)
     synonyms = _query_terms(lens.synonyms, limit=3)
-    base = _join_query_terms([*(core[:2] or synonyms[:1]), *context[:2]])
+    tail_terms = _query_terms(lens.core_concepts[2:], limit=8)
+    primary_core = _preferred_full_term(core) or (synonyms[0] if synonyms else "")
+    compact_core = _preferred_compact_term(core) or primary_core
+    secondary_core = _first_distinct(core, {primary_core, compact_core})
+    primary_context = context[0] if context else ""
+    secondary_context = context[1] if len(context) > 1 else ""
+    factor_terms = [
+        term
+        for term in tail_terms
+        if term.lower() not in {primary_core.lower(), compact_core.lower()}
+    ]
+    base = _join_query_terms([primary_core, primary_context])
     if not base:
         base = _join_query_terms([*core[:2], *synonyms[:1]])
     lens_name = lens.name
@@ -122,66 +136,78 @@ def _generic_queries_for_lens(lens: ResearchLens) -> list[str]:
     if lens_name in {"background_review", "core_topic"}:
         queries.extend(
             [
-                _join_query_terms([*core[:2], *context[:2], "review"]),
-                _join_query_terms([*core[:2], *context[:2], "background"]),
+                _join_query_terms([primary_core, primary_context, "review"]),
+                _join_query_terms([compact_core, primary_context, "background"]),
             ]
         )
+        for tail in factor_terms[:3]:
+            queries.append(_join_query_terms([compact_core, primary_context, tail]))
     elif lens_name == "theory_mechanism":
         queries.extend(
             [
-                _join_query_terms([*core[:2], *context[:2], "mechanism"]),
-                _join_query_terms([*core[:2], *context[:2], "theory"]),
+                _join_query_terms([primary_core, secondary_core, primary_context, "mechanism"]),
+                _join_query_terms([compact_core, secondary_core, secondary_context or primary_context, "theory"]),
             ]
         )
     elif lens_name == "characterization_methods":
         method_seed = methods[:2] or ["characterization", "measurement"]
         queries.extend(
             [
-                _join_query_terms([*core[:2], *context[:1], method_seed[0]]),
-                _join_query_terms([*core[:2], *context[:1], "experimental characterization"]),
+                _join_query_terms([compact_core, primary_context, "characterization"]),
+                _join_query_terms([primary_core, primary_context, method_seed[0]]),
             ]
         )
+        for tail in factor_terms[:4]:
+            queries.append(
+                _join_query_terms([compact_core, tail, "characterization", primary_context])
+            )
     elif lens_name == "in_situ_or_operando_methods":
         queries.extend(
             [
-                _join_query_terms([*core[:2], *context[:1], "in situ characterization"]),
-                _join_query_terms([*core[:2], *context[:1], "operando characterization"]),
+                _join_query_terms([compact_core, "in situ", "characterization", primary_context]),
+                _join_query_terms([compact_core, "operando", "characterization", primary_context]),
             ]
         )
     elif lens_name == "ex_situ_methods":
         queries.extend(
             [
-                _join_query_terms([*core[:2], *context[:1], "ex situ characterization"]),
-                _join_query_terms([*core[:2], *context[:1], "post mortem characterization"]),
+                _join_query_terms([compact_core, "ex situ", "characterization", primary_context]),
+                _join_query_terms([compact_core, "post mortem", "characterization", primary_context]),
             ]
         )
     elif lens_name == "materials_or_cases":
         queries.extend(
             [
-                _join_query_terms([*core[:2], *context[:3], "case study"]),
-                _join_query_terms([*core[:2], *context[:3], "representative materials"]),
+                _join_query_terms([primary_core, primary_context, "case study"]),
+                _join_query_terms([compact_core, primary_context, "representative systems"]),
             ]
         )
     elif lens_name == "application_or_performance":
         app_seed = applications[:2] or ["performance", "application"]
         queries.extend(
             [
-                _join_query_terms([*core[:2], *context[:2], app_seed[0]]),
-                _join_query_terms([*core[:2], *context[:2], "performance"]),
+                _join_query_terms([compact_core, primary_context, app_seed[0]]),
+                _join_query_terms([primary_core, primary_context, "performance"]),
             ]
         )
+        for tail in factor_terms[:4]:
+            queries.append(_join_query_terms([compact_core, primary_context, tail]))
     elif lens_name == "failure_or_limitation":
         queries.extend(
             [
-                _join_query_terms([*core[:2], *context[:2], "failure mechanism"]),
-                _join_query_terms([*core[:2], *context[:2], "limitation degradation"]),
+                _join_query_terms([compact_core, "failure mechanism", primary_context]),
+                _join_query_terms([primary_core, "limitation degradation", primary_context]),
             ]
         )
+        for tail in factor_terms[:4]:
+            queries.append(
+                _join_query_terms([compact_core, tail, "limitation", primary_context])
+            )
     elif lens_name == "controversy_debate":
         queries.extend(
             [
-                _join_query_terms([*core[:2], *context[:2], "controversy"]),
-                _join_query_terms([*core[:2], *context[:2], "competing mechanism"]),
+                _join_query_terms([compact_core, secondary_core, "controversy mechanism", primary_context]),
+                _join_query_terms([primary_core, secondary_core, "competing mechanism", primary_context]),
             ]
         )
     elif lens_name == "method_comparison":
@@ -208,12 +234,36 @@ def _generic_queries_for_lens(lens: ResearchLens) -> list[str]:
     return _sanitize_queries(queries, fallback_terms=[*core, *context, *methods, *applications])
 
 
+def _preferred_full_term(terms: list[str]) -> str:
+    for term in terms:
+        if " " in term and not is_single_acronym_query(term):
+            return term
+    return terms[0] if terms else ""
+
+
+def _preferred_compact_term(terms: list[str]) -> str:
+    for term in terms:
+        if is_single_acronym_query(term):
+            return term
+    return terms[0] if terms else ""
+
+
+def _first_distinct(terms: list[str], excluded: set[str]) -> str:
+    lowered = {value.lower() for value in excluded if value}
+    for term in terms:
+        if term.lower() not in lowered:
+            return term
+    return ""
+
+
 def _query_terms(values: list[str], limit: int = 4) -> list[str]:
     return _unique(
         [
             value
             for value in values
-            if value and str(value).strip().lower() not in {"why important", "importance"}
+            if value
+            and str(value).strip().lower() not in {"why important", "importance"}
+            and not is_artificial_acronym_chain(str(value))
         ]
     )[:limit]
 
@@ -246,7 +296,7 @@ def _sanitize_queries(queries: list[str], fallback_terms: list[str]) -> list[str
                 repaired.append(_join_query_terms([query, context_term]))
             continue
         repaired.append(query)
-    return _unique([query for query in repaired if query and not is_single_acronym_query(query)], 3)
+    return _unique([query for query in repaired if query and not is_single_acronym_query(query)], 5)
 
 
 def _generic_expected_roles(lens_name: str) -> list[str]:

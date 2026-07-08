@@ -6,6 +6,7 @@ from lit_screening.agents.retriever import RetrieverAgent
 from lit_screening.agents.generic_intent import is_single_acronym_query
 from lit_screening.pipeline import (
     _queries_by_provider,
+    build_auto_query_repair_suggestions,
     build_query_provenance,
     build_research_lens_artifacts,
     plan_screening_queries,
@@ -72,6 +73,8 @@ def _plan_with_families(question, tmp_path):
         query_family_plan=family_plan,
         use_query_families=True,
         max_family_queries_per_provider=18,
+        search_contract=payload["search_contract"],
+        concept_map=concept_map,
     )
     return payload, concept_map, family_plan, final_queries, provenance, trace
 
@@ -88,11 +91,23 @@ def _query_text(final_queries):
     return "\n".join(_all_queries(final_queries)).lower()
 
 
+def _contains_any(text, terms):
+    lowered = text.lower()
+    return any(term.lower() in lowered for term in terms)
+
+
 def _assert_generic_family_applied(final_queries, provenance):
     queries = _all_queries(final_queries)
     assert provenance["applied"] is True
     assert sum(len(values) for values in final_queries.values()) >= 8
     assert not any(is_single_acronym_query(query) for query in queries)
+
+
+def _assert_no_standalone_query(final_queries, forbidden_terms):
+    forbidden = {term.lower() for term in forbidden_terms}
+    for query in _all_queries(final_queries):
+        normalized = query.strip().strip("+\"'").lower()
+        assert normalized not in forbidden
 
 
 def test_sei_general_science_generates_generic_query_family(tmp_path):
@@ -111,6 +126,12 @@ def test_sei_general_science_generates_generic_query_family(tmp_path):
     assert {"materials_or_cases", "failure_or_limitation"} <= lens_names
     assert "sei" in query_text
     assert "lithium-ion battery" in query_text or "battery" in query_text
+    _assert_no_standalone_query(final_queries, {"sei", "+sei"})
+    assert all(
+        _contains_any(query, {"sei", "solid electrolyte interphase"})
+        and _contains_any(query, {"lithium-ion battery", "battery", "interface"})
+        for query in _all_queries(final_queries)
+    )
 
 
 def test_oer_spin_state_does_not_activate_magnetism_pack(tmp_path):
@@ -128,6 +149,19 @@ def test_oer_spin_state_does_not_activate_magnetism_pack(tmp_path):
     assert "oer" in query_text or "oxygen evolution reaction" in query_text
     assert "transition metal oxide" in query_text or "catalyst" in query_text
     assert "spin state" in query_text or "electronic structure" in query_text
+    _assert_no_standalone_query(final_queries, {"oer", "+oer"})
+    assert any(
+        _contains_any(query, {"oer", "oxygen evolution reaction"})
+        and _contains_any(query, {"transition metal oxide", "catalyst"})
+        and _contains_any(query, {"spin state", "electronic structure"})
+        for query in _all_queries(final_queries)
+    )
+    assert any(
+        _contains_any(query, {"controversy", "competing mechanism"})
+        and _contains_any(query, {"spin state", "electronic structure"})
+        and _contains_any(query, {"oer", "oxygen evolution reaction"})
+        for query in _all_queries(final_queries)
+    )
 
 
 def test_ai_literature_screening_stays_out_of_material_domain_packs(tmp_path):
@@ -167,10 +201,20 @@ def test_general_thin_film_deposition_does_not_activate_ferroelectric_pack(tmp_p
     _assert_generic_family_applied(final_queries, provenance)
     assert "thin film deposition" in query_text
     assert "ald" in query_text
-    assert "pld" in query_text
+    assert "pld" in query_text or "pulsed laser deposition" in query_text
     assert "sputtering" in query_text
     assert "cvd" in query_text
     assert "comparison" in query_text or "advantages disadvantages" in query_text
+    _assert_no_standalone_query(final_queries, {"sputtering", "+sputtering"})
+    assert any(
+        "thin film deposition" in query.lower()
+        and "sputtering" in query.lower()
+        and "cvd" in query.lower()
+        and _contains_any(query, {"ald", "atomic layer deposition"})
+        and _contains_any(query, {"pld", "pulsed laser deposition"})
+        and _contains_any(query, {"comparison", "advantages disadvantages"})
+        for query in _all_queries(final_queries)
+    )
     assert "pfm" not in query_text
     assert "shg" not in query_text
     assert "batio3" not in query_text
@@ -204,10 +248,14 @@ def test_unknown_domains_still_generate_generic_query_family(question, expected_
     _assert_generic_family_applied(final_queries, provenance)
     assert len(lens_names & {"background_review", "theory_mechanism", "characterization_methods"}) >= 2
     assert any(term in query_text for term in expected_terms)
+    assert not any(is_single_acronym_query(query) for query in _all_queries(final_queries))
     assert "surface magnetization" not in query_text
     assert "ferroelectric polarization" not in query_text
     assert "sei" not in query_text
     assert "oer" not in query_text
+    if "钙钛矿" in question:
+        assert "battery" not in query_text
+        assert "lithium" not in query_text
 
 
 def test_magnetism_pack_regression_not_polluted_by_other_domains(tmp_path):
@@ -243,6 +291,21 @@ def test_ferroelectric_pack_regression_not_polluted_by_other_domains(tmp_path):
     assert "spleem" not in query_text
 
 
+def test_query_repair_replaces_dropped_overbroad_old_planner_queries(tmp_path):
+    payload, _concept_map, _family_plan, final_queries, provenance, _trace = _plan_with_families(
+        SEI_QUESTION,
+        tmp_path,
+    )
+    repair = build_auto_query_repair_suggestions(payload["query_plan"], provenance)
+    final_query_set = set(_all_queries(final_queries))
+
+    assert provenance["dropped_query_count"] > 0
+    assert "static_query_quality_repair" in repair["trigger_reasons"]
+    assert repair["removed_queries"]
+    assert repair["repaired_query_count"] == len(final_query_set)
+    assert not final_query_set.intersection(repair["removed_queries"])
+
+
 def test_generic_run_writes_auditable_diagnostics(tmp_path):
     output_dir = tmp_path / "outputs"
     run_pipeline(
@@ -256,6 +319,7 @@ def test_generic_run_writes_auditable_diagnostics(tmp_path):
 
     planned = json.loads((output_dir / "planned_queries.json").read_text())
     provenance = json.loads((output_dir / "query_provenance.json").read_text())
+    repairs = json.loads((output_dir / "query_repair_suggestions.json").read_text())
     trace = json.loads((output_dir / "agent_trace.json").read_text())
     exploration = json.loads((output_dir / "exploration_quality.json").read_text())
     ranking = json.loads((output_dir / "ranking_diagnostics.json").read_text())
@@ -264,6 +328,10 @@ def test_generic_run_writes_auditable_diagnostics(tmp_path):
     assert planned["query_family_applied"] is True
     assert planned["generic_fallback_used"] is True
     assert planned["active_research_lenses"]
+    assert planned["final_openalex_queries"] == provenance["final_openalex_queries"]
+    assert planned["queries_by_provider"]["openalex"] == provenance["final_openalex_queries"]
+    assert planned["queries"] == provenance["final_openalex_queries"]
+    assert planned["dropped_queries"] == provenance["dropped_queries"]
     assert provenance["records"]
     assert all("concepts" in record for record in provenance["records"])
     assert all("provider_serializer_changes" in record for record in provenance["records"])
@@ -271,6 +339,9 @@ def test_generic_run_writes_auditable_diagnostics(tmp_path):
     assert trace["generic_research_intent_frame"]["research_object"]
     assert trace["domain_activation"]["selected_domain"] == "general_science"
     assert "trigger_reasons" in trace["query_repair"]
+    assert "static_query_quality_repair" in repairs["trigger_reasons"]
+    assert repairs["removed_queries"]
+    assert not set(planned["queries"]).intersection(repairs["removed_queries"])
     assert exploration["provider_query_count"] >= 8
     assert "aspect_coverage_distribution" in exploration
     assert "single_acronym_query_count" in exploration
