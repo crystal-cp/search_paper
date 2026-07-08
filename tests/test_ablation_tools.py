@@ -511,3 +511,125 @@ def test_ablation_summary_contains_expected_columns(plan_ablation_root, tmp_path
     with csv_path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         assert reader.fieldnames == SUMMARY_COLUMNS
+
+
+def test_compare_ablations_includes_reading_path_diagnostics(tmp_path):
+    root = tmp_path / "ablations"
+    run_dir = root / "sei_lithium_battery" / "full_system"
+    _write_query_run(
+        run_dir,
+        "sei_lithium_battery",
+        "full_system",
+        ['SEI "lithium metal battery" "artificial SEI"'],
+    )
+    _write_json(
+        run_dir / "ablation_config.json",
+        {
+            "ablation_config_name": "full_system",
+            "mode": "full",
+            "disabled_modules": [],
+            "support_status": {},
+        },
+    )
+    _write_json(
+        run_dir / "evaluation.json",
+        {
+            "reading_path_diagnostics": {
+                "reading_path_paper_count": 12,
+                "reading_path_exclude_count": 0,
+                "reading_path_out_of_scope_count": 0,
+                "reading_path_duplicate_count": 0,
+                "reading_path_negative_context_count": 0,
+            },
+            "reading_priority_policy": {
+                "target_context_required_for_priority": True,
+            },
+        },
+    )
+    csv_path = tmp_path / "reports" / "ablation_summary.csv"
+    md_path = tmp_path / "reports" / "ablation_summary.md"
+
+    rows = compare_ablations(root, csv_path=csv_path, markdown_path=md_path)
+
+    assert rows[0]["reading_path_paper_count"] == 12
+    assert rows[0]["reading_path_exclude_count"] == 0
+    assert rows[0]["reading_path_out_of_scope_count"] == 0
+    assert rows[0]["reading_path_duplicate_count"] == 0
+    assert rows[0]["reading_path_negative_context_count"] == 0
+    assert rows[0]["target_context_required_for_priority"] is True
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        csv_row = next(csv.DictReader(handle))
+    assert csv_row["reading_path_paper_count"] == "12"
+    assert csv_row["reading_path_exclude_count"] == "0"
+    assert csv_row["target_context_required_for_priority"] == "true"
+    text = md_path.read_text(encoding="utf-8")
+    assert "| full_system | 12 | 0 | 0 | 0 | 0 | true |" in text
+
+
+def test_plan_only_summary_leaves_reading_path_diagnostics_empty(tmp_path):
+    root = tmp_path / "ablations"
+    run_dir = root / "ai_literature_screening" / "full_system"
+    _write_query_run(
+        run_dir,
+        "ai_literature_screening",
+        "full_system",
+        ['LLM "literature screening" "human feedback"'],
+    )
+    csv_path = tmp_path / "reports" / "ablation_summary.csv"
+    md_path = tmp_path / "reports" / "ablation_summary.md"
+
+    rows = compare_ablations(root, csv_path=csv_path, markdown_path=md_path)
+
+    assert rows[0]["reading_path_paper_count"] is None
+    assert rows[0]["reading_path_exclude_count"] is None
+    assert rows[0]["reading_path_out_of_scope_count"] is None
+    assert rows[0]["reading_path_duplicate_count"] is None
+    assert rows[0]["reading_path_negative_context_count"] is None
+    assert rows[0]["target_context_required_for_priority"] is None
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        csv_row = next(csv.DictReader(handle))
+    assert csv_row["reading_path_paper_count"] == ""
+    assert csv_row["reading_path_exclude_count"] == ""
+    assert csv_row["target_context_required_for_priority"] == ""
+
+
+def test_full_summary_reads_target_context_required_for_priority(tmp_path):
+    root = tmp_path / "ablations"
+    run_dir = root / "oer_spin_state" / "full_system"
+    _write_query_run(
+        run_dir,
+        "oer_spin_state",
+        "full_system",
+        ['OER "spin state" "electronic structure"'],
+    )
+    _write_json(
+        run_dir / "ablation_config.json",
+        {
+            "ablation_config_name": "full_system",
+            "mode": "full",
+            "disabled_modules": [],
+            "support_status": {},
+        },
+    )
+    _write_json(
+        run_dir / "evaluation.json",
+        {
+            "reading_path_paper_count": 11,
+            "reading_path_exclude_count": 0,
+            "reading_path_out_of_scope_count": 0,
+            "reading_path_duplicate_count": 0,
+            "reading_path_negative_context_count": 0,
+            "target_context_required_for_priority": False,
+        },
+    )
+    csv_path = tmp_path / "reports" / "ablation_summary.csv"
+    md_path = tmp_path / "reports" / "ablation_summary.md"
+
+    rows = compare_ablations(root, csv_path=csv_path, markdown_path=md_path)
+
+    assert rows[0]["reading_path_paper_count"] == 11
+    assert rows[0]["target_context_required_for_priority"] is False
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        csv_row = next(csv.DictReader(handle))
+    assert csv_row["reading_path_paper_count"] == "11"
+    assert csv_row["target_context_required_for_priority"] == "false"

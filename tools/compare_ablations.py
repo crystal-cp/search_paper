@@ -50,6 +50,12 @@ SUMMARY_COLUMNS = [
     "forbidden_pattern_include_count",
     "required_group_coverage_top10",
     "intent_centrality_mean_top10",
+    "reading_path_paper_count",
+    "reading_path_exclude_count",
+    "reading_path_out_of_scope_count",
+    "reading_path_duplicate_count",
+    "reading_path_negative_context_count",
+    "target_context_required_for_priority",
     "notes",
 ]
 
@@ -77,6 +83,8 @@ def discover_run_dirs(root: Path) -> list[Path]:
 def format_value(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
     if isinstance(value, float):
         return f"{value:.4f}"
     return str(value)
@@ -122,6 +130,12 @@ def row_for_run(run_dir: Path, benchmark: Path) -> dict[str, Any]:
     config_name = ablation_config_name(config, run_dir)
     metrics = evaluate_run(run_dir, benchmark_path=benchmark, case_id=case_id)
     support_level, support_details = support_level_for_config(config)
+    if config_name == "no_query_repair" and metrics.get("no_query_repair_conclusive") is False:
+        support_level = "partially_supported"
+        support_details = [
+            *support_details,
+            "query_repair:diagnostic_non_conclusive",
+        ]
 
     notes: list[str] = []
     if support_level == "partially_supported":
@@ -137,6 +151,10 @@ def row_for_run(run_dir: Path, benchmark: Path) -> dict[str, Any]:
     if metrics.get("repair_disabled_but_sanitizer_active"):
         notes.append(
             "query repair ablation is non-conclusive because upstream sanitizer remains active"
+        )
+    if config_name == "no_query_repair" and metrics.get("no_query_repair_conclusive") is False:
+        notes.append(
+            "no_query_repair is diagnostic/non-conclusive in this pilot because upstream sanitizer remains active"
         )
     if metrics.get("weak_query_count"):
         notes.append("weak query heuristic hit")
@@ -185,6 +203,16 @@ def row_for_run(run_dir: Path, benchmark: Path) -> dict[str, Any]:
         "forbidden_pattern_include_count": metrics.get("forbidden_pattern_include_count"),
         "required_group_coverage_top10": metrics.get("required_group_coverage_top10"),
         "intent_centrality_mean_top10": metrics.get("intent_centrality_mean_top10"),
+        "reading_path_paper_count": metrics.get("reading_path_paper_count"),
+        "reading_path_exclude_count": metrics.get("reading_path_exclude_count"),
+        "reading_path_out_of_scope_count": metrics.get("reading_path_out_of_scope_count"),
+        "reading_path_duplicate_count": metrics.get("reading_path_duplicate_count"),
+        "reading_path_negative_context_count": metrics.get(
+            "reading_path_negative_context_count"
+        ),
+        "target_context_required_for_priority": metrics.get(
+            "target_context_required_for_priority"
+        ),
         "notes": "; ".join(notes),
         "_support_level": support_level,
         "_support_details": ", ".join(support_details),
@@ -373,7 +401,7 @@ def write_markdown_summary(rows: list[dict[str, Any]], path: Path) -> None:
     buckets = support_summary(rows)
     for title, key in [
         ("Fully supported ablations", "fully_supported"),
-        ("Partially supported ablations", "partially_supported"),
+        ("Partially supported ablations (diagnostic / non-conclusive)", "partially_supported"),
         ("Unsupported ablations", "unsupported"),
     ]:
         values = buckets[key]
@@ -430,6 +458,29 @@ def write_markdown_summary(rows: list[dict[str, Any]], path: Path) -> None:
             )
         lines.extend(["", "Pilot interpretation:", ""])
         lines.extend([f"- {note}" for note in comparison_notes(case_rows)])
+        lines.extend(["", "Reading-path diagnostics:", ""])
+        lines.extend(
+            [
+                "| Config | Reading path papers | Exclude leaks | Out-of-scope leaks | Duplicate leaks | Negative-context leaks | Target context required |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
+            ]
+        )
+        for row in sorted(case_rows, key=lambda item: item["config_name"]):
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        md_cell(row["config_name"]),
+                        md_cell(row["reading_path_paper_count"]),
+                        md_cell(row["reading_path_exclude_count"]),
+                        md_cell(row["reading_path_out_of_scope_count"]),
+                        md_cell(row["reading_path_duplicate_count"]),
+                        md_cell(row["reading_path_negative_context_count"]),
+                        md_cell(row["target_context_required_for_priority"]),
+                    ]
+                )
+                + " |"
+            )
         lines.extend(
             [
                 "- These signals are pilot diagnostics only, not final ablation evidence.",

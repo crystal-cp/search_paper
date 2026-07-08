@@ -2,242 +2,223 @@
 
 ## Motivation
 
-Scientific literature screening is difficult for novice scientific users because
-they often do not yet know the expert vocabulary, canonical papers, methods,
-materials, exclusion boundaries, or provider-specific search conventions of a
-field. A normal keyword search assumes that the user can already express an
-expert query. Early-stage research exploration often violates that assumption.
+Scientific literature screening is difficult when the user is still learning the
+field. A novice often knows the phenomenon they care about, but not the expert
+vocabulary, canonical mechanisms, benchmark methods, exclusion boundaries, or
+provider-specific search syntax needed to retrieve the right papers.
 
-This project studies evidence-grounded literature screening under imperfect
-novice intent. A user may submit a question that is vague, over-broad,
-over-narrow, multilingual, partially wrong, missing key concepts, or phrased as
-a desired research direction rather than a precise search query. The system
-therefore should not treat the raw user question as the final search query. It
-should infer and repair the research intent, expose the repair for inspection,
-retrieve or import candidate papers, ground claims in abstracts, rank papers
-transparently, accept human feedback, and write auditable artifacts.
-
-The central research question is:
+`search_paper` studies the following problem:
 
 ```text
-How can a human-centric multi-agent AI system transform incomplete, ambiguous,
-or partially incorrect novice research questions into verifiable, domain-aware,
-feedback-adaptive literature screening decisions?
+How can a human-centric multi-agent LLM system transform noisy novice research
+questions into evidence-grounded, domain-aware, feedback-adaptive scientific
+literature screening artifacts?
 ```
+
+The current v9 baseline is deterministic and rule-controlled. It uses bounded
+agents, explicit artifacts, span validation, domain guardrails, and transparent
+ranking. LLMs are treated as a controlled enhancement layer for understanding or
+criticizing user intent, not as the authority that decides evidence validity,
+include/exclude labels, reading priority, final scores, or domain decisions.
+
+## Why Novice Literature Screening Is Hard
+
+Novice literature screening is not just keyword search. It has several recurring
+failure modes:
+
+- The user question is a noisy expression of research intent, not a provider-ready query.
+- The user may write in Chinese, English, or mixed language while providers need English scholarly terms.
+- Important concepts may be implied rather than named, such as lithium context in a Chinese SEI battery question.
+- Acronyms are ambiguous across fields, for example SEI, OER, MOF, AI, and PFM.
+- A query can retrieve papers that match surface terms but belong to the wrong domain.
+- A paper can be relevant enough to keep, but not important enough to be a first-read `must_read` paper.
+- Abstract-only evidence is limited and must not be inflated into unsupported claims.
+- A novice user needs a reading path and explanation, not only a long ranked CSV.
+
+The system therefore treats the user question as evidence about intent. It must
+repair and operationalize that intent while keeping every decision inspectable.
 
 ## Formal Problem Formulation
 
-Let `x` be the raw user question. The question may be incomplete, ambiguous,
-multilingual, or partially incorrect. The system assumes that there is a latent
-expert-level research intent `z*`, but `z*` is not directly observable.
+Let:
 
-The system constructs an auditable approximation of that intent:
+- `q` be a noisy novice research question.
+- `S` be optional seed papers supplied as DOI, title, Semantic Scholar ID, OpenAlex ID, or CSV rows.
+- `H` be optional user feedback history over previous include, exclude, or uncertain decisions.
+- `B` be the provider/query budget, including maximum papers per query and provider limits.
+- `P` be the set of scholarly providers or import sources, such as OpenAlex, Semantic Scholar, BibTeX, RIS, or CSV.
+- `U` be the user profile or expertise level, for example novice, domain learner, or expert reviewer.
 
-```text
-z_hat = intent_repair(x, h, d)
-```
-
-where:
-
-- `x` is the raw user question.
-- `h` is optional human feedback history.
-- `d` is optional domain knowledge, such as domain packs, synonym lists,
-  false-positive terms, method terms, or seed-paper hints.
-- `z_hat` is represented through structured artifacts such as `SearchBrief`,
-  `search_contract.json`, ambiguity analysis, concept maps, query families, and
-  required aspects.
-
-From `z_hat`, the system creates provider-aware query plans:
+The system estimates a structured intent representation:
 
 ```text
-Q = query_planning(z_hat, d)
+I_hat = IntentRepair(q, S, H, U)
 ```
 
-Each query is more than a string: it should have a source, provider, purpose,
-and relation to the repaired research intent. The current implementation keeps
-legacy `planned_queries.json` as the default retrieval plan and keeps
-query-family retrieval optional.
-
-For each enabled provider or import source `r`, the retriever returns candidate
-papers:
+It then builds a search contract and query-family plan:
 
 ```text
-C_r = retrieve_or_import(Q_r, budget_r)
-C = deduplicate(union(C_r))
+K = SearchContract(I_hat)
+Q = QueryFamilyPlanner(I_hat, K, B, P)
 ```
 
-For each paper `p` in the merged candidate set, the system computes:
+For each provider or import source, it retrieves or imports candidates:
 
 ```text
-e_p = extract_evidence(p, z_hat)
-v_p = verify_span(e_p, abstract_p)
-g_p = assess_domain_fit(p, z_hat, d)
-role_p = classify_research_role(p, Q, z_hat)
-s_p = rank(p, z_hat, e_p, v_p, g_p, role_p, h)
+C_raw = Retrieve(Q, P, B) union Import(S)
+C = Deduplicate(C_raw)
 ```
 
-The final output is a structured screening artifact:
+For each candidate paper `p` in `C`, the system computes:
 
 ```text
-Y = (ranked_papers, evidence, domain_assessments, roles, diagnostics, trace, report)
+E_p = EvidenceExtraction(p, I_hat)
+V_p = SpanValidation(E_p, abstract_p)
+D_p = DomainGuardrail(p, K)
+A_p = RequiredGroupCoverage(p, K)
+R_p = Rank(p, I_hat, V_p, D_p, A_p, H)
 ```
 
-The research problem is to design a bounded multi-agent policy that maximizes
-intent alignment, evidence grounding, domain precision, aspect coverage, ranking
-usefulness, feedback adaptation, and interpretability under uncertainty.
+The final system output is:
 
-## Inputs And Outputs
+```text
+Y = (Q, C, E, D, R, G, pi)
+```
 
-Primary input:
+where `pi` is the next-step search or feedback policy exposed to the user.
 
-- A natural-language research question from the user.
-- The question may mix Chinese and English, contain vague concepts, include
-  partial seed-paper hints, or express the user's goal rather than an expert
-  query.
+## Inputs
 
-Optional inputs:
+The baseline input variables are:
 
-- Human include, exclude, or uncertain feedback.
-- Existing literature-library exports in BibTeX, RIS, or CSV format.
-- Seed papers supplied by DOI, title, Semantic Scholar ID, OpenAlex ID, or CSV.
-- Domain packs with terms, synonyms, methods, materials, applications, and
-  false-positive terms.
-- Provider configuration, retrieval budgets, ranking weights, and optional LLM
-  modes.
+- `q`: noisy novice research question.
+- `S`: optional seed papers.
+- `H`: optional user feedback history.
+- `B`: provider/query budget.
+- `P`: scholarly providers and local import sources.
+- `U`: user profile or expertise level.
 
-Core outputs:
+Concrete repository inputs include:
 
-- Repaired research intent: `search_brief.json`, `search_contract.json`,
-  `ambiguity_analysis.json`, and `question_refinement.json`.
-- Query planning artifacts: `planned_queries.json`, `concept_map.json`,
-  `query_families.json`, `seed_hints.json`, and `query_provenance.json`.
-- Candidate artifacts: raw provider result JSON files, imported-paper tables,
-  citation-expansion tables, retrieval paths, and `merged_papers.csv`.
-- Evidence artifacts: `evidence_table.csv`, `evidence_functions.json`, span
-  validation fields, support levels, and paper evidence cards.
-- Screening and ranking artifacts: `domain_assessments.json`,
-  `aspect_coverage.csv`, `screening_decisions.*`, score breakdowns, and ranked
-  paper CSV files.
-- Sensemaking artifacts: `paper_roles.json`, `research_tensions.json`,
-  `method_comparison_matrix.*`, `research_gap_matrix.*`,
-  `suggested_next_searches.*`, `paper_cards.md`, and `reading_path.md`.
-- Audit artifacts: `evaluation.json`, `retrieval_diagnostics.json`,
-  `query_pilot_diagnostics.json`, `query_repair_suggestions.json`,
-  `agent_trace.json`, `run_events.jsonl`, and `report.md`.
+- CLI or Streamlit question text.
+- Provider choices and `max_per_query` budget.
+- Optional BibTeX, RIS, or CSV library exports.
+- Optional seed-paper entries.
+- Optional feedback CSV.
+- Optional LLM configuration, which must remain advisory and non-authoritative.
+
+## Outputs
+
+The target outputs are:
+
+- `Q`: query family plan and provider-specific query plan.
+- `C`: normalized and deduplicated candidate papers.
+- `E`: evidence spans and span-validation diagnostics.
+- `D`: domain guardrail decisions and context warnings.
+- `R`: ranked reading list with scores, decisions, and reading priorities.
+- `G`: user-facing report and reading path.
+- `π`: next-step search/feedback policy.
+
+Concrete repository artifacts include:
+
+- `search_brief.json`, `search_contract.json`, `ambiguity_analysis.json`, and `question_refinement.json`.
+- `planned_queries.json`, `query_families.json`, `query_provenance.json`, and query-repair diagnostics.
+- Raw provider JSON, `merged_papers.csv`, and retrieval diagnostics.
+- `evidence_table.csv`, `evidence_functions.json`, and span-validation fields.
+- `domain_assessments.json`, `aspect_coverage.csv`, `screening_decisions.*`, and `ranked_papers.csv`.
+- `paper_roles.json`, `research_tensions.json`, `paper_cards.md`, `reading_path.md`, `report.md`, and `user_report.md` when generated.
+- `evaluation.json`, `exploration_quality.json`, `agent_trace.json`, and `run_events.jsonl`.
 
 ## Objective
 
-The system-level objective is to make literature screening useful and
-trustworthy for novice users. In practical terms, a good run should:
+The system objective is to maximize:
 
-- Align the repaired intent and ranked results with the user's research need.
-- Ground claims about papers in verifiable abstract spans.
-- Reduce off-topic drift through explicit domain boundaries.
-- Cover the required conceptual aspects of the repaired question.
-- Rank papers by usefulness for this research task, not only by citation count,
-  recency, provider score, or keyword overlap.
-- Preserve uncertainty instead of hiding it.
-- Adapt ranking and next-search suggestions to human feedback.
-- Provide enough traceability for a user to inspect how the system reached its
-  decisions.
+- Intent relevance: results match the repaired research question, not just raw keywords.
+- Aspect coverage: required concept groups appear in the candidate set and top results.
+- Evidence grounding: claims trace to title/abstract spans with explicit support level.
+- Diversity: the reading list covers mechanisms, methods, reviews, applications, and frontier papers when appropriate.
+- User preference fit: feedback can adjust future ranking and search directions.
 
-The system should penalize unsupported evidence, domain drift, opaque decisions,
-and cognitively overloaded reports that are technically complete but difficult
-for novice users to act on.
+The system objective is also to minimize:
+
+- False positives and wrong-domain drift.
+- Query cost and provider waste.
+- Clarification burden on novice users.
+- Ungrounded claims or evidence hallucination.
+- Overloaded reports that are complete but not actionable.
+
+The design principle is:
+
+```text
+LLM understands the user.
+Rules protect the evidence.
+Ranking organizes the reading path.
+Report explains the reasoning.
+```
 
 ## Agent Roles
 
-The repository implements the screening workflow as a set of bounded agents and
-artifact writers. The exact implementation is intentionally lightweight and
-mostly rule-based by default.
+The repository uses bounded agents and artifact writers. In the v9 deterministic
+baseline, these are mostly rule-controlled modules rather than independent LLM
+agents.
 
-- Novice intent repair: interprets the raw user question as a `SearchBrief` and
-  optional refined subquestions.
-- Search contract and domain boundary construction: records intended domain,
-  required concepts, excluded concepts, and ambiguous terms.
-- Concept mapping: decomposes the repaired intent into research lenses and
-  concept groups.
-- Query planning and query-family explanation: creates provider-aware query
-  plans and optional query-family rationale.
-- Seed extraction: identifies DOI, title, arXiv, author, Semantic Scholar, or
-  OpenAlex hints without automatically enabling citation expansion.
-- Provider retrieval and import: retrieves from OpenAlex and Semantic Scholar or
-  imports local BibTeX, RIS, and CSV records.
-- Optional seed-paper snowballing: expands through Semantic Scholar references,
-  citations, and recommendations only when explicitly enabled.
-- Normalization and deduplication: merges provider/import records into normal
-  `Paper` objects while preserving provenance.
-- Evidence extraction: extracts claim-level evidence from title and abstract.
-- Evidence span verification: checks exact or high-confidence fuzzy matches
-  against the abstract and marks weak or invalid support.
-- Aspect and domain assessment: records required-aspect coverage and
-  in-scope/borderline/out-of-scope domain fit.
-- Paper role and evidence-function classification: explains whether a paper is
-  background, method, proof, theory, application, limitation, or frontier work.
-- Ranking and feedback adaptation: computes transparent score breakdowns and
-  optional feedback-adjusted rankings.
-- Reporting and trace generation: writes CSV, JSON, Markdown, diagnostics, and
-  user-facing reports.
+- NoviceIntentInterpreter / Intent Repair: interprets the raw user question, repairs novice phrasing, and normalizes multilingual concepts.
+- ExpertResearchIntent / Structured Concepts: turns repaired intent into required concepts, exclusions, target context, and success criteria.
+- DomainRouter: selects lightweight domain knowledge and domain-boundary hints.
+- SearchContract: records required groups, target context groups, negative context groups, and ambiguity decisions.
+- QueryFamilyPlanner: creates multiple search routes for different research lenses.
+- QueryRepair and QueryCritic diagnostics: audit candidate queries, repair overbroad or malformed queries when enabled, and record whether repair changed the final plan.
+- Provider retrieval: queries OpenAlex and Semantic Scholar, or imports local library records.
+- Evidence extraction and span validation: extracts candidate evidence and verifies whether it is grounded in the abstract.
+- DomainGuardrail: labels papers as in-scope, borderline/peripheral, or out-of-scope using the search contract.
+- PaperRoleClassifier: assigns reading roles such as review, method, mechanism, evaluation, background, or frontier when supported.
+- IntentCentrality and group-coverage ranking: organize papers by task usefulness, not only provider score or citation count.
+- Context-aware reading priority: separates `include` from first-read `must_read` papers.
+- Reading path and user report: turn ranked artifacts into a novice-friendly reading plan and caveated explanation.
+- Human feedback: records include/exclude/uncertain signals and supports future preference adaptation.
 
 ## Failure Modes
 
-The project should make failure modes visible instead of hiding them behind a
-single ranked list.
+The system should expose failures instead of hiding them behind a polished ranked
+list.
 
-- Intent over-repair: the system infers a more specific or different expert
-  intent than the user meant.
-- Intent under-repair: the system keeps novice wording too literally and misses
-  expert terminology.
-- Query-family collapse: distinct research directions collapse into one generic
-  search route.
-- Query over-expansion: broad query expansion creates noisy, off-topic
-  retrieval.
-- Provider bias or failure: provider semantics, metadata quality, rate limits,
-  or API errors distort the candidate pool.
-- Domain drift: papers match surface terms but belong to the wrong scientific
-  domain.
-- Over-strict filtering: useful interdisciplinary papers are demoted too
-  aggressively.
-- Evidence hallucination: generated evidence cannot be matched back to the
-  abstract.
-- Abstract-only evidence limits: relevant papers may not contain enough detail
-  in abstracts to validate a specific claim.
-- Ranking bias: citation count, recency, provider score, or keyword overlap
-  dominates intent centrality.
-- Paper-role misclassification: the reading path mislabels a paper's function in
-  the research landscape.
-- Feedback overfitting: a small number of feedback actions causes excessive
-  ranking or query adaptation.
-- Novice cognitive overload: the output is complete but too flat, long, or
-  unstructured to help a new user decide what to read.
+- Intent over-repair: the system imposes a narrower expert intent than the user asked for.
+- Intent under-repair: novice wording is kept too literally and expert anchors are missed.
+- Query-family degradation: distinct research routes collapse into generic keyword queries.
+- Query repair ambiguity: final queries may look unchanged if upstream sanitizers already cleaned them.
+- Provider instability: API errors, rate limits, missing keys, or metadata gaps distort retrieval.
+- Domain drift: papers match surface terms but belong to a forbidden or peripheral domain.
+- Target-context failure: lithium-specific battery tasks retrieve sodium, potassium, zinc, or other non-target systems as core papers.
+- Evidence inflation: weak keyword overlap is mistaken for strict support.
+- Ranking miscalibration: `include` becomes equivalent to `must_read` or no papers are promoted to `must_read` when target context is not required.
+- Reading-path leakage: excluded or out-of-scope papers appear in recommended reading sections.
+- Role misclassification: useful top papers are left unclassified or assigned the wrong reading role.
+- Novice overload: reports list artifacts without a clear first reading path.
 
 ## Evaluation Overview
 
-Evaluation should compare the full system with simpler baselines and ablations:
+Evaluation should compare the deterministic full system against pilot ablations
+and future LLM-enhanced variants. Current evaluation is diagnostic, not a final
+formal ablation study.
 
-- Raw keyword search.
-- Single-provider retrieval.
-- Retrieval without intent repair.
-- Retrieval without query-family explanation.
-- Ranking without evidence span validation.
-- Ranking without domain guardrails.
-- Ranking without human feedback.
-- Single-prompt LLM paper recommendation.
+Plan-only evaluation checks:
 
-Useful metrics include:
+- QueryFamily application and coverage.
+- Query quality score.
+- Anchor coverage.
+- Single-acronym, overbroad, repeated-phrase, single-axis, and weak-query counts.
+- Plan-only retrieval status and skipped research-gap generation.
 
-- Retrieval and ranking: precision@k, recall@k, nDCG@k, MAP, top-k in-scope
-  rate, and top-k aspect coverage.
-- Evidence grounding: strict support rate, weak support rate, invalid evidence
-  rate, span match confidence, and missing-abstract rate.
-- Domain control: false-positive rate, out-of-scope rate, borderline recovery,
-  and domain assessment accuracy.
-- Feedback adaptation: before/after ranking delta, feedback acceptance rate,
-  learned-term usefulness, and reduction in repeated off-topic results.
-- Usability: whether a novice user can identify must-read papers, explain why a
-  paper is relevant, trust the evidence trail, and form a concrete reading plan.
+Full-run evaluation checks:
 
-The working hypothesis is that novice intent repair, query-family planning,
-evidence span validation, domain guardrails, role-aware ranking, and human
-feedback together produce more useful and trustworthy literature screening
-outputs than keyword search or single-prompt paper recommendation.
+- Provider success rate, raw retrieved count, merged count, and duplicate ratio.
+- Domain false positives in top-10, top-20, include, and must-read sets.
+- Required group coverage and intent centrality in top results.
+- Evidence support and span validation.
+- Must-read count and include count calibration.
+- Reading-path diagnostics for exclude, out-of-scope, duplicate, and negative-context leakage.
+- Whether target context is required for reading priority.
+
+Future LLM-enhanced evaluation should test whether LLMIntentFrameEnhancer or
+LLMQueryPlanCritic improves intent understanding or query quality without taking
+over rule-owned decisions.

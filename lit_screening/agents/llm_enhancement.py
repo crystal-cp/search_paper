@@ -9,6 +9,7 @@ decisions.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from typing import Any
 
@@ -751,9 +752,7 @@ def report_recommendable_papers(ranked_papers: list[RankedPaper]) -> list[Ranked
 def _is_user_report_recommendable(item: RankedPaper) -> bool:
     decision = item.screening_decision
     domain = item.domain_assessment
-    if decision is None:
-        return False
-    if decision.decision == "exclude" or decision.reading_priority == "exclude":
+    if decision and (decision.decision == "exclude" or decision.reading_priority == "exclude"):
         return False
     if domain and domain.domain_decision == "out_of_scope":
         return False
@@ -1061,15 +1060,96 @@ def why_read_now_summary(
 
 
 def report_markdown_is_grounded(markdown: str, artifact_input: dict[str, Any]) -> bool:
-    titles = [
+    titles = _artifact_titles(artifact_input)
+    evidence_spans = _artifact_evidence_spans(artifact_input)
+    allowed_text = "\n".join(_flatten_report_strings(artifact_input)).lower()
+    if not titles and not evidence_spans:
+        return False
+    if titles and not any(title in markdown for title in titles):
+        return False
+    for line in markdown.splitlines():
+        cleaned = line.strip()
+        if not cleaned or cleaned.startswith("#") or cleaned.startswith("|"):
+            continue
+        if _looks_like_standalone_paper_title(cleaned, titles, allowed_text):
+            return False
+        if _looks_like_unsupported_evidence_claim(cleaned, titles, evidence_spans):
+            return False
+    return True
+
+
+def _artifact_titles(artifact_input: dict[str, Any]) -> list[str]:
+    return [
         str(row.get("title") or "")
         for row in artifact_input.get("ranked_papers", [])
         if row.get("title")
     ]
-    if not titles:
+
+
+def _artifact_evidence_spans(artifact_input: dict[str, Any]) -> list[str]:
+    return [
+        str(row.get("evidence_sentence") or "")
+        for row in artifact_input.get("ranked_papers", [])
+        if row.get("evidence_sentence")
+    ]
+
+
+def _flatten_report_strings(value: Any) -> list[str]:
+    strings: list[str] = []
+    if isinstance(value, dict):
+        for child in value.values():
+            strings.extend(_flatten_report_strings(child))
+    elif isinstance(value, list):
+        for child in value:
+            strings.extend(_flatten_report_strings(child))
+    elif isinstance(value, str) and value.strip():
+        strings.append(value.strip())
+    return strings
+
+
+def _looks_like_standalone_paper_title(
+    line: str,
+    known_titles: list[str],
+    allowed_text: str,
+) -> bool:
+    text = line.strip().strip("-*` ")
+    if not text or len(text.split()) < 3:
+        return False
+    if any(text == title or text in title or title in text for title in known_titles):
+        return False
+    if text.lower() in allowed_text:
+        return False
+    if re.search(r"[.!?。！？:：]", text):
+        return False
+    tokens = [token for token in re.findall(r"[A-Za-z][A-Za-z0-9-]*", text) if token]
+    if len(tokens) < 3:
+        return False
+    title_like = sum(1 for token in tokens if token[:1].isupper())
+    return title_like / len(tokens) >= 0.6
+
+
+def _looks_like_unsupported_evidence_claim(
+    line: str,
+    known_titles: list[str],
+    evidence_spans: list[str],
+) -> bool:
+    sentences = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?。！？])\s+", line)
+        if part.strip()
+    ]
+    for sentence in sentences:
+        lowered = sentence.lower()
+        if not any(marker in lowered for marker in ["claim", "evidence", "shows", "demonstrates", "supports"]):
+            continue
+        if any(title and title in sentence for title in known_titles):
+            continue
+        if any(span and (span in sentence or sentence in span) for span in evidence_spans):
+            continue
+        if "strict_support" in lowered or "span" in lowered:
+            continue
         return True
-    mentioned_titles = [title for title in titles if title in markdown]
-    return bool(mentioned_titles)
+    return False
 
 
 def repeated_anchor_issues(queries: list[str]) -> list[str]:

@@ -13,28 +13,38 @@ The project is not a generic keyword-search wrapper, a paper summarizer, or a
 commercial literature-management product. Its research focus is novice intent
 repair, provider-aware query planning, abstract-grounded evidence validation,
 domain guardrails, role-aware ranking, human feedback, and transparent reporting.
-LLM-enhanced behavior is optional; the rule-based core must continue to run
-without an LLM key.
+The current frozen baseline is **v9 deterministic baseline**: a rule-controlled,
+reproducible pipeline where QueryFamily planning is enabled by default and LLM
+behavior is not required.
+
+LLM is a controlled enhancement layer, not the decision maker. LLM-enhanced
+behavior is optional or planned for controlled evaluation; the rule-based core
+must continue to run without an LLM key. An LLM must not directly decide
+`include` / `exclude`, `must_read`, `out_of_scope`, `final_score`,
+`domain_decision`, or evidence validity. Those decisions are owned by explicit
+rules, span validation, domain guardrails, ranking diagnostics, and auditable
+artifacts.
 
 For the detailed research framing and current system design, see
 [`docs/research_problem.md`](docs/research_problem.md) and
 [`docs/system_architecture.md`](docs/system_architecture.md).
 
-The MVP pipeline:
+The v9 deterministic baseline pipeline:
 
 1. interprets the user's search intent as a `SearchBrief`,
 2. refines broad questions into optional subquestions,
-3. builds a structured, provider-aware query plan from the brief,
+3. builds QueryFamily routes and a structured provider-aware query plan,
 4. retrieves metadata from OpenAlex and Semantic Scholar using provider-specific queries,
 5. optionally imports existing BibTeX, RIS, or CSV literature-library exports,
 6. optionally expands from seed papers through references, citations, and recommendations,
 7. normalizes and deduplicates papers,
 8. extracts claim-level evidence from abstracts,
 9. verifies whether evidence is grounded in the abstract with strict span validation,
-10. ranks papers with hybrid TF-IDF/API/field relevance, aspect coverage, and transparent scoring,
+10. ranks papers with hybrid TF-IDF/API/field relevance, aspect coverage, intent centrality, and transparent scoring,
 11. groups papers into reading roles and generates paper evidence cards,
-12. optionally applies human feedback,
-13. writes CSV, JSON, Markdown outputs, and an agent decision trace.
+12. assigns context-aware reading priorities and reading paths,
+13. optionally applies human feedback,
+14. writes CSV, JSON, Markdown outputs, and an agent decision trace.
 
 ## Setup
 
@@ -67,9 +77,15 @@ recommended to reduce rate-limit failures.
 
 ## Optional DeepSeek LLM Enhancement
 
-The default pipeline is fully rule-based. You can optionally use an
-OpenAI-compatible LLM backend for query planning, evidence extraction, and/or
-verification. DeepSeek support is built in through `DEEPSEEK_API_KEY`.
+The default v9 baseline is deterministic and rule-controlled. You can optionally
+use an OpenAI-compatible LLM backend for controlled query-planning, evidence
+extraction, and/or verification experiments. DeepSeek support is built in
+through `DEEPSEEK_API_KEY`.
+
+LLM output is advisory. It can propose translations, query ideas, extraction
+candidates, or critic diagnostics, but it must not directly decide
+`include` / `exclude`, `must_read`, `out_of_scope`, `final_score`,
+`domain_decision`, or evidence validity.
 When the research question is written in Chinese, the planner prepares an
 English `planning_question` before retrieval. With `--planner-mode llm`, the
 LLM is asked to translate the question and generate English scholarly queries.
@@ -175,6 +191,96 @@ python -m lit_screening.pipeline run \
   --output-dir outputs
 ```
 
+## v9 Deterministic Baseline Smoke Reproduction
+
+The frozen v9 smoke baseline can be reproduced with the deterministic ablation
+runner. Plan-only runs do not require provider API keys and should record
+`retrieval_status = planning_only`,
+`ranked_papers_based_on_real_retrieval = false`, skipped research-gap generation,
+and empty `suggested_next_searches`.
+
+Plan-only cases:
+
+```bash
+PYTHONPATH=. python tools/run_ablations.py \
+  --mode plan \
+  --configs full_system,no_query_family,no_query_repair \
+  --case-id ai_literature_screening \
+  --output-root outputs/baseline_v9_smoke
+
+PYTHONPATH=. python tools/run_ablations.py \
+  --mode plan \
+  --configs full_system,no_query_family,no_query_repair \
+  --case-id mof_co2_capture \
+  --output-root outputs/baseline_v9_smoke
+
+PYTHONPATH=. python tools/run_ablations.py \
+  --mode plan \
+  --configs full_system,no_query_family,no_query_repair \
+  --case-id thin_film_deposition \
+  --output-root outputs/baseline_v9_smoke
+```
+
+Full OpenAlex-only smoke cases:
+
+```bash
+PYTHONPATH=. python tools/run_ablations.py \
+  --mode full \
+  --providers openalex \
+  --configs full_system \
+  --case-id sei_lithium_battery \
+  --output-root outputs/baseline_v9_smoke
+
+PYTHONPATH=. python tools/run_ablations.py \
+  --mode full \
+  --providers openalex \
+  --configs full_system \
+  --case-id oer_spin_state \
+  --output-root outputs/baseline_v9_smoke
+
+PYTHONPATH=. python tools/compare_ablations.py outputs/baseline_v9_smoke
+```
+
+The `baseline_v9_smoke` review passed 11 runs with `returncode=0`. In that
+baseline, SEI and OER full-system runs both produced bounded first-read sets
+(`must_read_count = 12`) and reading paths with zero exclude, out-of-scope,
+duplicate, or negative-context recommendations.
+
+For broader full-run pilot ablation diagnostics beyond the frozen v9 smoke
+baseline, run the exploratory configs under a separate output root:
+
+```bash
+PYTHONPATH=. python tools/run_ablations.py \
+  --mode full \
+  --providers openalex \
+  --configs full_system,no_domain_guardrail,no_intent_centrality,no_group_coverage_ranking \
+  --case-id sei_lithium_battery \
+  --output-root outputs/ablations_pilot
+
+PYTHONPATH=. python tools/run_ablations.py \
+  --mode full \
+  --providers openalex \
+  --configs full_system,no_domain_guardrail,no_intent_centrality,no_group_coverage_ranking \
+  --case-id oer_spin_state \
+  --output-root outputs/ablations_pilot
+
+PYTHONPATH=. python tools/compare_ablations.py outputs/ablations_pilot
+```
+
+## Tests
+
+Run tests from the project root with the package on `PYTHONPATH`:
+
+```bash
+PYTHONPATH=. pytest -q
+```
+
+Equivalent module form:
+
+```bash
+python -m pytest -q
+```
+
 ## Run The UI
 
 ```bash
@@ -255,9 +361,10 @@ Research Sensemaking Mode is an explanatory layer around the existing screening
 pipeline. It helps the system show how it understood the research question,
 which concepts it split the question into, why different search routes exist,
 and which parts of the resulting literature map are verified or still uncertain.
-It does not replace the legacy `QueryPlan`: by default retrieval still uses
-`planned_queries.json`. Query-family retrieval is opt-in through
-`use_query_families=True` / `--use-query-families`.
+In the v9 deterministic baseline, QueryFamily planning is enabled by default as
+part of the normal rule-controlled path. The legacy `QueryPlan` and
+`planned_queries.json` remain auditable compatibility artifacts, while
+QueryFamily-related ablation flags are reserved for debug and pilot evaluation.
 
 ### Domain Packs
 

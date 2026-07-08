@@ -703,6 +703,7 @@ def evaluate_run(
     retrieval_diagnostics = read_json(run / "retrieval_diagnostics.json", {})
     query_repair_stage_status = read_json(run / "query_repair_stage_status.json", {})
     query_repair_suggestions = read_json(run / "query_repair_suggestions.json", {})
+    evaluation = read_json(run / "evaluation.json", {})
     raw_candidate_queries_artifact = read_json(
         run / "raw_candidate_queries_before_repair.json",
         {},
@@ -859,6 +860,16 @@ def evaluate_run(
     )
 
     report_lower = user_report.lower()
+    reading_path_diagnostics = (
+        evaluation.get("reading_path_diagnostics", {})
+        if isinstance(evaluation, dict)
+        else {}
+    )
+    reading_priority_policy = (
+        evaluation.get("reading_priority_policy", {})
+        if isinstance(evaluation, dict)
+        else {}
+    )
     metrics = {
         "run_dir": str(run),
         "case_id": (case or {}).get("id") or case_id,
@@ -951,6 +962,36 @@ def evaluate_run(
             ranked_rows[:10],
             "intent_centrality_score",
         ),
+        "reading_path_paper_count": metric_from_evaluation(
+            evaluation,
+            reading_path_diagnostics,
+            "reading_path_paper_count",
+        ),
+        "reading_path_exclude_count": metric_from_evaluation(
+            evaluation,
+            reading_path_diagnostics,
+            "reading_path_exclude_count",
+        ),
+        "reading_path_out_of_scope_count": metric_from_evaluation(
+            evaluation,
+            reading_path_diagnostics,
+            "reading_path_out_of_scope_count",
+        ),
+        "reading_path_duplicate_count": metric_from_evaluation(
+            evaluation,
+            reading_path_diagnostics,
+            "reading_path_duplicate_count",
+        ),
+        "reading_path_negative_context_count": metric_from_evaluation(
+            evaluation,
+            reading_path_diagnostics,
+            "reading_path_negative_context_count",
+        ),
+        "target_context_required_for_priority": metric_from_evaluation(
+            evaluation,
+            reading_priority_policy,
+            "target_context_required_for_priority",
+        ),
         "report_has_provider_status": (
             "provider status" in report_lower
             or "provider_summary" in report_lower
@@ -964,6 +1005,20 @@ def evaluate_run(
         ),
     }
     return metrics
+
+
+def metric_from_evaluation(
+    evaluation: dict[str, Any],
+    nested: dict[str, Any],
+    key: str,
+) -> Any:
+    """Read a metric from evaluation.json without inventing missing values."""
+
+    if isinstance(evaluation, dict) and key in evaluation:
+        return evaluation.get(key)
+    if isinstance(nested, dict) and key in nested:
+        return nested.get(key)
+    return None
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -2,281 +2,316 @@
 
 ## Scope
 
-This document describes the current `search_paper` pipeline as implemented in
-the repository. It is a documentation artifact only. It does not introduce a new
-pipeline, provider, ranking model, UI framework, vector database, PDF parser, or
-mandatory LLM dependency.
+This document describes the current `search_paper` pipeline as of the v9
+deterministic baseline. It is documentation only. It does not define a new
+pipeline, provider, ranker, UI framework, vector database, PDF parser, domain
+pack, or mandatory LLM dependency.
 
-The architecture is deliberately conservative:
+The system is a human-centric multi-agent LLM literature-screening prototype,
+but the current baseline is deterministic and rule-controlled. The word
+"agent" means a bounded pipeline role with explicit inputs, outputs, and
+auditable artifacts. It does not mean every stage is an autonomous LLM agent.
 
-- The core pipeline runs with rule-based agents when no LLM key is available.
-- DeepSeek/OpenAI-compatible LLM enhancement is optional.
-- Seed-paper snowballing is optional and disabled unless requested.
-- Query-family retrieval is optional; the legacy `QueryPlan` remains the default
-  retrieval path.
-- The Streamlit UI is a thin wrapper around core pipeline functions.
+Core boundaries:
 
-## High-Level Flow
+- The default path runs without an LLM key.
+- QueryFamily planning is enabled by default in the v9 deterministic baseline.
+- LLMs are optional controlled enhancements and must not directly decide final screening labels, evidence validity, reading priority, domain decisions, or scores.
+- OpenAlex and Semantic Scholar retrieval remain modular.
+- Snowballing remains optional and disabled unless requested.
+- The Streamlit UI remains a thin wrapper over core pipeline functions.
 
-The main orchestration entrypoint is `lit_screening/pipeline.py`. A run converts
-a user question and optional inputs into a set of auditable artifacts.
+## Current Agent Flow
 
 ```text
 User question
-  -> intent repair and search contract
-  -> concept map, seed hints, and query plans
-  -> provider retrieval / library import / optional snowballing
-  -> normalization and deduplication
-  -> evidence extraction and span verification
-  -> aspect coverage, domain assessment, and paper roles
-  -> ranking and optional feedback adjustment
-  -> decision artifacts, diagnostics, reports, and trace
+  -> NoviceIntentInterpreter / Intent Repair
+  -> ExpertResearchIntent / structured concepts
+  -> DomainRouter
+  -> SearchContract
+  -> QueryFamilyPlanner
+  -> QueryRepair / QueryCritic diagnostics
+  -> OpenAlex / Semantic Scholar retrieval
+  -> evidence extraction
+  -> span validation
+  -> DomainGuardrail
+  -> PaperRoleClassifier
+  -> intent_centrality ranking
+  -> context-aware reading_priority
+  -> reading_path / user_report
+  -> user feedback
 ```
 
-## Agent Flow
+The orchestration entrypoint is `lit_screening/pipeline.py`. The same core path
+is used by the CLI and Streamlit UI.
 
-### 1. Intent Interpretation
+## Stage Details And Artifacts
 
-`lit_screening/agents/research_intent.py` converts the raw question into a
-`SearchBrief` with refined question text, inclusion logic, exclusion logic,
-required aspects, preferred paper types, and a success definition.
+### 1. User Question To Novice Intent
 
-`lit_screening/agents/question_refiner.py` can split broad or mixed questions
-into optional subquestions. The output is explanatory and auditable; it should
-not silently replace the user's research direction.
+The raw user question is treated as noisy evidence of intent, not as a final
+search query. Intent repair converts novice phrasing, multilingual wording, and
+implicit domain context into structured search intent.
 
-Primary artifacts:
+Representative modules:
+
+- `lit_screening/agents/research_intent.py`
+- `lit_screening/agents/intent_repair.py`
+- `lit_screening/agents/question_refiner.py`
+
+Artifacts:
 
 - `search_brief.json`
 - `question_refinement.json`
-
-### 2. Contract, Ambiguity, And Domain Boundaries
-
-The pipeline builds a search contract that records intended domain boundaries,
-required concepts, excluded concepts, and ambiguous terms. Domain packs remain
-lightweight JSON/dataclass resources and should describe terms and guardrails,
-not hide business logic.
-
-Primary artifacts:
-
-- `search_contract.json`
 - `ambiguity_analysis.json`
-- `domain_assessments.json`, after papers are available
 
-### 3. Concept Mapping And Query Families
+### 2. Expert Research Intent And Domain Routing
 
-`lit_screening/agents/concept_mapper.py` decomposes the repaired intent into
-research lenses and concept groups.
+The system maps repaired intent into expert concepts, domain hints, required
+concept groups, and exclusion boundaries. Domain packs stay lightweight and
+should describe terms and guardrails rather than hide business logic.
 
-`lit_screening/agents/query_family_planner.py` explains why different search
-routes exist for different lenses. Query families are useful for audit and
-sensemaking, but they do not replace default retrieval unless query-family
-retrieval is explicitly enabled.
+Representative modules:
 
-`lit_screening/agents/seed_extraction.py` extracts DOI, title, arXiv, author,
-Semantic Scholar, or OpenAlex hints from the question. Seed hints do not trigger
-snowballing by themselves.
+- `lit_screening/agents/concept_mapper.py`
+- `lit_screening/domain_packs/`
 
-Primary artifacts:
+Artifacts:
 
 - `concept_map.json`
+- `search_contract.json`
+
+### 3. Search Contract
+
+The SearchContract records what the run is trying to retrieve and what it should
+avoid. It may include required groups, target context groups, target chemistry
+groups, negative context groups, ambiguous terms, and provider/query budget
+constraints.
+
+For example, a lithium-specific SEI question should create target lithium
+context and negative non-target battery chemistry context. OER spin-state tasks
+do not require a lithium-style target context for `must_read` eligibility.
+
+Artifact:
+
+- `search_contract.json`
+
+### 4. QueryFamilyPlanner
+
+QueryFamilyPlanner decomposes the repaired intent into multiple query routes.
+In the v9 deterministic baseline, QueryFamily is part of the default planning
+path. Ablation flags can disable it for debug/pilot evaluation, but the default
+baseline is QueryFamily-on.
+
+Artifacts:
+
 - `query_families.json`
-- `seed_hints.json`
-- `query_provenance.json`, when query provenance is available
-
-### 4. Provider-Aware Query Planning
-
-`lit_screening/agents/planner.py` builds the default `QueryPlan`, including
-topic terms, provider-specific OpenAlex queries, provider-specific Semantic
-Scholar queries, filters, and search controls.
-
-The planner may be rule-based or optionally LLM-enhanced. Missing LLM keys must
-fall back to rule-based behavior.
-
-Primary artifact:
-
+- `query_provenance.json`
 - `planned_queries.json`
 
-### 5. Retrieval And Import
+### 5. QueryRepair And QueryCritic Diagnostics
 
-`lit_screening/agents/retriever.py` executes provider retrieval through modular
-clients:
+Query repair and critic artifacts make query quality auditable. They record raw
+candidate queries, repaired/final queries, whether repair was enabled, whether
+it changed final queries, and whether a no-query-repair ablation is conclusive.
 
+Artifacts:
+
+- `raw_candidate_queries_before_repair.json`
+- `final_queries_after_repair.json`
+- `query_repair_stage_status.json`
+- `query_repair_suggestions.json`
+- `llm_query_critic.json`, when available
+
+### 6. Retrieval And Import
+
+Retrieval is provider-modular. OpenAlex and Semantic Scholar clients normalize
+provider metadata into shared `Paper` objects. Local BibTeX, RIS, and CSV import
+records pass through the same downstream screening path.
+
+Representative modules:
+
+- `lit_screening/agents/retriever.py`
 - `lit_screening/retrieval/openalex_client.py`
 - `lit_screening/retrieval/semantic_scholar_client.py`
+- `lit_screening/importers/`
+- `lit_screening/agents/snowball.py`, only when snowballing is enabled
 
-External-library import is handled by:
-
-- `lit_screening/importers/bibtex.py`
-- `lit_screening/importers/ris.py`
-- `lit_screening/importers/csv_importer.py`
-
-Seed Paper Mode and citation snowballing are handled by
-`lit_screening/agents/snowball.py` and remain disabled unless explicitly
-enabled. If Semantic Scholar credentials or endpoints are unavailable, the
-pipeline should preserve seed records for auditability and skip expansion
-safely.
-
-Primary artifacts:
+Artifacts:
 
 - `raw_openalex_results.json`
 - `raw_semantic_scholar_results.json`
-- `imported_papers.csv`, when an external library is imported
-- `import_diagnostics.json`, when an external library is imported
-- `seed_papers.json`, when seed inputs exist
-- `citation_expansion.csv`, when snowballing is enabled
-- `retrieval_paths.csv`, when seed expansion paths exist
 - `retrieval_diagnostics.json`
-- `run_events.jsonl`
-
-### 6. Normalization And Deduplication
-
-Provider, import, and seed-expansion records are normalized into shared `Paper`
-dataclasses from `lit_screening/models.py`. Deduplication merges candidate
-records while preserving provenance fields such as provider, query, retrieval
-stage, seed paper ID, and source stage.
-
-Primary artifact:
-
+- `provider_status.json`
 - `merged_papers.csv`
+- `imported_papers.csv`, when import is used
+- `seed_papers.json`, `citation_expansion.csv`, and `retrieval_paths.csv`, when seed expansion is used
 
-### 7. Evidence Extraction And Verification
+### 7. Evidence Extraction And Span Validation
 
-`lit_screening/agents/extractor.py` extracts claim-level evidence from title and
-abstract.
+Evidence extraction creates candidate claims from title and abstract. Span
+validation checks whether evidence is exactly or fuzzily grounded in the
+abstract. Weak keyword overlap must not be treated as strict support.
 
-`lit_screening/agents/verifier.py` verifies whether extracted evidence is
-grounded in the abstract. `lit_screening/span_validation.py` performs exact and
-high-confidence fuzzy matching. Keyword overlap alone is weaker support and must
-not be treated as strict evidence.
+Representative modules:
 
-`lit_screening/agents/evidence_function_classifier.py` labels what role an
-evidence span plays while preserving strict span validation.
+- `lit_screening/agents/extractor.py`
+- `lit_screening/agents/verifier.py`
+- `lit_screening/span_validation.py`
+- `lit_screening/agents/evidence_function_classifier.py`
 
-Primary artifacts:
+Artifacts:
 
 - `evidence_table.csv`
 - `evidence_functions.json`
 
-Important fields include:
+Important fields:
 
 - `support_level`
+- `matched_text`
 - `span_match_type`
 - `span_match_confidence`
-- `matched_text`
 - `strict_span_validated`
-- `llm_invalid_evidence`
 - `missing_abstract`
 
-### 8. Coverage, Roles, Tensions, And Decisions
+### 8. DomainGuardrail
 
-`lit_screening/agents/aspect_classifier.py` checks required-aspect coverage.
+DomainGuardrail uses the search contract to decide whether a paper is in scope,
+borderline/peripheral, or out of scope. It also records target context matches,
+negative context matches, and peripheral context reasons.
 
-`lit_screening/agents/paper_role_classifier.py` assigns research roles such as
-background review, method paper, theory origin, experimental proof, material
-case, application bridge, frontier extension, or limitation.
+For lithium-specific SEI tasks, sodium-ion, potassium-ion, zinc-ion, magnesium,
+AZIB, and broad beyond-lithium papers should not become `include` or `must_read`
+unless explicitly allowed by the benchmark/task. Mixed Li/Na/K reviews may be
+kept as peripheral background, but not as first-read core papers.
 
-`lit_screening/agents/controversy_boundary.py` identifies rule-based tensions,
-limitations, and boundary conditions.
+Artifact:
 
-Decision-artifact generation turns the ranked set into method comparisons,
-coverage summaries, research-gap rows, suggested next searches, result groups,
-screening decisions, paper cards, and reading paths. These artifacts must
-distinguish verified/span-grounded findings from uncertain hints.
+- `domain_assessments.json`
 
-Primary artifacts:
+Diagnostics in `ranked_papers.csv` include:
 
-- `aspect_coverage.csv`
+- `target_context_match`
+- `negative_context_match`
+- `peripheral_context_reason`
+- `topic_focus_score`
+- `intent_centrality_score`
+- `required_group_coverage_score`
+- `missing_required_group_count`
+
+### 9. PaperRoleClassifier And Research Sensemaking
+
+PaperRoleClassifier and sensemaking writers explain how papers function in the
+reading landscape. Roles are useful for reports and reading paths, but they must
+not bypass screening decisions. Excluded or out-of-scope papers must never appear
+in recommended reading sections just because they have a role.
+
+Representative modules:
+
+- `lit_screening/agents/paper_role_classifier.py`
+- `lit_screening/agents/controversy_boundary.py`
+- `lit_screening/paper_cards.py`
+- `lit_screening/reading_path.py`
+
+Artifacts:
+
 - `paper_roles.json`
 - `research_tensions.json`
-- `screening_decisions.csv`
-- `screening_decisions.json`
-- `method_comparison_matrix.csv`
-- `method_comparison_matrix.md`
-- `research_gap_matrix.csv`
-- `research_gap_matrix.md`
-- `suggested_next_searches.json`
-- `suggested_next_searches.md`
-- `result_groups.json`
-- `prisma_like_flow.json`
 - `paper_cards.md`
 - `reading_path.md`
 
-### 9. Ranking And Feedback
+### 10. Intent-Centrality Ranking
 
-`lit_screening/agents/ranker.py` uses the central scoring entrypoint in
-`lit_screening/scoring.py`. Ranking combines relevance, evidence, recency,
-quality, diversity, and optional human feedback adjustment.
+Ranking organizes the candidate set by usefulness for the repaired intent. It
+combines provider/relevance signals, evidence support, recency, quality,
+diversity, group coverage, intent centrality, and optional feedback.
 
-`lit_screening/reranking.py` computes hybrid TF-IDF/API/field relevance
-features. `lit_screening/agents/human_feedback.py` reads and applies feedback
-CSV records.
+Representative modules:
 
-Primary artifacts:
+- `lit_screening/agents/ranker.py`
+- `lit_screening/scoring.py`
+- `lit_screening/reranking.py`
+- `lit_screening/agents/screening_decision.py`
+
+Artifacts:
 
 - `ranked_papers_before_feedback.csv`
 - `ranked_papers_after_feedback.csv`, when feedback is provided
 - `ranked_papers.csv`
-- `preference_learning.json`
-- `feedback_query_refinement.json`
-- `evaluation.json`
+- `screening_decisions.csv`
+- `screening_decisions.json`
 
-### 10. Reporting And Trace
+### 11. Context-Aware Reading Priority
 
-The report layer writes both research-facing and user-facing summaries from the
-same core artifacts. Reports should explain provider status, retrieval status,
-evidence caveats, reading priorities, coverage, remaining gaps, and uncertainty.
+Reading priority is not the same as inclusion. `include` means the paper is
+relevant enough to keep. `must_read` means it belongs in the first reading set.
 
-Planning-only runs must not invent research gaps. If retrieval is not performed
-or no screened papers are available, research-gap artifacts should explicitly
-record a skipped status rather than pretending that gaps were inferred.
+For tasks with explicit target context groups, such as lithium-specific SEI,
+`must_read` requires a target context match and no strong negative context. For
+tasks without explicit target context groups, such as OER spin state, strong
+in-scope papers with full group coverage, high intent centrality, strict support,
+and high topic focus can become `must_read` without a target-context field.
 
-Primary artifacts:
+Diagnostics:
 
+- `must_read_count`
+- `target_context_required_for_priority`
+- `must_read_policy_reason`
+
+### 12. Reading Path, User Report, And Feedback
+
+Reading path and user report generation must filter through screening decisions.
+Excluded, out-of-scope, reading-priority-exclude, duplicate, or negative-context
+papers must not appear in recommended reading sections.
+
+Artifacts:
+
+- `reading_path.md`
 - `report.md`
-- `user_report.md`, when the user-report path is enabled
+- `user_report.md`, when generated
+- `evaluation.json`
+- `exploration_quality.json`
 - `agent_trace.json`
 - `run_events.jsonl`
-- `exploration_quality.json`
 
-## Artifact Map
+Reading-path diagnostics:
 
-The architecture is artifact-first: each agent writes inspectable files that can
-be reviewed without rerunning the full pipeline.
+- `reading_path_paper_count`
+- `reading_path_exclude_count`
+- `reading_path_out_of_scope_count`
+- `reading_path_duplicate_count`
+- `reading_path_negative_context_count`
 
-| Stage | Main artifacts |
-| --- | --- |
-| Intent and contract | `search_brief.json`, `search_contract.json`, `ambiguity_analysis.json`, `question_refinement.json` |
-| Query planning | `planned_queries.json`, `concept_map.json`, `query_families.json`, `seed_hints.json`, `query_provenance.json` |
-| Retrieval and import | `raw_openalex_results.json`, `raw_semantic_scholar_results.json`, `imported_papers.csv`, `import_diagnostics.json`, `retrieval_diagnostics.json` |
-| Seed mode | `seed_papers.json`, `citation_expansion.csv`, `retrieval_paths.csv` |
-| Candidate set | `merged_papers.csv` |
-| Evidence | `evidence_table.csv`, `evidence_functions.json` |
-| Screening | `domain_assessments.json`, `aspect_coverage.csv`, `screening_decisions.csv`, `screening_decisions.json` |
-| Sensemaking | `paper_roles.json`, `research_tensions.json`, `method_comparison_matrix.*`, `research_gap_matrix.*`, `suggested_next_searches.*` |
-| Ranking and feedback | `ranked_papers_before_feedback.csv`, `ranked_papers_after_feedback.csv`, `ranked_papers.csv`, `preference_learning.json`, `feedback_query_refinement.json` |
-| Reports and diagnostics | `paper_cards.md`, `reading_path.md`, `report.md`, `evaluation.json`, `agent_trace.json`, `run_events.jsonl`, `exploration_quality.json` |
+Human feedback can be imported and applied after ranking. Feedback should adjust
+preferences and future directions without hiding the original retrieval and
+screening trace.
+
+Artifacts:
+
+- `preference_learning.json`
+- `feedback_query_refinement.json`
+
+## Plan-Only Behavior
+
+Plan-only runs are first-class evaluation artifacts. They should not pretend
+retrieval happened.
+
+Expected plan-only diagnostics:
+
+- `retrieval_status = planning_only`
+- `ranked_papers_based_on_real_retrieval = false`
+- `research_gap_matrix` contains a skipped/status row rather than generated gaps
+- `suggested_next_searches = []` when no real screened corpus exists
 
 ## UI Boundary
 
-`app.py` is the Streamlit UI. It should call core pipeline functions such as
-`plan_screening_queries()` and `run_pipeline()` and should not duplicate planner,
-retrieval, scoring, verification, import, evaluation, or report logic. The UI is
-responsible for checkpointing user intent, collecting configuration, preserving
-session state, displaying artifacts, applying feedback, and offering downloads.
+`app.py` is a thin Streamlit wrapper. It should call `plan_screening_queries()`,
+`run_pipeline()`, and feedback helpers from the core package. It should not
+duplicate planner, retrieval, scoring, verification, import, evaluation, or
+report logic.
 
 ## Extension Boundaries
 
-Future work can add better agents, providers, evaluation sets, or visualizations,
-but the current architecture depends on a few boundaries:
-
-- Do not hard-code or print API keys.
-- Keep OpenAlex and Semantic Scholar clients modular.
-- Keep external-library import modular and dependency-light.
-- Keep domain packs lightweight and fixture-testable.
-- Keep LLM use optional.
-- Keep snowballing optional.
-- Keep QueryFamily retrieval optional.
-- Keep generated outputs and raw caches out of git.
-- Keep every inferred artifact explicit about what is verified, weakly
-  supported, uncertain, skipped, or not generated.
+Future work may add stronger benchmarks, controlled LLM enhancement layers,
+additional providers, or improved role taxonomy. Those extensions should remain
+artifact-first, optional when risky, and testable without real API keys.
