@@ -1,5 +1,44 @@
 {
   "domain_name": "materials_magnetism",
+  "activation": {
+    "positive_groups": [
+      [
+        "surface magnetization",
+        "boundary magnetization",
+        "surface magnetic moment",
+        "表面磁化",
+        "表面磁矩"
+      ],
+      [
+        "antiferromagnet",
+        "antiferromagnetic",
+        "magnetoelectric antiferromagnet",
+        "反铁磁",
+        "磁电"
+      ],
+      [
+        "local magnetoelectric",
+        "surface magnetic order",
+        "Spaldin",
+        "physrevx.14.021033"
+      ],
+      [
+        "altermagnetism",
+        "altermagnet"
+      ]
+    ],
+    "negative_groups": [
+      [
+        "oxygen evolution reaction",
+        "OER",
+        "literature screening",
+        "文献筛选",
+        "ferroelectric",
+        "铁电"
+      ]
+    ],
+    "min_positive_groups": 1
+  },
   "concepts": {
     "surface_magnetization": {
       "synonyms": [
@@ -72,9 +111,210 @@
   "false_positive_terms": [
     "clinical screening",
     "drug screening",
+    "patient screening",
+    "large language model",
+    "LLM agent",
     "LLM literature screening",
     "generic ferromagnetic thin films",
     "magnetic nanoparticles",
     "superparamagnetic nanoparticles"
-  ]
+  ],
+  "field_of_study_whitelist": [
+    "Materials Science",
+    "Physics",
+    "Condensed Matter Physics"
+  ],
+  "field_of_study_blacklist": [
+    "Computer Science",
+    "Medicine",
+    "Biology"
+  ],
+  "query_templates": {
+    "theory_origin": {
+      "purpose": "recover theory papers explaining boundary and surface magnetization",
+      "openalex": [
+        "\"boundary magnetization\" \"magnetoelectric antiferromagnet\"",
+        "\"equilibrium magnetization\" boundary magnetoelectric antiferromagnet",
+        "\"magnetoelectric multipolization\" \"surface magnetization\""
+      ],
+      "semantic_scholar": [
+        "+\"boundary magnetization\" +\"magnetoelectric antiferromagnet\"",
+        "+\"equilibrium magnetization\" +boundary +magnetoelectric +antiferromagnet",
+        "+\"magnetoelectric multipolization\" +\"surface magnetization\""
+      ],
+      "roles": [
+        "theory origin",
+        "classification",
+        "mechanism"
+      ],
+      "stop": "Stop when core theory papers and at least two material examples are found."
+    },
+    "spaldin_framework": {
+      "purpose": "trace work connected to the Spaldin surface-magnetization framework",
+      "openalex": [
+        "\"surface magnetization\" antiferromagnets classification magnetoelectric responses",
+        "\"local magnetoelectric effects\" \"surface magnetic order\"",
+        "\"atomic-site magnetic multipoles\" antiferromagnet surface"
+      ],
+      "semantic_scholar": [
+        "+\"surface magnetization\" +antiferromagnets +classification +\"magnetoelectric responses\"",
+        "+\"local magnetoelectric effects\" +\"surface magnetic order\"",
+        "+\"atomic-site magnetic multipoles\" +antiferromagnet +surface"
+      ],
+      "roles": [
+        "seed-related theory",
+        "framework extension",
+        "citation bridge"
+      ],
+      "stop": "Stop when papers cite or extend both Spaldin seed-paper ideas."
+    },
+    "surface_magnetization_classification": {
+      "purpose": "find classification and example-material papers for antiferromagnetic surface magnetization",
+      "openalex": [
+        "\"surface magnetization\" antiferromagnets classification",
+        "\"boundary magnetization\" antiferromagnetic surface classification",
+        "\"uncompensated surface magnetization\" antiferromagnet"
+      ],
+      "semantic_scholar": [
+        "+\"surface magnetization\" +antiferromagnets +classification",
+        "+\"boundary magnetization\" +\"antiferromagnetic surface\" +classification",
+        "+\"uncompensated surface magnetization\" +antiferromagnet"
+      ],
+      "roles": [
+        "classification",
+        "example material",
+        "surface termination rule"
+      ],
+      "stop": "Stop when classification rules and representative antiferromagnets are covered."
+    },
+    "local_magnetoelectric_predictor": {
+      "purpose": "find papers using local magnetoelectric response as a surface-order predictor",
+      "openalex": [
+        "\"local magnetoelectric effects\" \"surface magnetic order\"",
+        "\"atomic-site magnetic multipoles\" antiferromagnet surface",
+        "\"local magnetoelectric response\" \"magnetic multipole\" antiferromagnet"
+      ],
+      "semantic_scholar": [
+        "+\"local magnetoelectric effects\" +\"surface magnetic order\"",
+        "+\"atomic-site magnetic multipoles\" +antiferromagnet +surface",
+        "+\"local magnetoelectric response\" +\"magnetic multipole\" +antiferromagnet"
+      ],
+      "roles": [
+        "predictor theory",
+        "multipole analysis",
+        "surface-order mechanism"
+      ],
+      "stop": "Stop when local-response or multipole evidence connects to surface order."
+    },
+    "local_magnetic_order": {
+      "purpose": "find papers connecting local magnetoelectric descriptors to surface magnetic order",
+      "openalex": [
+        "\"local magnetoelectric effects\" \"surface magnetic order\"",
+        "\"local magnetoelectric response\" \"surface magnetic order\"",
+        "\"magnetic multipole\" \"surface magnetic order\" antiferromagnet"
+      ],
+      "semantic_scholar": [
+        "+\"local magnetoelectric effects\" +\"surface magnetic order\"",
+        "+\"local magnetoelectric response\" +\"surface magnetic order\"",
+        "+\"magnetic multipole\" +\"surface magnetic order\" +antiferromagnet"
+      ],
+      "roles": [
+        "surface-order predictor",
+        "local order descriptor",
+        "multipole analysis"
+      ],
+      "stop": "Stop when local descriptors are tied to predicted surface magnetic order."
+    },
+    "direct_surface_detection": {
+      "purpose": "find direct surface-sensitive detection of magnetization or spin polarization",
+      "openalex": [
+        "Cr2O3 surface magnetization spin-polarized photoemission",
+        "chromia surface spin polarization SPLEEM",
+        "Cr2O3 surface magnetization domains XMCD PEEM MFM"
+      ],
+      "semantic_scholar": [
+        "+Cr2O3 +\"surface magnetization\" +\"spin-polarized photoemission\"",
+        "+chromia +\"surface spin polarization\" +SPLEEM",
+        "+Cr2O3 +\"surface magnetization\" +domains +XMCD +PEEM +MFM"
+      ],
+      "roles": [
+        "experimental detection",
+        "surface-sensitive measurement",
+        "method reference"
+      ],
+      "stop": "Stop when at least one surface-sensitive method reports a direct signal."
+    },
+    "nanoscale_readout": {
+      "purpose": "find nanoscale readout routes for boundary magnetization",
+      "openalex": [
+        "NV magnetometry Cr2O3 boundary magnetization",
+        "scanning diamond magnetometry antiferromagnetic domains Cr2O3"
+      ],
+      "semantic_scholar": [
+        "+\"NV magnetometry\" +Cr2O3 +\"boundary magnetization\"",
+        "+\"scanning diamond magnetometry\" +\"antiferromagnetic domains\" +Cr2O3"
+      ],
+      "roles": [
+        "nanoscale readout",
+        "magnetometry evidence",
+        "domain imaging"
+      ],
+      "stop": "Stop when nanoscale magnetic-field evidence is found or clearly absent."
+    },
+    "applications": {
+      "purpose": "connect surface magnetization to memory, readout, and spintronics use cases",
+      "openalex": [
+        "Cr2O3 exchange bias surface magnetization magnetoelectric memory",
+        "magnetoelectric antiferromagnet boundary magnetization memory readout",
+        "antiferromagnetic spintronics surface magnetization readout"
+      ],
+      "semantic_scholar": [
+        "+Cr2O3 +\"exchange bias\" +\"surface magnetization\" +\"magnetoelectric memory\"",
+        "+\"magnetoelectric antiferromagnet\" +\"boundary magnetization\" +memory +readout",
+        "+\"antiferromagnetic spintronics\" +\"surface magnetization\" +readout"
+      ],
+      "roles": [
+        "application motivation",
+        "device concept",
+        "readout mechanism"
+      ],
+      "stop": "Stop when application papers explain why the surface signal matters."
+    },
+    "limitations": {
+      "purpose": "separate true surface magnetization from artifacts and limitations",
+      "openalex": [
+        "Cr2O3 surface paramagnetism finite temperature magnetoelectric antiferromagnet",
+        "surface roughness robust magnetization antiferromagnet",
+        "defects parasitic magnetization antiferromagnetic thin films"
+      ],
+      "semantic_scholar": [
+        "+Cr2O3 +\"surface paramagnetism\" +\"finite temperature\" +\"magnetoelectric antiferromagnet\"",
+        "+\"surface roughness\" +robust +magnetization +antiferromagnet",
+        "+defects +\"parasitic magnetization\" +\"antiferromagnetic thin films\""
+      ],
+      "roles": [
+        "control",
+        "failure mode",
+        "artifact risk"
+      ],
+      "stop": "Stop when roughness, defects, or finite-temperature confounds are characterized."
+    },
+    "frontier": {
+      "purpose": "scan recent frontiers around surface spin splitting and altermagnetism",
+      "openalex": [
+        "surface altermagnetism antiferromagnet spin-resolved ARPES",
+        "surface spin splitting antiferromagnet altermagnetism"
+      ],
+      "semantic_scholar": [
+        "+\"surface altermagnetism\" +antiferromagnet +\"spin-resolved ARPES\"",
+        "+\"surface spin splitting\" +antiferromagnet +altermagnetism"
+      ],
+      "roles": [
+        "frontier",
+        "recent extension",
+        "open problem"
+      ],
+      "stop": "Stop when recent frontier papers show whether this route is active."
+    }
+  }
 }

@@ -1,5 +1,44 @@
 {
   "domain_name": "ferroelectric_polarization",
+  "activation": {
+    "positive_groups": [
+      [
+        "ferroelectric",
+        "ferroelectricity",
+        "铁电"
+      ],
+      [
+        "ferroelectric polarization",
+        "surface polarization",
+        "polarization switching",
+        "depolarization field",
+        "表面极化",
+        "退极化"
+      ],
+      [
+        "piezoresponse force microscopy",
+        "second harmonic generation",
+        "Kelvin probe force microscopy"
+      ]
+    ],
+    "negative_groups": [
+      [
+        "thin film deposition",
+        "sputtering",
+        "atomic layer deposition",
+        "pulsed laser deposition",
+        "chemical vapor deposition",
+        "普通薄膜沉积"
+      ],
+      [
+        "oxygen evolution reaction",
+        "OER",
+        "literature screening",
+        "文献筛选"
+      ]
+    ],
+    "min_positive_groups": 1
+  },
   "domain_anchors": [
     "ferroelectric",
     "ferroelectricity",
@@ -194,5 +233,145 @@
     "KPFM": [
       "Kelvin probe force microscopy"
     ]
+  },
+  "query_templates": {
+    "theory_origin": {
+      "purpose": "recover theory for ferroelectric thin-film surface polarization and screening",
+      "openalex": [
+        "\"ferroelectric thin film\" \"depolarization field\" screening",
+        "\"electric polarization\" \"surface charge\" ferroelectric",
+        "\"surface polarization\" ferroelectric thin film theory"
+      ],
+      "semantic_scholar": [
+        "\"ferroelectric thin film\" \"depolarization field\" screening",
+        "\"electric polarization\" \"surface charge\" ferroelectric",
+        "\"surface polarization\" ferroelectric thin film theory"
+      ],
+      "roles": [
+        "theory_origin",
+        "interface_screening",
+        "background_context"
+      ],
+      "stop": "Stop when theory links polarization, surface charge, and depolarization fields."
+    },
+    "direct_probe_methods": {
+      "purpose": "find direct experimental probes of ferroelectric surface or interface polarization",
+      "openalex": [
+        "\"piezoresponse force microscopy\" \"ferroelectric thin film\"",
+        "\"piezoresponse force microscopy\" \"ferroelectric domains\"",
+        "\"second harmonic generation\" ferroelectric surface polarization",
+        "\"second harmonic generation\" ferroelectric interface polarization",
+        "\"Kelvin probe force microscopy\" ferroelectric surface potential"
+      ],
+      "semantic_scholar": [
+        "\"piezoresponse force microscopy\" \"ferroelectric thin film\"",
+        "\"piezoresponse force microscopy\" \"ferroelectric domains\"",
+        "\"second harmonic generation\" ferroelectric surface polarization",
+        "\"second harmonic generation\" ferroelectric interface polarization",
+        "\"Kelvin probe force microscopy\" ferroelectric surface potential"
+      ],
+      "roles": [
+        "direct_probe_method",
+        "experimental_proof",
+        "surface_probe_method"
+      ],
+      "stop": "Stop when at least one direct probe and one surface-sensitive characterization route are represented."
+    },
+    "interface_screening": {
+      "purpose": "find surface and interface screening mechanisms in ferroelectric polarization",
+      "openalex": [
+        "\"surface screening\" \"ferroelectric thin films\"",
+        "\"interface screening\" ferroelectric polarization",
+        "\"screening charge\" \"depolarization field\" ferroelectric"
+      ],
+      "semantic_scholar": [
+        "\"surface screening\" \"ferroelectric thin films\"",
+        "\"interface screening\" ferroelectric polarization",
+        "\"screening charge\" \"depolarization field\" ferroelectric"
+      ],
+      "roles": [
+        "interface_screening",
+        "limitation_or_challenge",
+        "theory_origin"
+      ],
+      "stop": "Stop when screening charges, interfaces, or electrodes are connected to depolarization."
+    },
+    "materials_cases": {
+      "purpose": "find representative ferroelectric thin-film material case studies",
+      "openalex": [
+        "BaTiO3 \"surface polarization\" \"thin film\"",
+        "PZT \"ferroelectric thin film\" \"piezoresponse force microscopy\"",
+        "BiFeO3 \"ferroelectric domains\" \"piezoresponse force microscopy\"",
+        "HfO2 ferroelectric thin film polarization switching",
+        "HfZrO2 ferroelectric interface screening"
+      ],
+      "semantic_scholar": [
+        "BaTiO3 \"surface polarization\" \"thin film\"",
+        "PZT \"ferroelectric thin film\" \"piezoresponse force microscopy\"",
+        "BiFeO3 \"ferroelectric domains\" \"piezoresponse force microscopy\"",
+        "HfO2 ferroelectric thin film polarization switching",
+        "HfZrO2 ferroelectric interface screening"
+      ],
+      "roles": [
+        "material_case",
+        "direct_probe_method",
+        "interface_screening"
+      ],
+      "stop": "Stop when oxide and hafnia-based material examples are covered."
+    },
+    "device_applications": {
+      "purpose": "connect ferroelectric surface polarization and screening to device applications",
+      "openalex": [
+        "\"ferroelectric tunnel junction\" polarization screening",
+        "FeFET ferroelectric polarization interface",
+        "ferroelectric memory thin film polarization switching"
+      ],
+      "semantic_scholar": [
+        "\"ferroelectric tunnel junction\" polarization screening",
+        "FeFET ferroelectric polarization interface",
+        "ferroelectric memory thin film polarization switching"
+      ],
+      "roles": [
+        "device_application",
+        "application_bridge"
+      ],
+      "stop": "Stop when memory or transistor papers explain why surface/interface polarization matters."
+    },
+    "limitations": {
+      "purpose": "find limitations from imprint, pinning, dead layers, and screening artifacts",
+      "openalex": [
+        "imprint domain pinning ferroelectric thin film polarization",
+        "\"dead layer\" depolarization field ferroelectric thin film",
+        "leakage screening charge ferroelectric thin film polarization"
+      ],
+      "semantic_scholar": [
+        "imprint domain pinning ferroelectric thin film polarization",
+        "\"dead layer\" depolarization field ferroelectric thin film",
+        "leakage screening charge ferroelectric thin film polarization"
+      ],
+      "roles": [
+        "limitation_or_challenge",
+        "interface_screening"
+      ],
+      "stop": "Stop when interface or defect limitations are represented."
+    },
+    "background_reviews": {
+      "purpose": "find conservative background reviews for ferroelectric thin-film polarization",
+      "openalex": [
+        "\"ferroelectric thin films\" polarization review",
+        "\"thin-film ferroelectric oxides\" physics review",
+        "ferroelectric domains piezoresponse force microscopy review"
+      ],
+      "semantic_scholar": [
+        "\"ferroelectric thin films\" polarization review",
+        "\"thin-film ferroelectric oxides\" physics review",
+        "ferroelectric domains \"piezoresponse force microscopy\" review"
+      ],
+      "roles": [
+        "review_background",
+        "background_context"
+      ],
+      "stop": "Stop when at least one broad background source is available."
+    }
   }
 }

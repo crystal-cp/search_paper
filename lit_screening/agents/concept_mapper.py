@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+from lit_screening.agents.generic_intent import build_generic_intent_frame
 from lit_screening.domain_packs import load_domain_pack
-from lit_screening.models import DomainPack, ResearchLens, ResearchLensPlan, SeedHint
+from lit_screening.models import (
+    DomainPack,
+    GenericResearchIntentFrame,
+    ResearchLens,
+    ResearchLensPlan,
+    SeedHint,
+)
 
 
 SPALDIN_SEED_HINTS = [
@@ -26,8 +33,8 @@ class ConceptMapper:
     ) -> ResearchLensPlan:
         """Return research lenses without calling LLMs, APIs, or the pipeline."""
 
-        pack = load_domain_pack(domain)
-        if domain == "ferroelectric_polarization":
+        pack = _load_pack_if_available(domain)
+        if domain == "ferroelectric_polarization" and pack is not None:
             return _map_ferroelectric_polarization(
                 question=question,
                 pack=pack,
@@ -35,10 +42,14 @@ class ConceptMapper:
                 search_contract=search_contract,
                 seed_hints=seed_hints,
             )
-        if domain != "materials_magnetism":
-            raise ValueError(
-                "ConceptMapper currently supports materials_magnetism and "
-                "ferroelectric_polarization."
+        if domain != "materials_magnetism" or pack is None:
+            return _map_generic_question(
+                question=question,
+                domain=domain or "general_science",
+                pack=pack,
+                search_brief=search_brief,
+                search_contract=search_contract,
+                seed_hints=seed_hints,
             )
 
         seed_title_hints = _seed_hint_titles(seed_hints)
@@ -395,6 +406,324 @@ class ConceptMapper:
             central_question=_central_question(question, search_brief, search_contract),
             lenses=_dedupe_lenses(lenses),
         )
+
+
+def _map_generic_question(
+    question: str,
+    domain: str,
+    pack: DomainPack | None,
+    search_brief: object | None,
+    search_contract: object | None,
+    seed_hints: list[SeedHint] | None,
+) -> ResearchLensPlan:
+    """Map any scientific question to generic research lenses."""
+
+    frame = _generic_frame(question, search_contract)
+    context = _context_text(question, search_brief, search_contract)
+    seed_title_hints = _seed_hint_titles(seed_hints)
+    core = _unique([*frame.research_object, *frame.core_terms], 10) or _unique([question], 1)
+    domain_context = _unique([*frame.domain_context, *frame.material_or_case_terms], 10)
+    methods = _unique(frame.method_terms, 10)
+    applications = _unique(frame.application_or_metric_terms, 10)
+    exclusions = _unique([*(pack.false_positive_terms if pack else []), *_contract_exclusions(search_contract)])
+    pack_terms = _pack_enhancement_terms(pack)
+    lenses: list[ResearchLens] = [
+        _generic_lens(
+            "core_topic",
+            "anchor retrieval around the core research object and context",
+            "What papers directly address the core research object in the stated context?",
+            frame,
+            core,
+            domain_context,
+            methods,
+            applications,
+            seed_title_hints,
+            exclusions,
+            ["direct topic evidence", "domain context"],
+        )
+    ]
+    if frame.review_background_need:
+        lenses.append(
+            _generic_lens(
+                "background_review",
+                "find reviews and background papers without treating motivation words as core terms",
+                "What review or background papers explain the topic and why it matters?",
+                frame,
+                core,
+                domain_context,
+                methods,
+                applications,
+                seed_title_hints,
+                exclusions,
+                ["review", "background", "overview"],
+            )
+        )
+    if frame.mechanism_need:
+        lenses.append(
+            _generic_lens(
+                "theory_mechanism",
+                "find theory, mechanism, model, or causal-relation papers",
+                "What mechanisms or theory explain the relation requested by the user?",
+                frame,
+                core,
+                domain_context,
+                methods,
+                applications,
+                seed_title_hints,
+                exclusions,
+                ["mechanism", "theory", "model"],
+            )
+        )
+    if frame.method_need:
+        lenses.append(
+            _generic_lens(
+                "characterization_methods",
+                "find experimental, computational, screening, or characterization methods",
+                "Which methods can measure, characterize, evaluate, or screen the target object?",
+                frame,
+                core,
+                domain_context,
+                methods or ["characterization", "measurement", "method"],
+                applications,
+                seed_title_hints,
+                exclusions,
+                ["method", "characterization", "measurement"],
+            )
+        )
+    if frame.in_situ_or_operando_need:
+        lenses.append(
+            _generic_lens(
+                "in_situ_or_operando_methods",
+                "find in situ, operando, real-time, or dynamic-evolution methods",
+                "Which in situ or operando methods capture the target process dynamically?",
+                frame,
+                core,
+                domain_context,
+                _unique([*methods, "in situ", "operando", "real-time"], 10),
+                applications,
+                seed_title_hints,
+                exclusions,
+                ["in situ", "operando", "dynamic evidence"],
+            )
+        )
+    if frame.ex_situ_need:
+        lenses.append(
+            _generic_lens(
+                "ex_situ_methods",
+                "find ex situ, post-analysis, or offline characterization methods",
+                "Which ex situ methods characterize the target object after synthesis, operation, or screening?",
+                frame,
+                core,
+                domain_context,
+                _unique([*methods, "ex situ", "post mortem"], 10),
+                applications,
+                seed_title_hints,
+                exclusions,
+                ["ex situ", "post-analysis"],
+            )
+        )
+    if frame.material_case_need:
+        lenses.append(
+            _generic_lens(
+                "materials_or_cases",
+                "find representative materials, systems, benchmarks, or case studies",
+                "Which representative systems or case studies instantiate the research question?",
+                frame,
+                core,
+                domain_context or frame.material_or_case_terms,
+                methods,
+                applications,
+                seed_title_hints,
+                exclusions,
+                ["case study", "representative system", "benchmark"],
+            )
+        )
+    if frame.application_or_performance_need:
+        lenses.append(
+            _generic_lens(
+                "application_or_performance",
+                "find applications, device relevance, activity, metrics, or performance papers",
+                "How does the target object connect to applications or performance metrics?",
+                frame,
+                core,
+                domain_context,
+                methods,
+                applications or ["performance", "application", "metric"],
+                seed_title_hints,
+                exclusions,
+                ["application", "performance", "metric"],
+            )
+        )
+    if frame.failure_or_limitation_need:
+        lenses.append(
+            _generic_lens(
+                "failure_or_limitation",
+                "find failure modes, degradation, limitations, or boundary conditions",
+                "What failure mechanisms, limitations, or stability constraints bound the topic?",
+                frame,
+                core,
+                domain_context,
+                methods,
+                _unique([*applications, *frame.failure_or_limitation_terms], 10),
+                seed_title_hints,
+                exclusions,
+                ["failure", "limitation", "degradation"],
+            )
+        )
+    if frame.controversy_need:
+        lenses.append(
+            _generic_lens(
+                "controversy_debate",
+                "find debate, controversy, or competing-mechanism papers",
+                "What debates or competing explanations exist for the requested relation?",
+                frame,
+                core,
+                domain_context,
+                methods,
+                applications,
+                seed_title_hints,
+                exclusions,
+                ["controversy", "debate", "competing mechanism"],
+            )
+        )
+    if _has_any(context, ["comparison", "compare", "advantages", "disadvantages", "比较", "优缺点"]):
+        lenses.append(
+            _generic_lens(
+                "method_comparison",
+                "compare alternative methods and their tradeoffs",
+                "How do the mentioned methods compare in advantages, disadvantages, and use cases?",
+                frame,
+                core,
+                domain_context,
+                _unique([*methods, *frame.core_terms], 12),
+                applications,
+                seed_title_hints,
+                exclusions,
+                ["comparison", "advantages", "limitations"],
+            )
+        )
+    if _has_any(context, ["human feedback", "human-in-the-loop", "人机协作", "人工反馈"]):
+        lenses.append(
+            _generic_lens(
+                "human_feedback",
+                "find human feedback and human-in-the-loop workflow papers",
+                "How does human feedback shape the workflow or improve screening decisions?",
+                frame,
+                core,
+                domain_context,
+                methods,
+                applications,
+                seed_title_hints,
+                exclusions,
+                ["human feedback", "human-in-the-loop"],
+            )
+        )
+    if _has_any(context, ["evidence validation", "evidence verification", "证据验证"]):
+        lenses.append(
+            _generic_lens(
+                "evidence_validation",
+                "find evidence validation and verification methods",
+                "How do papers validate evidence or verify screening decisions?",
+                frame,
+                core,
+                domain_context,
+                methods,
+                applications,
+                seed_title_hints,
+                exclusions,
+                ["evidence validation", "evidence verification"],
+            )
+        )
+    if _has_any(context, ["recall", "accuracy", "metric", "召回率", "准确率"]):
+        lenses.append(
+            _generic_lens(
+                "performance_metrics",
+                "find recall, accuracy, and evaluation-metric evidence",
+                "Which evaluation metrics measure the workflow or method performance?",
+                frame,
+                core,
+                domain_context,
+                methods,
+                _unique([*applications, "recall", "accuracy"], 10),
+                seed_title_hints,
+                exclusions,
+                ["recall", "accuracy", "evaluation metric"],
+            )
+        )
+    if pack_terms:
+        for lens in lenses:
+            lens.synonyms = _unique([*lens.synonyms, *pack_terms[:4]], 16)
+    return ResearchLensPlan(
+        domain=domain or "general_science",
+        central_question=question,
+        lenses=_unique_lenses(lenses),
+    )
+
+
+def _generic_lens(
+    name: str,
+    role: str,
+    question: str,
+    frame: GenericResearchIntentFrame,
+    core: list[str],
+    domain_context: list[str],
+    methods: list[str],
+    applications: list[str],
+    seed_title_hints: list[str],
+    exclusions: list[str],
+    expected: list[str],
+) -> ResearchLens:
+    return ResearchLens(
+        name=name,
+        role=role,
+        question=question,
+        core_concepts=_unique([*core, *frame.target_process_or_property], 12),
+        synonyms=_unique(frame.relation_or_effect, 8),
+        materials=_unique(domain_context, 12),
+        methods=_unique(methods, 12),
+        applications=_unique(applications, 12),
+        seed_paper_hints=seed_title_hints,
+        expected_evidence_types=expected,
+        exclusion_risks=exclusions,
+    )
+
+
+def _generic_frame(
+    question: str,
+    search_contract: object | None,
+) -> GenericResearchIntentFrame:
+    frame = getattr(search_contract, "generic_intent_frame", None)
+    if isinstance(frame, GenericResearchIntentFrame):
+        return frame
+    expert_intent = getattr(search_contract, "expert_research_intent", None)
+    return build_generic_intent_frame(question, expert_intent=expert_intent)
+
+
+def _load_pack_if_available(domain: str) -> DomainPack | None:
+    try:
+        return load_domain_pack(domain)
+    except ValueError:
+        return None
+
+
+def _pack_enhancement_terms(pack: DomainPack | None) -> list[str]:
+    if pack is None:
+        return []
+    terms: list[str] = []
+    for values in (pack.query_expansions or {}).values():
+        terms.extend(values)
+    return _unique(terms, 12)
+
+
+def _unique_lenses(lenses: list[ResearchLens]) -> list[ResearchLens]:
+    result: list[ResearchLens] = []
+    seen: set[str] = set()
+    for lens in lenses:
+        if lens.name in seen:
+            continue
+        result.append(lens)
+        seen.add(lens.name)
+    return result
 
 
 def _map_ferroelectric_polarization(
@@ -773,10 +1102,10 @@ def _has_any(text: str, markers: list[str]) -> bool:
     return any(marker.lower() in text for marker in markers)
 
 
-def _unique(values: list[str]) -> list[str]:
+def _unique(values: list[str], limit: int | None = None) -> list[str]:
     result: list[str] = []
     for value in values:
         cleaned = " ".join(str(value).split())
         if cleaned and cleaned not in result:
             result.append(cleaned)
-    return result
+    return result[:limit] if limit else result

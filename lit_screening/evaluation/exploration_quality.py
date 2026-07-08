@@ -42,6 +42,9 @@ def compute_exploration_quality(
     gap_matrix: Any = None,
     research_tensions: Any = None,
     seed_hints: Any = None,
+    query_provenance: Any = None,
+    aspect_coverage_records: Any = None,
+    ranking_diagnostics: Any = None,
 ) -> dict[str, Any]:
     """Compute lightweight exploration-quality metrics from optional artifacts."""
 
@@ -54,6 +57,9 @@ def compute_exploration_quality(
     gap_rows = as_records(gap_matrix)
     tension_rows = as_records(research_tensions)
     seed_rows = as_records(seed_hints)
+    query_payload = as_dict(query_provenance)
+    aspect_rows = as_records(aspect_coverage_records)
+    ranking_payload = as_dict(ranking_diagnostics)
 
     lens_names = {
         str(lens.get("name") or "").strip()
@@ -97,9 +103,41 @@ def compute_exploration_quality(
         len(gap_rows),
     )
 
+    aspect_scores = [
+        safe_float(row.get("aspect_coverage_score"))
+        for row in aspect_rows
+    ]
+    provider_query_counts = query_payload.get("provider_query_counts", {})
+    provider_query_count = (
+        sum(int(value or 0) for value in provider_query_counts.values())
+        if isinstance(provider_query_counts, dict)
+        else 0
+    )
     return {
         "concept_coverage": round(concept_coverage, 4),
         "query_family_coverage": round(query_family_coverage, 4),
+        "aspect_coverage_distribution": {
+            "record_count": len(aspect_rows),
+            "zero_count": sum(1 for score in aspect_scores if score == 0),
+            "nonzero_count": sum(1 for score in aspect_scores if score > 0),
+            "average": (
+                round(sum(aspect_scores) / len(aspect_scores), 4)
+                if aspect_scores
+                else 0.0
+            ),
+            "max": round(max(aspect_scores), 4) if aspect_scores else 0.0,
+        },
+        "provider_query_count": provider_query_count,
+        "single_acronym_query_count": int(
+            query_payload.get("single_acronym_query_count", 0) or 0
+        ),
+        "generic_fallback_used": bool(query_payload.get("generic_fallback_used")),
+        "domain_pack_enhancement_used": bool(
+            query_payload.get("domain_pack_enhancement_used")
+        ),
+        "top20_false_positive_count": int(
+            ranking_payload.get("top20_false_positive_count", 0) or 0
+        ),
         "paper_role_diversity": round(paper_role_diversity, 4),
         "seed_hint_utilization": round(seed_hint_utilization, 4),
         "evidence_function_diversity": round(evidence_function_diversity, 4),
@@ -120,6 +158,9 @@ def compute_exploration_quality(
             "specific_gap_count": sum(1 for row in gap_rows if gap_row_is_specific(row)),
             "seed_hint_count": len(seed_rows),
             "used_seed_hint_count": seed_hint_used_count(seed_rows, families),
+            "provider_query_counts": provider_query_counts
+            if isinstance(provider_query_counts, dict)
+            else {},
         },
     }
 
@@ -255,3 +296,10 @@ def coverage_ratio(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
     return max(0.0, min(1.0, numerator / denominator))
+
+
+def safe_float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0

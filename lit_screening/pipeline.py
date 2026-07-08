@@ -14,6 +14,7 @@ from .agents.controversy_boundary import ControversyAndBoundaryAgent
 from .agents.domain_guardrail import DomainGuardrailAgent
 from .agents.evidence_function_classifier import classify_evidence_function
 from .agents.extractor import ExtractorAgent
+from .agents.generic_intent import is_single_acronym_query
 from .agents.human_feedback import HumanFeedbackAgent
 from .agents.intent_repair import NoviceIntentInterpreter
 from .agents.planner import PlannerAgent
@@ -79,7 +80,7 @@ from .result_groups import group_ranked_papers
 from .run_logging import ScreeningRunLogger
 from .scoring import sanitize_score_weights
 from .screening_flow import build_prisma_like_flow
-from .utils import ensure_dir, write_csv, write_json
+from .utils import ensure_dir, tokenize, write_csv, write_json
 
 
 PAPER_FIELDS = [
@@ -914,6 +915,9 @@ def apply_feedback_to_pipeline_result(
         gap_matrix=decision_artifacts["research_gap_matrix"],
         research_tensions=result.research_tensions,
         seed_hints=result.seed_hints,
+        query_provenance=result.query_provenance,
+        aspect_coverage_records=result.aspect_coverage_records,
+        ranking_diagnostics=result.evaluation_metrics.get("ranking_diagnostics", {}),
     )
     save_exploration_quality(
         output_dir / "exploration_quality.json",
@@ -1004,6 +1008,15 @@ def _query_plan_payload(
         "query_plan": query_plan,
         "search_contract": search_contract,
         "expert_research_intent": expert_research_intent,
+        "selected_domain": search_contract.domain_profile.domain_name
+        if search_contract
+        else "",
+        "candidate_domains": search_contract.domain_profile.candidate_domains
+        if search_contract
+        else [],
+        "generic_intent_frame": search_contract.generic_intent_frame
+        if search_contract
+        else None,
         "expert_rewritten_question": query_plan.expert_rewritten_question,
         "intent_assumptions": query_plan.intent_assumptions,
         "downweighted_user_terms": query_plan.downweighted_user_terms,
@@ -1185,12 +1198,6 @@ def _apply_expert_intent_to_search_brief(
     )
 
 
-SUPPORTED_RESEARCH_LENS_DOMAINS = {
-    "materials_magnetism",
-    "ferroelectric_polarization",
-}
-
-
 def build_research_lens_artifacts(
     question: str,
     search_brief: SearchBrief,
@@ -1208,6 +1215,8 @@ def build_research_lens_artifacts(
     domain = search_contract.domain_profile.domain_name if search_contract else ""
     trace_summary: dict[str, Any] = {
         "domain": domain,
+        "generic_fallback_used": domain in {"", "general_science", "generic"},
+        "domain_pack_enhancement_used": domain not in {"", "general_science", "generic"},
         "concept_mapper": {
             "executed": False,
             "skipped": False,
@@ -1221,11 +1230,6 @@ def build_research_lens_artifacts(
             "warning": "",
         },
     }
-    if domain not in SUPPORTED_RESEARCH_LENS_DOMAINS:
-        trace_summary["concept_mapper"]["skipped"] = True
-        trace_summary["query_family_planner"]["skipped"] = True
-        trace_summary["reason"] = "unsupported_domain"
-        return None, None, trace_summary
 
     try:
         concept_map = ConceptMapper().map_question(
@@ -1418,6 +1422,9 @@ def _query_provenance_record(
     purpose: str = "",
     priority: int | None = None,
     budget: int | None = None,
+    concepts: list[dict[str, Any]] | None = None,
+    provider_serializer_changes: list[str] | None = None,
+    domain_pack_enhanced: bool = False,
 ) -> dict[str, Any]:
     """Return one serializable query provenance record."""
 
@@ -1428,6 +1435,17 @@ def _query_provenance_record(
         "family_name": family_name,
         "lens_name": lens_name,
         "purpose": purpose,
+        "concepts": concepts or [],
+        "concept_sources": _unique_strings(
+            [
+                source
+                for concept in concepts or []
+                for source in concept.get("sources", [])
+                if isinstance(concept, dict)
+            ]
+        ),
+        "provider_serializer_changes": provider_serializer_changes or [],
+        "domain_pack_enhanced": bool(domain_pack_enhanced),
     }
     if priority is not None:
         record["priority"] = priority
@@ -1451,12 +1469,95 @@ def _family_queries_for_provider(family: QueryFamily, provider: str) -> list[str
     return _unique_strings(fallback_queries)
 
 
+def _remove_single_acronym_queries(queries: list[str]) -> tuple[list[str], list[str]]:
+    """Remove provider queries that are only one ambiguous acronym/short token."""
+
+    kept: list[str] = []
+    removed: list[str] = []
+    for query in _unique_strings(queries):
+        if is_single_acronym_query(query):
+            removed.append(query)
+            continue
+        kept.append(query)
+    return kept, removed
+
+
+def _query_concepts_for_provenance(
+    query: str,
+    search_contract: SearchContract | None = None,
+    lens: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Explain which structured or generic concepts contributed to a query."""
+
+    query_lower = " ".join(str(query or "").lower().replace('"', " ").split())
+    candidates: list[tuple[str, list[str]]] = []
+    frame = search_contract.generic_intent_frame if search_contract else None
+    if frame is not None:
+        for term, sources in frame.term_sources.items():
+            candidates.append((term, list(sources)))
+        for term in frame.relation_or_effect:
+            candidates.append((term, ["generic_template"]))
+    if search_contract is not None:
+        for group in search_contract.constraint_groups:
+            for term in group.terms:
+                candidates.append((term, [group.source or "search_contract"]))
+    if lens is not None:
+        for term in [
+            *getattr(lens, "core_concepts", []),
+            *getattr(lens, "synonyms", []),
+            *getattr(lens, "materials", []),
+            *getattr(lens, "methods", []),
+            *getattr(lens, "applications", []),
+            *getattr(lens, "expected_evidence_types", []),
+        ]:
+            candidates.append((term, ["generic_template"]))
+    concepts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for term, sources in candidates:
+        cleaned = " ".join(str(term or "").split())
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        if key in query_lower or _term_tokens_overlap(key, query_lower):
+            concepts.append(
+                {
+                    "term": cleaned,
+                    "sources": _unique_strings([str(source) for source in sources]),
+                }
+            )
+            seen.add(key)
+    if not concepts and query_lower:
+        concepts.append({"term": query_lower, "sources": ["generic_template"]})
+    return concepts[:12]
+
+
+def _term_tokens_overlap(term_lower: str, query_lower: str) -> bool:
+    term_tokens = {token for token in tokenize(term_lower) if len(token) > 2}
+    query_tokens = {token for token in tokenize(query_lower) if len(token) > 2}
+    return bool(term_tokens and len(term_tokens & query_tokens) >= min(2, len(term_tokens)))
+
+
+def _provider_serializer_changes(provider: str, query: str, source: str) -> list[str]:
+    changes: list[str] = []
+    if provider == "semantic_scholar":
+        changes.append("provider_neutral_query_no_mechanical_plus_terms")
+    if source == "query_family":
+        changes.append("context_combined_query_family_template")
+    if is_single_acronym_query(query):
+        changes.append("single_acronym_query_should_be_removed")
+    return changes
+
+
 def build_query_provenance(
     providers: list[str],
     queries_by_provider: dict[str, list[str]],
     query_family_plan: QueryFamilyPlan | None,
     use_query_families: bool = False,
     max_family_queries_per_provider: int | None = 18,
+    search_contract: SearchContract | None = None,
+    concept_map: ResearchLensPlan | None = None,
 ) -> tuple[dict[str, list[str]], dict[str, Any]]:
     """Merge optional query-family queries and record retrieval provenance."""
 
@@ -1465,11 +1566,26 @@ def build_query_provenance(
     duplicate_family_records: list[dict[str, Any]] = []
     query_family_queries: list[dict[str, Any]] = []
     provider_queries_by_family: dict[str, dict[str, list[str]]] = {}
+    removed_single_acronym_queries: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    old_planner_queries = {
-        provider: _unique_strings(queries_by_provider.get(provider, []))
-        for provider in providers
+    domain_name = query_family_plan.domain if query_family_plan else (
+        search_contract.domain_profile.domain_name if search_contract else ""
+    )
+    domain_pack_enhanced = domain_name not in {"", "general_science", "generic"}
+    lens_by_name = {
+        lens.name: lens
+        for lens in (concept_map.lenses if concept_map else [])
     }
+    old_planner_queries: dict[str, list[str]] = {}
+    for provider in providers:
+        kept, removed = _remove_single_acronym_queries(
+            queries_by_provider.get(provider, [])
+        )
+        old_planner_queries[provider] = kept
+        for query in removed:
+            removed_single_acronym_queries.append(
+                {"provider": provider, "query": query, "source": "old_planner"}
+            )
 
     for provider in providers:
         provider_queries = list(old_planner_queries.get(provider, []))
@@ -1481,6 +1597,17 @@ def build_query_provenance(
                     provider=provider,
                     raw_query=query,
                     source="old_planner",
+                    concepts=_query_concepts_for_provenance(
+                        query,
+                        search_contract=search_contract,
+                        lens=None,
+                    ),
+                    provider_serializer_changes=_provider_serializer_changes(
+                        provider,
+                        query,
+                        source="old_planner",
+                    ),
+                    domain_pack_enhanced=domain_pack_enhanced,
                 )
             )
 
@@ -1504,6 +1631,19 @@ def build_query_provenance(
                     family_provider_queries = _family_queries_for_provider(family, provider)
                     if family_budget:
                         family_provider_queries = family_provider_queries[:family_budget]
+                    kept_family_queries, removed_family_queries = _remove_single_acronym_queries(
+                        family_provider_queries
+                    )
+                    for query in removed_family_queries:
+                        removed_single_acronym_queries.append(
+                            {
+                                "provider": provider,
+                                "query": query,
+                                "source": "query_family",
+                                "family_name": family.name,
+                            }
+                        )
+                    family_provider_queries = kept_family_queries
                     provider_queries_by_family.setdefault(family.name, {})[
                         provider
                     ] = list(family_provider_queries)
@@ -1527,6 +1667,17 @@ def build_query_provenance(
                             purpose=family.purpose,
                             priority=family.priority,
                             budget=family.budget,
+                            concepts=_query_concepts_for_provenance(
+                                query,
+                                search_contract=search_contract,
+                                lens=lens_by_name.get(family.lens_name),
+                            ),
+                            provider_serializer_changes=_provider_serializer_changes(
+                                provider,
+                                query,
+                                source="query_family",
+                            ),
+                            domain_pack_enhanced=domain_pack_enhanced,
                         )
                         query_family_queries.append(family_record)
                         if key in seen:
@@ -1552,12 +1703,16 @@ def build_query_provenance(
         "enabled": bool(use_query_families),
         "applied": bool(use_query_families and family_added_count > 0),
         "reason": reason,
-        "domain": query_family_plan.domain if query_family_plan else "",
+        "domain": domain_name,
+        "generic_fallback_used": domain_name in {"general_science", "generic"},
+        "domain_pack_enhancement_used": domain_pack_enhanced,
         "old_planner_queries": old_planner_queries,
         "query_family_queries": query_family_queries,
         "final_openalex_queries": merged_queries.get("openalex", []),
         "final_semantic_scholar_queries": merged_queries.get("semantic_scholar", []),
         "provider_queries_by_family": provider_queries_by_family,
+        "removed_single_acronym_queries": removed_single_acronym_queries,
+        "single_acronym_query_count": len(removed_single_acronym_queries),
         "records": records,
         "duplicate_family_records": duplicate_family_records,
         "provider_query_counts": {
@@ -1573,6 +1728,92 @@ def build_query_provenance(
         "family_queries_skipped_by_cap_count": family_skipped_by_cap_count,
     }
     return merged_queries, payload
+
+
+def build_auto_query_repair_suggestions(
+    query_plan: QueryPlan,
+    query_provenance: dict[str, Any],
+) -> dict[str, Any]:
+    """Build deterministic query-plan repair diagnostics from provenance."""
+
+    provider_counts = query_provenance.get("provider_query_counts", {})
+    provider_query_count = sum(int(count or 0) for count in provider_counts.values())
+    trigger_reasons: list[str] = []
+    if not query_provenance.get("applied"):
+        trigger_reasons.append("query_family_applied_false")
+    if provider_query_count < 6:
+        trigger_reasons.append("provider_query_count_lt_6")
+    if query_provenance.get("single_acronym_query_count", 0):
+        trigger_reasons.append("single_acronym_query_removed")
+    if not trigger_reasons:
+        return {
+            "enabled": True,
+            "applied": False,
+            "trigger_reasons": [],
+            "suggestions": [],
+            "repaired_query_plan": None,
+        }
+    final_openalex = _unique_strings(query_provenance.get("final_openalex_queries", []))
+    final_semantic = _unique_strings(
+        query_provenance.get("final_semantic_scholar_queries", [])
+    )
+    original_queries = _unique_strings(
+        [*query_plan.openalex_queries, *query_plan.semantic_scholar_queries]
+    )
+    repaired_queries = _unique_strings([*final_openalex, *final_semantic])
+    removed = [
+        record.get("query", "")
+        for record in query_provenance.get("removed_single_acronym_queries", [])
+        if isinstance(record, dict)
+    ]
+    added = [query for query in repaired_queries if query not in original_queries]
+    repaired_plan = replace(
+        query_plan,
+        openalex_queries=final_openalex or query_plan.openalex_queries,
+        semantic_scholar_queries=final_semantic or query_plan.semantic_scholar_queries,
+    )
+    return {
+        "enabled": True,
+        "applied": False,
+        "trigger_reasons": trigger_reasons,
+        "original_query_count": len(original_queries),
+        "repaired_query_count": len(repaired_queries),
+        "removed_queries": _unique_strings([str(query) for query in removed]),
+        "added_queries": added,
+        "acronym_expansions": [],
+        "context_terms_added": _context_terms_added(original_queries, added),
+        "provider_specific_changes": {
+            "openalex": {
+                "final_query_count": len(final_openalex),
+            },
+            "semantic_scholar": {
+                "final_query_count": len(final_semantic),
+                "serializer": "provider-neutral generic combinations; no mechanical +term fallback",
+            },
+        },
+        "expected_effect": (
+            "Replace isolated acronym/short-token queries with context-combined "
+            "generic or domain-enhanced query families."
+        ),
+        "suggestions": [
+            {
+                "reason": reason,
+                "action": "rewrite_query_plan_with_context_combined_families",
+            }
+            for reason in trigger_reasons
+        ],
+        "repaired_query_plan": repaired_plan,
+    }
+
+
+def _context_terms_added(original_queries: list[str], added_queries: list[str]) -> list[str]:
+    original_text = " ".join(original_queries).lower()
+    terms: list[str] = []
+    for query in added_queries:
+        for token in tokenize(query):
+            if token not in original_text and len(token) > 3:
+                terms.append(token)
+    return _unique_strings(terms)[:24]
 
 
 def annotate_papers_with_query_provenance(
@@ -1991,13 +2232,44 @@ def build_ranking_diagnostics(
         "domain_pack_used": domain,
         "query_family_applied": bool(query_provenance.get("applied")),
         "semantic_scholar_zero_result_warning": _semantic_scholar_zero_result_warning(query_provenance),
+        "role_assignment_evidence": [
+            {
+                "paper_id": record.paper_id,
+                "primary_role": record.primary_role,
+                "roles": record.roles,
+                "content_role": getattr(record, "content_role", ""),
+                "retrieval_lane": getattr(record, "retrieval_lane", ""),
+                "evidence": getattr(record, "evidence", []),
+                "matched_query_family": getattr(record, "matched_query_family", ""),
+            }
+            for record in paper_roles
+        ],
         "role_counts": role_summary["role_counts"],
         "primary_role_counts": role_summary["primary_role_counts"],
         "overbroad_role_warnings": overbroad_warnings,
         "role_adjustments": role_adjustments,
         "lane_adjustments": lane_adjustments,
+        "lane_aspect_contribution": {
+            record.paper_id: {
+                "aspect_coverage_score": record.aspect_coverage_score,
+                "covered_aspects": record.covered_aspects,
+                "missing_aspects": record.missing_aspects,
+                "lane_adjustment": lane_adjustments.get(record.paper_id, 0.0),
+            }
+            for record in aspect_records
+        },
         "seed_or_title_mention_boosts": seed_boosts,
         "false_positive_penalties": false_positive_penalties,
+        "acronym_disambiguation_penalties": {
+            "single_acronym_query_count": query_provenance.get(
+                "single_acronym_query_count",
+                0,
+            ),
+            "removed_single_acronym_queries": query_provenance.get(
+                "removed_single_acronym_queries",
+                [],
+            ),
+        },
         "gold_paper_ranks": gold_paper_ranks,
         "top20_by_lane": top20_by_lane,
         "false_positive_top20_count": sum(
@@ -2687,10 +2959,45 @@ def run_pipeline(
         query_family_plan=query_family_plan,
         use_query_families=effective_use_query_families,
         max_family_queries_per_provider=query_family_provider_cap,
+        search_contract=search_contract,
+        concept_map=concept_map,
     )
+    auto_query_repair = build_auto_query_repair_suggestions(
+        query_plan=query_plan,
+        query_provenance=query_provenance,
+    )
+    if (
+        auto_query_repair.get("trigger_reasons")
+        and not query_repair_suggestions.get("enabled")
+    ):
+        query_repair_suggestions = auto_query_repair
     query_plan.query_families_applied = bool(query_provenance.get("applied"))
     query_plan_payload["query_plan"] = query_plan
     query_plan_payload["query_families_applied"] = query_plan.query_families_applied
+    query_plan_payload["selected_domain"] = search_contract.domain_profile.domain_name
+    query_plan_payload["candidate_domains"] = search_contract.domain_profile.candidate_domains
+    query_plan_payload["query_family_applied"] = query_plan.query_families_applied
+    query_plan_payload["active_research_lenses"] = [
+        lens.name for lens in (concept_map.lenses if concept_map else [])
+    ]
+    query_plan_payload["provider_queries_by_family"] = query_provenance.get(
+        "provider_queries_by_family",
+        {},
+    )
+    query_plan_payload["generic_fallback_used"] = bool(
+        research_lens_trace.get("generic_fallback_used")
+    )
+    query_plan_payload["domain_pack_enhancement_used"] = bool(
+        research_lens_trace.get("domain_pack_enhancement_used")
+    )
+    query_plan_payload["removed_single_acronym_queries"] = query_provenance.get(
+        "removed_single_acronym_queries",
+        [],
+    )
+    if query_repair_suggestions.get("repaired_query_plan") is not None:
+        query_plan_payload["repaired_queries"] = query_repair_suggestions.get(
+            "repaired_query_plan"
+        )
     write_json(out / "planned_queries.json", query_plan_payload)
     write_json(out / "query_provenance.json", query_provenance)
     write_json(out / "query_pilot_diagnostics.json", query_pilot_diagnostics)
@@ -3393,6 +3700,11 @@ def run_pipeline(
         **research_lens_trace.get("concept_mapper", {}),
         "domain": research_lens_trace.get("domain", ""),
         "reason": research_lens_trace.get("reason", ""),
+        "generic_fallback_used": research_lens_trace.get("generic_fallback_used", False),
+        "domain_pack_enhancement_used": research_lens_trace.get(
+            "domain_pack_enhancement_used",
+            False,
+        ),
     }
     trace["query_family_planner"] = {
         **research_lens_trace.get("query_family_planner", {}),
@@ -3435,11 +3747,36 @@ def run_pipeline(
         "warning": intent_repair_warning,
         "legacy_query_planning": legacy_query_planning,
     }
+    trace["generic_research_intent_frame"] = search_contract.generic_intent_frame
+    trace["domain_activation"] = {
+        "selected_domain": search_contract.domain_profile.domain_name,
+        "candidate_domains": search_contract.domain_profile.candidate_domains,
+        "activation_evidence": search_contract.domain_profile.activation_evidence,
+        "negative_evidence": search_contract.domain_profile.negative_evidence,
+        "confidence": search_contract.domain_profile.confidence,
+        "fallback_reason": search_contract.domain_profile.fallback_reason,
+    }
+    trace["concept_validation_events"] = search_contract.concept_validation_events
+    trace["fallback_reasons"] = {
+        "domain_router": search_contract.domain_profile.fallback_reason,
+        "intent_repair": intent_llm_metadata.get("fallback_reason", ""),
+        "concept_mapper": research_lens_trace.get("reason", ""),
+        "query_family": query_provenance.get("reason", ""),
+    }
     trace["query_family_retrieval"] = {
         "enabled": query_provenance.get("enabled", False),
         "applied": query_provenance.get("applied", False),
         "reason": query_provenance.get("reason", ""),
         "domain": query_provenance.get("domain", ""),
+        "generic_fallback_used": query_provenance.get("generic_fallback_used", False),
+        "domain_pack_enhancement_used": query_provenance.get(
+            "domain_pack_enhancement_used",
+            False,
+        ),
+        "removed_single_acronym_queries": query_provenance.get(
+            "removed_single_acronym_queries",
+            [],
+        ),
         "provider_query_counts": query_provenance.get("provider_query_counts", {}),
         "old_planner_query_count": query_provenance.get("old_planner_query_count", 0),
         "family_candidate_query_count": query_provenance.get(
@@ -3486,7 +3823,10 @@ def run_pipeline(
         "warning": research_tension_warning,
     }
     trace["query_pilot"] = query_pilot_diagnostics
-    trace["query_repair"] = query_repair_suggestions
+    trace["query_repair"] = {
+        **query_repair_suggestions,
+        "trigger_reasons": query_repair_suggestions.get("trigger_reasons", []),
+    }
     trace["seed_paper_expansion"] = {
         "enabled": enable_snowballing,
         "seed_papers": resolved_seed_papers,
@@ -3551,6 +3891,9 @@ def run_pipeline(
         gap_matrix=decision_artifacts["research_gap_matrix"],
         research_tensions=research_tensions,
         seed_hints=seed_hints,
+        query_provenance=query_provenance,
+        aspect_coverage_records=aspect_coverage_records,
+        ranking_diagnostics=ranking_diagnostics,
     )
     save_exploration_quality(out / "exploration_quality.json", exploration_quality)
     save_evaluation(out / "evaluation.json", metrics)

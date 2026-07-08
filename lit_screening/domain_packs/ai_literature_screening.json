@@ -1,0 +1,136 @@
+{
+  "domain_name": "ai_literature_screening",
+  "activation": {
+    "positive_groups": [
+      [
+        "LLM",
+        "large language model",
+        "language model",
+        "multi-agent",
+        "agentic"
+      ],
+      [
+        "literature screening",
+        "scientific literature screening",
+        "abstract screening",
+        "study selection",
+        "文献筛选",
+        "科学文献筛选"
+      ],
+      [
+        "human feedback",
+        "human-in-the-loop",
+        "evidence verification",
+        "evidence validation",
+        "人机协作",
+        "人工反馈",
+        "证据验证"
+      ]
+    ],
+    "negative_groups": [
+      [
+        "surface magnetization",
+        "ferroelectric",
+        "thin film deposition",
+        "oxygen evolution reaction"
+      ]
+    ],
+    "min_positive_groups": 2
+  },
+  "domain_anchors": [
+    "LLM",
+    "large language model",
+    "literature screening",
+    "scientific literature screening",
+    "human-in-the-loop",
+    "evidence verification"
+  ],
+  "concepts": {
+    "llm_screening": {
+      "synonyms": [
+        "LLM",
+        "large language model",
+        "language model",
+        "LLM agents"
+      ],
+      "related": [
+        "multi-agent LLM system",
+        "human-in-the-loop",
+        "human feedback"
+      ]
+    },
+    "literature_screening": {
+      "synonyms": [
+        "literature screening",
+        "scientific literature screening",
+        "abstract screening",
+        "study selection",
+        "systematic review screening"
+      ],
+      "related": [
+        "recall",
+        "screening accuracy",
+        "evidence verification"
+      ]
+    }
+  },
+  "methods": [
+    "human-in-the-loop workflow",
+    "human feedback",
+    "evidence verification",
+    "evidence validation",
+    "claim extraction"
+  ],
+  "applications": [
+    "systematic review",
+    "scientific literature screening",
+    "study selection",
+    "screening accuracy",
+    "recall"
+  ],
+  "false_positive_terms": [
+    "clinical screening",
+    "patient screening",
+    "drug screening",
+    "biomarker screening",
+    "high-throughput materials screening",
+    "materials screening",
+    "biological agent",
+    "chemical agent",
+    "infectious agent"
+  ],
+  "field_of_study_whitelist": [
+    "Computer Science",
+    "Information Retrieval",
+    "Artificial Intelligence"
+  ],
+  "field_of_study_blacklist": [
+    "Medicine",
+    "Biology"
+  ],
+  "aspect_groups": {
+    "screening_workflow": [
+      "literature screening",
+      "abstract screening",
+      "study selection",
+      "systematic review"
+    ],
+    "human_feedback": [
+      "human feedback",
+      "human-in-the-loop",
+      "human collaboration"
+    ],
+    "evidence_validation": [
+      "evidence verification",
+      "evidence validation",
+      "claim extraction",
+      "grounded evidence"
+    ],
+    "performance_metrics": [
+      "recall",
+      "accuracy",
+      "screening accuracy",
+      "evaluation metric"
+    ]
+  }
+}

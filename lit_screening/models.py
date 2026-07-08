@@ -37,6 +37,11 @@ class DomainProfile:
     field_of_study_whitelist: list[str] = field(default_factory=list)
     field_of_study_blacklist: list[str] = field(default_factory=list)
     terminology_map: dict[str, list[str]] = field(default_factory=dict)
+    candidate_domains: list[dict[str, Any]] = field(default_factory=list)
+    activation_evidence: dict[str, list[str]] = field(default_factory=dict)
+    negative_evidence: dict[str, list[str]] = field(default_factory=dict)
+    confidence: float = 0.0
+    fallback_reason: str = ""
 
 
 @dataclass
@@ -52,6 +57,7 @@ class DomainPack:
     """Externalized domain knowledge for future query-planning extensions."""
 
     domain_name: str
+    activation: dict[str, Any] = field(default_factory=dict)
     domain_anchors: list[str] = field(default_factory=list)
     concepts: dict[str, DomainConcept] = field(default_factory=dict)
     mechanisms: list[str] = field(default_factory=list)
@@ -59,9 +65,54 @@ class DomainPack:
     methods: list[str] = field(default_factory=list)
     applications: list[str] = field(default_factory=list)
     false_positive_terms: list[str] = field(default_factory=list)
+    preferred_venues: list[str] = field(default_factory=list)
+    field_of_study_whitelist: list[str] = field(default_factory=list)
+    field_of_study_blacklist: list[str] = field(default_factory=list)
     constraint_groups: list[dict[str, Any]] = field(default_factory=list)
     aspect_groups: dict[str, list[str]] = field(default_factory=dict)
     query_expansions: dict[str, list[str]] = field(default_factory=dict)
+    query_templates: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DomainActivationResult:
+    """Auditable result from pack-driven domain routing."""
+
+    selected_domain: str
+    candidate_domains: list[dict[str, Any]] = field(default_factory=list)
+    activation_evidence: dict[str, list[str]] = field(default_factory=dict)
+    negative_evidence: dict[str, list[str]] = field(default_factory=dict)
+    confidence: float = 0.0
+    fallback_reason: str = ""
+    domain_pack_enhancement_used: bool = False
+
+
+@dataclass
+class GenericResearchIntentFrame:
+    """Domain-agnostic structure inferred from a noisy research question."""
+
+    research_object: list[str] = field(default_factory=list)
+    domain_context: list[str] = field(default_factory=list)
+    target_process_or_property: list[str] = field(default_factory=list)
+    relation_or_effect: list[str] = field(default_factory=list)
+    mechanism_need: bool = False
+    method_need: bool = False
+    in_situ_or_operando_need: bool = False
+    ex_situ_need: bool = False
+    material_case_need: bool = False
+    application_or_performance_need: bool = False
+    failure_or_limitation_need: bool = False
+    controversy_need: bool = False
+    review_background_need: bool = False
+    core_terms: list[str] = field(default_factory=list)
+    method_terms: list[str] = field(default_factory=list)
+    mechanism_terms: list[str] = field(default_factory=list)
+    material_or_case_terms: list[str] = field(default_factory=list)
+    application_or_metric_terms: list[str] = field(default_factory=list)
+    failure_or_limitation_terms: list[str] = field(default_factory=list)
+    controversy_terms: list[str] = field(default_factory=list)
+    downweighted_terms: list[str] = field(default_factory=list)
+    term_sources: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -192,6 +243,8 @@ class SearchContract:
     preferred_paper_types: list[str] = field(default_factory=list)
     time_window: str = ""
     success_definition: str = ""
+    generic_intent_frame: GenericResearchIntentFrame | None = None
+    concept_validation_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

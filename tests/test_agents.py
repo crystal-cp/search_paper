@@ -217,7 +217,8 @@ def test_semantic_scholar_query_builder_keeps_excluded_terms_out_of_provider_que
 
     queries = build_semantic_scholar_queries(plan)
 
-    assert any('+"surface magnetization"' in query for query in queries)
+    assert any('"surface magnetization"' in query for query in queries)
+    assert not any('+"surface magnetization"' in query for query in queries)
     assert not any('-"device noise"' in query for query in queries)
 
 

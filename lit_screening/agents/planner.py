@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from lit_screening.agents.generic_intent import is_single_acronym_query
 from lit_screening.llm_client import GenericLLMClient
 from lit_screening.models import (
     ExpertResearchIntent,
@@ -229,7 +230,7 @@ def build_semantic_scholar_queries(plan: QueryPlan) -> list[str]:
     must = plan.must_terms or core
     optional = plan.optional_terms
     natural_query = plan.translated_question or plan.original_question
-    required = " ".join(_semantic_required(term) for term in must[:4])
+    required = " ".join(_quote_phrase(term) for term in must[:4])
     optional_or = f"({' OR '.join(_quote_phrase(term) for term in optional[:4])})" if optional else ""
     primary = " ".join(part for part in [required, optional_or] if part)
     if not primary:
@@ -259,7 +260,10 @@ def build_semantic_scholar_queries(plan: QueryPlan) -> list[str]:
                     if part
                 )
         )
-    return _unique(queries, 6)
+    return _unique(
+        [query for query in queries if not is_single_acronym_query(query)],
+        6,
+    )
 
 
 def _is_expert_plan(plan: QueryPlan) -> bool:
@@ -279,7 +283,7 @@ def _expert_generic_openalex_queries(plan: QueryPlan) -> list[str]:
         [
             query
             for query in queries
-            if query and len(query) < 180
+            if query and len(query) < 180 and not is_single_acronym_query(query)
         ],
         12,
     )
@@ -299,7 +303,7 @@ def _expert_generic_semantic_scholar_queries(plan: QueryPlan) -> list[str]:
         ),
     ]
     if must:
-        required = " ".join(_semantic_required(term) for term in must[:3])
+        required = " ".join(_quote_phrase(term) for term in must[:3])
         queries.append(required)
         optional = _terms_by_role(concepts, "optional")
         if optional:
@@ -317,7 +321,7 @@ def _expert_generic_semantic_scholar_queries(plan: QueryPlan) -> list[str]:
         [
             query
             for query in queries
-            if query and len(query) < 220
+            if query and len(query) < 220 and not is_single_acronym_query(query)
         ],
         6,
     )
@@ -424,7 +428,11 @@ def _provider_neutral_expert_queries(
         for term in _provider_terms(prioritized_must_terms[:6], terminology_map)
         if term
     )
-    queries.extend(_quote_phrase(term) for term in case_terms[:2] if term)
+    for case in case_terms[:2]:
+        if expanded_base_terms:
+            queries.append(f"{_quote_phrase(case)} {_quote_phrase(expanded_base_terms[0])}")
+        elif case:
+            queries.append(_quote_phrase(case))
     for method in _selected_provider_methods(methods):
         if expanded_base_terms:
             queries.append(f"{_quote_phrase(method)} {_quote_phrase(expanded_base_terms[0])}")

@@ -50,6 +50,9 @@ def _domain_pack_from_json(data: dict[str, Any]) -> DomainPack:
     }
     return DomainPack(
         domain_name=str(data.get("domain_name") or ""),
+        activation=dict(data.get("activation", {}))
+        if isinstance(data.get("activation", {}), dict)
+        else {},
         domain_anchors=_string_list(data.get("domain_anchors", [])),
         concepts=concepts,
         mechanisms=_string_list(data.get("mechanisms", [])),
@@ -57,9 +60,15 @@ def _domain_pack_from_json(data: dict[str, Any]) -> DomainPack:
         methods=_string_list(data.get("methods", [])),
         applications=_string_list(data.get("applications", [])),
         false_positive_terms=_string_list(data.get("false_positive_terms", [])),
+        preferred_venues=_string_list(data.get("preferred_venues", [])),
+        field_of_study_whitelist=_string_list(data.get("field_of_study_whitelist", [])),
+        field_of_study_blacklist=_string_list(data.get("field_of_study_blacklist", [])),
         constraint_groups=_dict_list(data.get("constraint_groups", [])),
         aspect_groups=_string_list_dict(data.get("aspect_groups", {})),
         query_expansions=_string_list_dict(data.get("query_expansions", {})),
+        query_templates=dict(data.get("query_templates", {}))
+        if isinstance(data.get("query_templates", {}), dict)
+        else {},
     )
 
 

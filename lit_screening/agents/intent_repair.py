@@ -6,7 +6,12 @@ import re
 from dataclasses import replace
 from typing import Any
 
-from lit_screening.domain_packs import load_domain_pack
+from lit_screening.agents.domain_router import DomainRouter
+from lit_screening.agents.generic_intent import (
+    build_generic_intent_frame,
+    is_generic_noisy_term,
+)
+from lit_screening.domain_packs import list_domain_packs, load_domain_pack
 from lit_screening.models import DomainPack, ExpertResearchIntent, IntentConcept, SeedHint
 
 
@@ -40,9 +45,11 @@ GENERIC_DOWNWEIGHT_TERMS = [
     "review",
     "survey",
     "tutorial",
-    "materials",
-    "spin",
-    "magnetization",
+    "paper",
+    "study",
+    "research",
+    "related work",
+    "literature",
 ]
 
 DETECTION_MARKERS = [
@@ -432,29 +439,80 @@ def _validate_llm_intent_with_domain_pack(
 ) -> ExpertResearchIntent:
     support_text = _context(question, seed_hints)
     domain_terms = {term.lower() for term in _domain_pack_terms(pack)}
+    has_active_pack = pack.domain_name not in {"generic", "general_science"}
     events: list[dict[str, Any]] = []
     validated: list[IntentConcept] = []
     for concept in intent.structured_concepts:
-        if concept.query_role == "downweighted":
-            validated.append(replace(concept, should_use_in_provider_query=False))
-            continue
-        event_reason = ""
         term_lower = concept.term.lower()
         direct_support = term_lower in support_text
         domain_support = term_lower in domain_terms
-        cross_domain_sensitive = _is_cross_domain_sensitive_materials_term(
-            concept.term,
-            pack.domain_name,
-        )
-        unsupported = (
-            not direct_support
-            and not domain_support
-            and concept.source not in {"feedback_profile", "pilot_repair"}
-        )
+        explicit_user_term = concept.source == "user_text" and concept.confidence >= 0.8
+        if concept.query_role == "downweighted" or is_generic_noisy_term(concept.term):
+            lowered = replace(
+                concept,
+                query_role="downweighted",
+                should_use_in_provider_query=False,
+            )
+            validated.append(lowered)
+            events.append(
+                _validation_event(
+                    concept,
+                    lowered,
+                    "generic_term_downweighted",
+                )
+            )
+            continue
+        event_reason = ""
+        cross_domain_sensitive = _is_cross_domain_sensitive_term(concept.term, pack.domain_name)
+        unsupported = not direct_support and not domain_support
         if cross_domain_sensitive and not direct_support:
-            event_reason = "cross_domain_materials_magnetism_concept"
-        elif unsupported:
-            event_reason = "unsupported_by_user_seed_or_domain_pack"
+            event_reason = "cross_domain_injection_blocked"
+        elif explicit_user_term and unsupported:
+            retained = replace(
+                concept,
+                should_use_in_provider_query=concept.query_role in {"must", "optional"},
+            )
+            validated.append(retained)
+            events.append(
+                _validation_event(
+                    concept,
+                    retained,
+                    "unsupported_domain_pack_but_retained"
+                    if has_active_pack
+                    else "retained_explicit_user_term",
+                )
+            )
+            continue
+        elif (
+            concept.source == "llm_inferred"
+            and concept.confidence < 0.8
+            and unsupported
+        ):
+            event_reason = "low_confidence_llm_inference_demoted"
+        elif concept.source == "llm_inferred" and unsupported and has_active_pack:
+            event_reason = "unsupported_domain_pack_and_demoted"
+        elif concept.source == "llm_inferred" and unsupported and not has_active_pack:
+            optional = replace(
+                concept,
+                query_role="optional",
+                should_use_in_provider_query=False,
+                confidence=min(concept.confidence, 0.68),
+                activation_reason=(
+                    f"{concept.activation_reason} "
+                    "[Domain validation retained only as a non-query assumption]."
+                ),
+            )
+            validated.append(optional)
+            events.append(
+                _validation_event(
+                    concept,
+                    optional,
+                    "unsupported_domain_pack_and_demoted",
+                )
+            )
+            continue
+        elif unsupported and concept.source == "domain_pack" and not domain_support:
+            event_reason = "forbidden_by_active_domain"
         if event_reason:
             lowered = replace(
                 concept,
@@ -467,15 +525,7 @@ def _validate_llm_intent_with_domain_pack(
                 ),
             )
             validated.append(lowered)
-            events.append(
-                {
-                    "term": concept.term,
-                    "original_query_role": concept.query_role,
-                    "new_query_role": "uncertain",
-                    "reason": event_reason,
-                    "source": concept.source,
-                }
-            )
+            events.append(_validation_event(concept, lowered, event_reason))
             continue
         if concept.query_role == "uncertain":
             validated.append(replace(concept, should_use_in_provider_query=False))
@@ -533,24 +583,39 @@ def _domain_pack_terms(pack: DomainPack) -> list[str]:
     return _unique(terms)
 
 
-def _is_cross_domain_sensitive_materials_term(term: str, domain_name: str) -> bool:
-    if domain_name == "materials_magnetism":
+def _is_cross_domain_sensitive_term(term: str, domain_name: str) -> bool:
+    """Block LLM-only concepts borrowed from non-selected domain packs."""
+
+    lowered = " ".join(str(term or "").lower().split())
+    if not lowered:
         return False
-    lowered = term.lower()
-    sensitive = {
-        "boundary magnetization",
-        "surface magnetization",
-        "local magnetoelectric response",
-        "magnetoelectric antiferromagnet",
-        "antiferromagnet",
-        "cr2o3",
-        "chromia",
-        "spleem",
-        "xmcd-peem",
-        "sp-stm",
-        "nv magnetometry",
+    for pack_name in list_domain_packs():
+        if pack_name == domain_name:
+            continue
+        try:
+            pack = load_domain_pack(pack_name)
+        except ValueError:
+            continue
+        if lowered in {value.lower() for value in _domain_pack_terms(pack)}:
+            return True
+    return False
+
+
+def _validation_event(
+    original: IntentConcept,
+    updated: IntentConcept,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "term": original.term,
+        "original_query_role": original.query_role,
+        "new_query_role": updated.query_role,
+        "original_should_use_in_provider_query": original.should_use_in_provider_query,
+        "new_should_use_in_provider_query": updated.should_use_in_provider_query,
+        "reason": reason,
+        "source": original.source,
+        "confidence": original.confidence,
     }
-    return lowered in sensitive
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -568,49 +633,12 @@ def _list_of_strings(value: Any) -> list[str]:
 
 def _infer_domain_pack(question: str, seed_hints: list[SeedHint]) -> DomainPack:
     context = _context(question, seed_hints)
-    if _has_any(
-        context,
-        [
-            "llm",
-            "large language model",
-            "human-in-the-loop",
-            "human in the loop",
-            "literature screening",
-            "文献筛选",
-            "人机协作",
-        ],
-    ):
-        return DomainPack(domain_name="ai_literature_screening")
-    if _has_any(
-        context,
-        [
-            "ferroelectric",
-            "ferroelectric thin film",
-            "surface polarization",
-            "depolarization",
-            "pfm",
-            "shg",
-            "铁电",
-            "表面极化",
-            "退极化",
-        ],
-    ):
-        return load_domain_pack("ferroelectric_polarization")
-    if _has_any(
-        context,
-        [
-            "spaldin",
-            "surface magnetization",
-            "local magnetoelectric",
-            "antiferromagnet",
-            "altermagnetism",
-            "altermagnet",
-            "表面磁化",
-            "反铁磁",
-            "磁电",
-        ],
-    ):
-        return load_domain_pack("materials_magnetism")
+    routed = DomainRouter().route(context)
+    if routed.selected_domain != "general_science":
+        try:
+            return load_domain_pack(routed.selected_domain)
+        except ValueError:
+            pass
     return DomainPack(domain_name="generic")
 
 
@@ -966,18 +994,98 @@ def _repair_ai_literature_screening(question: str) -> ExpertResearchIntent:
 
 def _fallback_repair(question: str) -> ExpertResearchIntent:
     concepts = _downweighted_concepts(question)
-    for phrase in _candidate_user_phrases(question):
+    frame = build_generic_intent_frame(question)
+    for term in frame.research_object:
         concepts.append(
             _concept(
-                phrase,
+                term,
                 "object",
                 "user_text",
-                0.62,
-                "Candidate topic phrase appears in the user question.",
+                0.86,
+                "Explicit or translated research object appears in the user question.",
+                "must",
+                True,
+            )
+        )
+    for term in frame.domain_context:
+        concepts.append(
+            _concept(
+                term,
+                "material",
+                "user_text",
+                0.82,
+                "Explicit or translated domain context appears in the user question.",
                 "optional",
                 True,
             )
         )
+    for term in frame.target_process_or_property:
+        concepts.append(
+            _concept(
+                term,
+                "property",
+                "user_text",
+                0.82,
+                "Explicit or translated target property/process appears in the user question.",
+                "optional",
+                True,
+            )
+        )
+    for term in frame.method_terms:
+        concepts.append(
+            _concept(
+                term,
+                "method",
+                "user_text",
+                0.8,
+                "User asks for methods, characterization, workflow, or measurement evidence.",
+                "optional",
+                True,
+            )
+        )
+    for term in frame.mechanism_terms:
+        concepts.append(
+            _concept(
+                term,
+                "mechanism",
+                "user_text",
+                0.8,
+                "User asks for theory or mechanism evidence.",
+                "optional",
+                True,
+            )
+        )
+    existing_terms = {concept.term.lower() for concept in concepts}
+    for term, sources in frame.term_sources.items():
+        if term.lower() in existing_terms or is_generic_noisy_term(term):
+            continue
+        if not ({"generic_glossary", "user_text"} & set(sources)):
+            continue
+        concepts.append(
+            _concept(
+                term,
+                "object",
+                "user_text",
+                0.78,
+                "Additional explicit or glossary-supported scientific term from the user question.",
+                "optional",
+                True,
+            )
+        )
+        existing_terms.add(term.lower())
+    for phrase in _candidate_user_phrases(question):
+        if phrase.lower() not in {concept.term.lower() for concept in concepts}:
+            concepts.append(
+                _concept(
+                    phrase,
+                    "object",
+                    "user_text",
+                    0.72,
+                    "Candidate topic phrase appears in the user question.",
+                    "optional",
+                    True,
+                )
+            )
     return _intent_from_concepts(
         question=question,
         concepts=_merge_concepts(concepts),
@@ -1263,12 +1371,6 @@ def _downweighted_concepts(question: str) -> list[IntentConcept]:
         values.extend(["importance", "significance"])
     if "综述" in question:
         values.append("review")
-    if "材料" in question:
-        values.append("materials")
-    if "自旋" in question:
-        values.append("spin")
-    if "磁化" in question:
-        values.append("magnetization")
     return [
         _concept(
             term,

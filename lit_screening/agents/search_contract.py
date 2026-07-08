@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from lit_screening.agents.domain_router import DomainRouter
+from lit_screening.agents.generic_intent import (
+    build_generic_intent_frame,
+    generic_aspect_groups,
+)
 from lit_screening.domain_packs import load_domain_pack
 from lit_screening.llm_client import GenericLLMClient
 from lit_screening.models import (
     DomainProfile,
     ExpertResearchIntent,
+    GenericResearchIntentFrame,
     IntentConcept,
     SearchBrief,
     SearchConstraintGroup,
@@ -109,6 +115,10 @@ class SearchContractAgent:
             domain_hint=_expert_domain_hint(expert_intent),
         )
         domain_pack = _load_pack_if_available(domain_profile.domain_name)
+        generic_frame = build_generic_intent_frame(
+            f"{question} {search_brief.refined_question}",
+            expert_intent=expert_intent,
+        )
         ambiguity_must = _flatten_ambiguity_terms(ambiguity_analysis, "recommended_must_terms")
         ambiguity_exclude = _flatten_ambiguity_terms(
             ambiguity_analysis,
@@ -139,6 +149,7 @@ class SearchContractAgent:
             )
             pack_constraint_groups = _constraint_groups_from_domain_pack(domain_pack)
             intent_constraint_groups = _constraint_groups_from_intent(expert_intent)
+            generic_constraint_groups = _constraint_groups_from_generic_frame(generic_frame)
             if any(group.required for group in pack_constraint_groups):
                 intent_constraint_groups = _relaxed_constraint_groups(
                     intent_constraint_groups
@@ -147,6 +158,7 @@ class SearchContractAgent:
                 [
                     *pack_constraint_groups,
                     *intent_constraint_groups,
+                    *generic_constraint_groups,
                 ]
             )
             assumptions = _unique(
@@ -174,6 +186,7 @@ class SearchContractAgent:
             constraint_groups = _unique_constraint_groups(
                 [
                     *_constraint_groups_from_domain_pack(domain_pack),
+                    *_constraint_groups_from_generic_frame(generic_frame),
                     *_fallback_constraint_groups(must_include),
                 ]
             )
@@ -203,7 +216,7 @@ class SearchContractAgent:
             exclusion_criteria=search_brief.exclusion_criteria,
             required_aspects=_unique(
                 [
-                    *_required_aspects_for_contract(domain_pack, search_brief),
+                    *_required_aspects_for_contract(domain_pack, search_brief, generic_frame),
                     *(must_include[:4] if expert_intent is not None else domain_profile.required_concepts[:4]),
                 ],
                 16,
@@ -211,11 +224,62 @@ class SearchContractAgent:
             preferred_paper_types=search_brief.preferred_paper_types,
             time_window=search_brief.time_window,
             success_definition=search_brief.success_definition,
+            generic_intent_frame=generic_frame,
+            concept_validation_events=(expert_intent.llm_metadata or {}).get(
+                "domain_validation_events",
+                [],
+            )
+            if expert_intent is not None
+            else [],
         )
 
 
 def infer_domain_profile(lowered_text: str, domain_hint: str = "") -> DomainProfile:
     """Infer a coarse domain profile from user-visible terms."""
+
+    routed = DomainRouter().route(lowered_text, domain_hint=domain_hint)
+    if routed.selected_domain != "general_science":
+        pack = _load_pack_if_available(routed.selected_domain)
+        terms = _domain_pack_terms_for_profile(pack)
+        return DomainProfile(
+            domain_name=routed.selected_domain,
+            positive_domains=[routed.selected_domain.replace("_", " ")],
+            negative_domains=list(getattr(pack, "false_positive_terms", []) or []),
+            required_concepts=_unique(terms[:8], 8),
+            forbidden_concepts=list(getattr(pack, "false_positive_terms", []) or []),
+            preferred_venues=list(getattr(pack, "preferred_venues", []) or []),
+            field_of_study_whitelist=list(
+                getattr(pack, "field_of_study_whitelist", []) or []
+            ),
+            field_of_study_blacklist=list(
+                getattr(pack, "field_of_study_blacklist", []) or []
+            ),
+            terminology_map=dict(getattr(pack, "query_expansions", {}) or {}),
+            candidate_domains=routed.candidate_domains,
+            activation_evidence=routed.activation_evidence,
+            negative_evidence=routed.negative_evidence,
+            confidence=routed.confidence,
+            fallback_reason=routed.fallback_reason,
+        )
+    fallback_profile = DomainProfile(
+        domain_name="general_science",
+        positive_domains=["science"],
+        negative_domains=[],
+        required_concepts=[],
+        forbidden_concepts=[],
+        preferred_venues=[],
+        excluded_venues=[],
+        field_of_study_whitelist=[],
+        field_of_study_blacklist=[],
+        terminology_map={},
+        candidate_domains=routed.candidate_domains,
+        activation_evidence=routed.activation_evidence,
+        negative_evidence=routed.negative_evidence,
+        confidence=routed.confidence,
+        fallback_reason=routed.fallback_reason,
+    )
+    if not domain_hint or domain_hint in {"generic", "general_science"}:
+        return fallback_profile
 
     if domain_hint and domain_hint != "generic":
         hinted = _domain_profile_for_hint(domain_hint, lowered_text)
@@ -364,18 +428,7 @@ def infer_domain_profile(lowered_text: str, domain_hint: str = "") -> DomainProf
             },
         )
 
-    return DomainProfile(
-        domain_name="general_science",
-        positive_domains=["science"],
-        negative_domains=[],
-        required_concepts=[],
-        forbidden_concepts=[],
-        preferred_venues=[],
-        excluded_venues=[],
-        field_of_study_whitelist=[],
-        field_of_study_blacklist=[],
-        terminology_map={},
-    )
+    return fallback_profile
 
 
 def _expert_domain_hint(expert_intent: ExpertResearchIntent | None) -> str:
@@ -650,6 +703,48 @@ def _constraint_groups_from_intent(
     return groups
 
 
+def _constraint_groups_from_generic_frame(
+    frame: GenericResearchIntentFrame | None,
+) -> list[SearchConstraintGroup]:
+    """Build reusable generic constraint groups from the intent frame."""
+
+    if frame is None:
+        return []
+    specs = [
+        ("core_object_group", frame.research_object or frame.core_terms, True),
+        ("domain_context_group", frame.domain_context, False),
+        ("process_or_property_group", frame.target_process_or_property, False),
+        ("method_group", frame.method_terms, False),
+        ("mechanism_group", frame.mechanism_terms, False),
+        ("material_or_case_group", frame.material_or_case_terms, False),
+        ("application_or_metric_group", frame.application_or_metric_terms, False),
+        ("failure_or_limitation_group", frame.failure_or_limitation_terms, False),
+        ("controversy_group", frame.controversy_terms, False),
+    ]
+    groups: list[SearchConstraintGroup] = []
+    for name, terms, required in specs:
+        cleaned = _unique(
+            [
+                term
+                for term in terms
+                if term.lower() not in {value.lower() for value in frame.downweighted_terms}
+            ],
+            24,
+        )
+        if not cleaned:
+            continue
+        groups.append(
+            SearchConstraintGroup(
+                group_name=name,
+                operator="OR",
+                terms=cleaned,
+                source="generic_intent_frame",
+                required=required,
+            )
+        )
+    return groups
+
+
 def _constraint_groups_from_domain_pack(
     domain_pack: Any | None,
 ) -> list[SearchConstraintGroup]:
@@ -737,12 +832,16 @@ def _aspect_groups_from_domain_pack(domain_pack: Any | None) -> list[str]:
 def _required_aspects_for_contract(
     domain_pack: Any | None,
     search_brief: SearchBrief,
+    generic_frame: GenericResearchIntentFrame | None = None,
 ) -> list[str]:
     """Prefer domain-pack aspect groups over noisy short SearchBrief tokens."""
 
     pack_aspects = _aspect_groups_from_domain_pack(domain_pack)
     if pack_aspects:
-        return pack_aspects
+        return _unique([*pack_aspects, *generic_aspect_groups(generic_frame or GenericResearchIntentFrame())], 24)
+    generic_aspects = generic_aspect_groups(generic_frame or GenericResearchIntentFrame())
+    if generic_aspects:
+        return generic_aspects
     return search_brief.required_aspects
 
 
@@ -771,6 +870,19 @@ def _load_pack_if_available(domain_name: str) -> Any | None:
         return load_domain_pack(domain_name)
     except ValueError:
         return None
+
+
+def _domain_pack_terms_for_profile(domain_pack: Any | None) -> list[str]:
+    """Return representative pack terms for a DomainProfile without hard guards."""
+
+    if domain_pack is None:
+        return []
+    terms: list[str] = []
+    terms.extend(getattr(domain_pack, "domain_anchors", []) or [])
+    for concept in getattr(domain_pack, "concepts", {}).values():
+        terms.extend(getattr(concept, "synonyms", []) or [])
+    terms.extend(getattr(domain_pack, "mechanisms", []) or [])
+    return _unique(terms, 16)
 
 
 def _unique(values: list[str], limit: int | None = None) -> list[str]:
