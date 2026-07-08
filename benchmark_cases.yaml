@@ -1,0 +1,1222 @@
+version: 1
+
+description: >
+  Benchmark cases for evaluating search_paper as a human-centric multi-agent
+  scientific literature screening system. These cases test novice intent repair,
+  QueryFamily planning, provider retrieval, evidence grounding, domain guardrails,
+  ranking, paper roles, feedback adaptation, and user-facing report quality.
+
+global_defaults:
+  enabled_providers:
+    - openalex
+    - semantic_scholar
+
+  default_thresholds:
+    intent_anchor_coverage_min: 0.70
+    required_aspect_recall_in_brief_min: 0.70
+    planned_query_anchor_coverage_min: 0.75
+    query_family_coverage_min: 0.70
+    forbidden_query_leakage_rate_max: 0.00
+    min_raw_results: 20
+    min_merged_results: 15
+    retrieval_anchor_recall_min: 0.60
+    top10_domain_in_scope_rate_min: 0.80
+    top10_forbidden_pattern_rate_max: 0.10
+    aspect_coverage_at10_min: 0.60
+    strict_support_rate_min_rule: 0.45
+    strict_support_rate_min_llm: 0.55
+    llm_invalid_evidence_rate_max: 0.05
+    paper_role_assignment_rate_min: 0.70
+    report_section_completeness_min: 0.85
+    feedback_directional_accuracy_min: 0.80
+
+  required_report_sections:
+    - research_question_interpretation
+    - search_strategy_or_query_families
+    - screening_and_inclusion_criteria
+    - ranked_papers
+    - evidence_grounding
+    - domain_guardrail_or_uncertainty
+    - paper_roles_or_reading_path
+    - research_gaps
+    - suggested_next_searches
+    - feedback_effects_if_feedback_provided
+
+cases:
+  - id: sei_lithium_battery
+    display_name: "SEI lithium battery"
+    domain: "battery materials"
+    novice_question_zh: "我想找锂电池里 SEI 是什么、怎么影响锂金属电池循环和枝晶，尤其人工 SEI 的文章。"
+    canonical_intent: >
+      Screen literature on solid electrolyte interphase formation, chemistry,
+      characterization, and artificial SEI design for lithium metal or lithium-ion batteries.
+    plan_only_eligible: true
+    full_retrieval_required: true
+    gold_labels_path: "data/gold_labels/sei_lithium_battery.csv"
+
+    ambiguous_terms:
+      - term: "SEI"
+        intended_meaning: "solid electrolyte interphase"
+        forbidden_meanings:
+          - "social emotional intelligence"
+          - "Software Engineering Institute"
+          - "solar energy index"
+
+    expected_query_anchors:
+      - id: sei_core
+        any_of:
+          - "solid electrolyte interphase"
+          - "SEI"
+          - "solid-electrolyte interphase"
+      - id: lithium_metal_context
+        any_of:
+          - "lithium metal anode"
+          - "Li metal"
+          - "lithium metal battery"
+          - "LMB"
+      - id: electrolyte_decomposition
+        any_of:
+          - "electrolyte decomposition"
+          - "interphase chemistry"
+          - "SEI composition"
+          - "LiF-rich"
+          - "inorganic-rich SEI"
+      - id: dendrite_and_cycling
+        any_of:
+          - "lithium dendrite"
+          - "dendrite suppression"
+          - "uniform Li deposition"
+          - "cycling stability"
+      - id: artificial_sei
+        any_of:
+          - "artificial SEI"
+          - "artificial solid electrolyte interphase"
+          - "protective interphase"
+          - "SEI engineering"
+      - id: characterization
+        any_of:
+          - "cryo-EM"
+          - "XPS"
+          - "AFM"
+          - "TOF-SIMS"
+          - "electron microscopy"
+
+    expected_aspects:
+      - id: formation_mechanism
+        any_of:
+          - "formation mechanism"
+          - "electrolyte decomposition"
+          - "first cycle"
+      - id: composition_structure
+        any_of:
+          - "SEI composition"
+          - "SEI structure"
+          - "organic inorganic components"
+      - id: ion_transport_mechanics
+        any_of:
+          - "Li-ion transport"
+          - "ionic conductivity"
+          - "mechanical properties"
+      - id: dendrite_cycling
+        any_of:
+          - "dendrite growth"
+          - "cycle life"
+          - "Coulombic efficiency"
+      - id: artificial_design
+        any_of:
+          - "artificial SEI design"
+          - "protective layer"
+          - "interface engineering"
+      - id: characterization_methods
+        any_of:
+          - "characterization"
+          - "cryo-EM"
+          - "spectroscopy"
+          - "microscopy"
+
+    forbidden_top10_patterns:
+      - "social emotional intelligence"
+      - "software engineering institute"
+      - "school engagement inventory"
+      - "solar energy index"
+      - "sustainable energy initiative"
+      - "security engineering institute"
+
+    false_positive_types:
+      - "SEI acronym from psychology, education, software, or energy policy"
+      - "solid electrolyte papers that do not discuss interphase formation"
+      - "generic battery management or state-of-charge papers"
+      - "cathode-only papers without SEI/interphase relevance"
+      - "corrosion/passivation films unrelated to lithium batteries"
+
+    expected_role_hints:
+      - "review_background"
+      - "mechanism_or_theory"
+      - "characterization_method"
+      - "material_case"
+      - "design_strategy"
+
+    feedback_scenario:
+      include_when_matches_any:
+        - "artificial SEI"
+        - "lithium metal anode"
+        - "dendrite suppression"
+      exclude_when_matches_any:
+        - "social emotional intelligence"
+        - "software engineering"
+        - "cathode only"
+      expected_effect: "included artificial-SEI papers move upward; non-battery SEI false positives move downward"
+
+  - id: oer_spin_state
+    display_name: "OER spin state"
+    domain: "oxygen electrocatalysis"
+    novice_question_zh: "OER 催化剂里 spin state 怎么影响活性？我不知道该搜 high-spin low-spin 还是 eg occupancy。"
+    canonical_intent: >
+      Screen literature on how transition-metal spin state, orbital occupancy,
+      surface oxidation, and electronic structure affect oxygen evolution reaction activity.
+    plan_only_eligible: true
+    full_retrieval_required: true
+    gold_labels_path: "data/gold_labels/oer_spin_state.csv"
+
+    ambiguous_terms:
+      - term: "OER"
+        intended_meaning: "oxygen evolution reaction"
+        forbidden_meanings:
+          - "open educational resources"
+          - "office of emergency response"
+          - "operational excellence review"
+      - term: "spin"
+        intended_meaning: "electronic spin state of catalytic active sites"
+        forbidden_meanings:
+          - "spintronics without oxygen electrocatalysis"
+          - "sports spin"
+          - "statistical spin"
+
+    expected_query_anchors:
+      - id: oxygen_evolution
+        any_of:
+          - "oxygen evolution reaction"
+          - "OER"
+          - "water oxidation"
+      - id: spin_state
+        any_of:
+          - "spin state"
+          - "high spin"
+          - "low spin"
+          - "spin transition"
+      - id: transition_metal_catalysts
+        any_of:
+          - "cobalt oxide"
+          - "nickel oxide"
+          - "iron oxide"
+          - "transition metal oxide"
+          - "spinel oxide"
+          - "perovskite oxide"
+      - id: orbital_occupancy
+        any_of:
+          - "e_g occupancy"
+          - "eg occupancy"
+          - "d orbital occupancy"
+          - "orbital occupancy"
+      - id: activity_descriptor
+        any_of:
+          - "activity descriptor"
+          - "adsorption energy"
+          - "OER intermediate"
+          - "oxygen intermediate"
+      - id: surface_oxidation_probe
+        any_of:
+          - "surface oxidation"
+          - "operando XAS"
+          - "X-ray absorption"
+          - "XPS"
+          - "surface reconstruction"
+
+    expected_aspects:
+      - id: spin_descriptor
+        any_of:
+          - "spin state descriptor"
+          - "spin moment"
+          - "high-spin low-spin"
+      - id: orbital_descriptor
+        any_of:
+          - "eg occupancy"
+          - "orbital occupancy"
+      - id: catalyst_families
+        any_of:
+          - "cobalt"
+          - "nickel"
+          - "iron"
+          - "spinel"
+          - "perovskite"
+      - id: oer_mechanism
+        any_of:
+          - "OER mechanism"
+          - "oxygen intermediates"
+          - "adsorption"
+      - id: operando_or_surface
+        any_of:
+          - "operando"
+          - "surface oxidation"
+          - "surface reconstruction"
+      - id: theory_experiment_bridge
+        any_of:
+          - "DFT"
+          - "experimental validation"
+          - "descriptor validation"
+
+    forbidden_top10_patterns:
+      - "open educational resources"
+      - "open education"
+      - "educational resource"
+      - "office of emergency response"
+      - "operational excellence"
+      - "oxygen reduction reaction only"
+      - "ORR only"
+      - "spintronics memory without OER"
+      - "quantum spin Hall without catalysis"
+
+    false_positive_types:
+      - "education papers using OER as open educational resources"
+      - "spin-state chemistry papers without oxygen evolution or catalysis"
+      - "ORR-only oxygen reduction papers with no OER relevance"
+      - "spintronics or magnetic memory papers unrelated to electrocatalysis"
+      - "general water splitting papers without spin/orbital descriptor content"
+
+    expected_role_hints:
+      - "mechanism_or_theory"
+      - "descriptor_paper"
+      - "experimental_proof"
+      - "material_case"
+      - "frontier_extension"
+
+    feedback_scenario:
+      include_when_matches_any:
+        - "spin state"
+        - "oxygen evolution reaction"
+        - "eg occupancy"
+      exclude_when_matches_any:
+        - "open educational resources"
+        - "spintronics"
+        - "oxygen reduction only"
+      expected_effect: "spin-state OER descriptor papers move upward; education and spintronics false positives move downward"
+
+  - id: ai_literature_screening
+    display_name: "AI literature screening"
+    domain: "AI-assisted evidence synthesis"
+    novice_question_zh: "AI 或 LLM 能不能帮小白做科研文献筛选、证据验证和生成报告？"
+    canonical_intent: >
+      Screen literature on AI, machine learning, active learning, and LLM systems
+      for literature screening, systematic review automation, evidence extraction,
+      evidence validation, and human-in-the-loop review.
+    plan_only_eligible: true
+    full_retrieval_required: true
+    gold_labels_path: "data/gold_labels/ai_literature_screening.csv"
+
+    ambiguous_terms:
+      - term: "screening"
+        intended_meaning: "literature screening or title/abstract screening"
+        forbidden_meanings:
+          - "medical screening"
+          - "drug screening"
+          - "high-throughput materials screening"
+          - "security screening"
+      - term: "evidence"
+        intended_meaning: "evidence synthesis and source-grounded validation"
+        forbidden_meanings:
+          - "legal evidence"
+          - "clinical biomarker evidence without literature screening"
+
+    expected_query_anchors:
+      - id: literature_screening
+        any_of:
+          - "literature screening"
+          - "title and abstract screening"
+          - "citation screening"
+          - "systematic review screening"
+      - id: ai_ml
+        any_of:
+          - "artificial intelligence"
+          - "machine learning"
+          - "deep learning"
+          - "active learning"
+      - id: llm_agents
+        any_of:
+          - "large language model"
+          - "LLM"
+          - "agent"
+          - "multi-agent"
+      - id: human_in_loop
+        any_of:
+          - "human-in-the-loop"
+          - "reviewer-in-the-loop"
+          - "interactive screening"
+          - "human feedback"
+      - id: evidence_validation
+        any_of:
+          - "evidence extraction"
+          - "evidence verification"
+          - "evidence synthesis"
+          - "grounded"
+          - "span validation"
+      - id: evaluation_metrics
+        any_of:
+          - "precision"
+          - "recall"
+          - "work saved over sampling"
+          - "WSS"
+          - "screening accuracy"
+
+    expected_aspects:
+      - id: search_planning
+        any_of:
+          - "search strategy"
+          - "query formulation"
+          - "concept identification"
+      - id: ai_screening
+        any_of:
+          - "AI-assisted screening"
+          - "machine learning screening"
+          - "active learning"
+      - id: evidence_extraction
+        any_of:
+          - "evidence extraction"
+          - "data extraction"
+          - "claim extraction"
+      - id: evidence_validation
+        any_of:
+          - "verification"
+          - "grounding"
+          - "validation"
+      - id: human_feedback
+        any_of:
+          - "human-in-the-loop"
+          - "feedback"
+          - "reviewer interaction"
+      - id: transparency_evaluation
+        any_of:
+          - "transparency"
+          - "explainability"
+          - "evaluation metrics"
+
+    forbidden_top10_patterns:
+      - "cancer screening"
+      - "disease screening"
+      - "drug screening"
+      - "virtual screening"
+      - "high-throughput screening"
+      - "materials screening"
+      - "security screening"
+      - "AI in education literature review without screening"
+      - "movie screening"
+
+    false_positive_types:
+      - "medical screening papers not about literature screening"
+      - "drug discovery or virtual screening papers"
+      - "materials discovery screening papers"
+      - "generic LLM summarization papers without literature-screening workflow"
+      - "bibliometric mapping papers without screening/evidence validation"
+
+    expected_role_hints:
+      - "system_method"
+      - "evaluation_protocol"
+      - "human_in_loop_design"
+      - "evidence_validation_method"
+      - "review_background"
+
+    feedback_scenario:
+      include_when_matches_any:
+        - "title abstract screening"
+        - "active learning"
+        - "human-in-the-loop"
+        - "evidence verification"
+      exclude_when_matches_any:
+        - "cancer screening"
+        - "drug screening"
+        - "materials screening"
+      expected_effect: "AI-assisted literature-screening papers move upward; medical/material screening false positives move downward"
+
+  - id: mof_co2_capture
+    display_name: "MOF CO2 capture"
+    domain: "porous materials and carbon capture"
+    novice_question_zh: "MOF 做 CO2 capture 该看哪些材料、结构和吸附机制？"
+    canonical_intent: >
+      Screen literature on metal-organic frameworks for CO2 capture, including
+      adsorption capacity, selectivity, open metal sites, amine functionalization,
+      pore chemistry, humidity stability, and regeneration.
+    plan_only_eligible: true
+    full_retrieval_required: true
+    gold_labels_path: "data/gold_labels/mof_co2_capture.csv"
+
+    ambiguous_terms:
+      - term: "capture"
+        intended_meaning: "CO2 adsorption or separation"
+        forbidden_meanings:
+          - "image capture"
+          - "data capture"
+          - "geological storage without MOFs"
+      - term: "MOF"
+        intended_meaning: "metal-organic framework"
+        forbidden_meanings:
+          - "file format"
+          - "ministry of finance"
+
+    expected_query_anchors:
+      - id: mof_core
+        any_of:
+          - "metal-organic framework"
+          - "metal organic framework"
+          - "MOF"
+      - id: co2_capture
+        any_of:
+          - "CO2 capture"
+          - "carbon dioxide capture"
+          - "CO2 adsorption"
+          - "post-combustion capture"
+      - id: selectivity_capacity
+        any_of:
+          - "adsorption capacity"
+          - "CO2/N2 selectivity"
+          - "selectivity"
+          - "isotherm"
+          - "working capacity"
+      - id: open_metal_sites
+        any_of:
+          - "open metal site"
+          - "coordinatively unsaturated"
+          - "MOF-74"
+          - "HKUST-1"
+      - id: amine_functionalization
+        any_of:
+          - "amine-functionalized"
+          - "amine grafting"
+          - "ethylenediamine"
+          - "PEI"
+          - "TEPA"
+      - id: stability_regeneration
+        any_of:
+          - "humidity stability"
+          - "water stability"
+          - "regeneration"
+          - "heat of adsorption"
+          - "cyclic adsorption"
+
+    expected_aspects:
+      - id: adsorption_mechanism
+        any_of:
+          - "adsorption mechanism"
+          - "physisorption"
+          - "chemisorption"
+      - id: capacity_selectivity
+        any_of:
+          - "capacity"
+          - "selectivity"
+          - "CO2/N2"
+      - id: pore_chemistry
+        any_of:
+          - "pore size"
+          - "pore chemistry"
+          - "ultramicroporous"
+      - id: functionalization
+        any_of:
+          - "amine"
+          - "functionalization"
+          - "open metal site"
+      - id: operating_conditions
+        any_of:
+          - "humidity"
+          - "temperature"
+          - "pressure"
+          - "flue gas"
+      - id: regeneration_stability
+        any_of:
+          - "regeneration"
+          - "stability"
+          - "cycling"
+
+    forbidden_top10_patterns:
+      - "CO2 reduction"
+      - "electrocatalytic CO2 reduction"
+      - "photocatalytic CO2 reduction"
+      - "geological sequestration"
+      - "carbon capture solvent only"
+      - "amine solvent without MOF"
+      - "image capture"
+      - "data capture"
+      - "ministry of finance"
+
+    false_positive_types:
+      - "CO2 reduction or conversion papers instead of capture/adsorption"
+      - "amine solvent capture papers without MOFs"
+      - "activated carbon or zeolite papers without MOF comparison"
+      - "geological storage papers without porous adsorbents"
+      - "methane or hydrogen storage MOF papers without CO2"
+
+    expected_role_hints:
+      - "review_background"
+      - "material_case"
+      - "mechanism_or_theory"
+      - "method_comparison"
+      - "application_bridge"
+
+    feedback_scenario:
+      include_when_matches_any:
+        - "CO2 adsorption"
+        - "amine-functionalized MOF"
+        - "open metal site"
+      exclude_when_matches_any:
+        - "CO2 reduction"
+        - "geological sequestration"
+        - "solvent only"
+      expected_effect: "adsorption/capture MOF papers move upward; CO2 reduction and non-MOF capture papers move downward"
+
+  - id: thin_film_deposition
+    display_name: "Thin film deposition"
+    domain: "materials processing"
+    novice_question_zh: "薄膜沉积有哪些方法，怎么选？我想找材料方向的 thin film deposition 文献。"
+    canonical_intent: >
+      Screen literature comparing thin film deposition methods for materials science,
+      including PVD, CVD, ALD, sputtering, PLD, evaporation, spin coating, growth
+      conditions, film morphology, and characterization.
+    plan_only_eligible: true
+    full_retrieval_required: true
+    gold_labels_path: "data/gold_labels/thin_film_deposition.csv"
+
+    ambiguous_terms:
+      - term: "deposition"
+        intended_meaning: "thin film material growth or coating deposition"
+        forbidden_meanings:
+          - "legal deposition"
+          - "bank deposit"
+          - "sediment deposition"
+      - term: "film"
+        intended_meaning: "thin material layer"
+        forbidden_meanings:
+          - "movie or cinema film"
+
+    expected_query_anchors:
+      - id: thin_film_core
+        any_of:
+          - "thin film"
+          - "thin-film"
+          - "thin film deposition"
+      - id: physical_methods
+        any_of:
+          - "physical vapor deposition"
+          - "PVD"
+          - "sputtering"
+          - "thermal evaporation"
+          - "pulsed laser deposition"
+          - "PLD"
+      - id: chemical_methods
+        any_of:
+          - "chemical vapor deposition"
+          - "CVD"
+          - "atomic layer deposition"
+          - "ALD"
+      - id: solution_methods
+        any_of:
+          - "spin coating"
+          - "dip coating"
+          - "spray pyrolysis"
+          - "sol-gel"
+      - id: growth_quality
+        any_of:
+          - "film growth"
+          - "nucleation"
+          - "morphology"
+          - "roughness"
+          - "crystallinity"
+          - "thickness control"
+      - id: substrate_application
+        any_of:
+          - "substrate"
+          - "semiconductor"
+          - "oxide film"
+          - "photovoltaic"
+          - "coating"
+
+    expected_aspects:
+      - id: method_taxonomy
+        any_of:
+          - "PVD"
+          - "CVD"
+          - "ALD"
+          - "sputtering"
+          - "PLD"
+      - id: process_parameters
+        any_of:
+          - "temperature"
+          - "pressure"
+          - "precursor"
+          - "deposition rate"
+      - id: film_quality
+        any_of:
+          - "thickness"
+          - "uniformity"
+          - "roughness"
+          - "crystallinity"
+      - id: material_compatibility
+        any_of:
+          - "substrate"
+          - "oxide"
+          - "metal"
+          - "polymer"
+      - id: method_tradeoffs
+        any_of:
+          - "advantages"
+          - "limitations"
+          - "comparison"
+      - id: characterization
+        any_of:
+          - "XRD"
+          - "SEM"
+          - "AFM"
+          - "ellipsometry"
+
+    forbidden_top10_patterns:
+      - "legal deposition"
+      - "deposition testimony"
+      - "court deposition"
+      - "bank deposit"
+      - "sediment deposition"
+      - "atmospheric deposition"
+      - "movie film"
+      - "thin film cinema"
+      - "film review"
+
+    false_positive_types:
+      - "legal deposition records"
+      - "finance/banking deposit content"
+      - "geology or atmospheric sediment deposition"
+      - "cinema/movie film content"
+      - "commercial coating pages without scientific methods or evaluation"
+
+    expected_role_hints:
+      - "review_background"
+      - "method_comparison"
+      - "process_method"
+      - "application_bridge"
+      - "characterization_method"
+
+    feedback_scenario:
+      include_when_matches_any:
+        - "atomic layer deposition"
+        - "sputtering"
+        - "chemical vapor deposition"
+        - "thin film"
+      exclude_when_matches_any:
+        - "legal deposition"
+        - "sediment deposition"
+        - "movie film"
+      expected_effect: "materials deposition methods move upward; legal/geology/cinema false positives move downward"
+
+  - id: ferroelectric_surface_polarization
+    display_name: "Ferroelectric surface polarization"
+    domain: "ferroelectric thin films"
+    novice_question_zh: "我想找铁电薄膜表面极化、surface screening、depolarization field 和 PFM 相关文献。"
+    canonical_intent: >
+      Screen literature on ferroelectric thin film surface polarization, polarization
+      charge screening, depolarization fields, domain dynamics, PFM/scanning probe
+      measurements, and surface electrochemistry.
+    plan_only_eligible: true
+    full_retrieval_required: true
+    gold_labels_path: "data/gold_labels/ferroelectric_surface_polarization.csv"
+
+    ambiguous_terms:
+      - term: "polarization"
+        intended_meaning: "ferroelectric polarization"
+        forbidden_meanings:
+          - "optical polarization"
+          - "political polarization"
+          - "social polarization"
+      - term: "screening"
+        intended_meaning: "screening of polarization charge"
+        forbidden_meanings:
+          - "medical screening"
+          - "film screening"
+          - "database screening"
+
+    expected_query_anchors:
+      - id: ferroelectric_core
+        any_of:
+          - "ferroelectric"
+          - "ferroelectric thin film"
+          - "ferroelectric film"
+      - id: surface_polarization
+        any_of:
+          - "surface polarization"
+          - "polarization charge"
+          - "bound charge"
+          - "surface charge"
+      - id: screening
+        any_of:
+          - "surface screening"
+          - "screening charge"
+          - "ionic screening"
+          - "charge compensation"
+      - id: depolarization_domain
+        any_of:
+          - "depolarization field"
+          - "domain structure"
+          - "domain wall"
+          - "polarization switching"
+      - id: probe_methods
+        any_of:
+          - "piezoresponse force microscopy"
+          - "PFM"
+          - "scanning probe microscopy"
+          - "SPM"
+      - id: materials
+        any_of:
+          - "BaTiO3"
+          - "PbTiO3"
+          - "PZT"
+          - "BiFeO3"
+          - "HfO2"
+
+    expected_aspects:
+      - id: surface_charge_stability
+        any_of:
+          - "polarization charge"
+          - "phase stability"
+          - "surface stability"
+      - id: screening_mechanisms
+        any_of:
+          - "screening mechanism"
+          - "ionic screening"
+          - "electronic screening"
+          - "adsorbates"
+      - id: depolarization_domains
+        any_of:
+          - "depolarization field"
+          - "domain structure"
+          - "domain dynamics"
+      - id: measurement_methods
+        any_of:
+          - "PFM"
+          - "scanning probe microscopy"
+          - "local measurement"
+      - id: thin_film_geometry
+        any_of:
+          - "thin film"
+          - "ultrathin"
+          - "electrode"
+          - "interface"
+      - id: surface_chemistry
+        any_of:
+          - "surface chemistry"
+          - "electrochemistry"
+          - "adsorbate"
+
+    forbidden_top10_patterns:
+      - "political polarization"
+      - "social polarization"
+      - "optical polarization"
+      - "light polarization"
+      - "polariton"
+      - "surface plasmon polariton"
+      - "medical screening"
+      - "film screening"
+      - "battery electrode polarization without ferroelectric"
+
+    false_positive_types:
+      - "optics papers about light polarization or polaritons"
+      - "political/social polarization papers"
+      - "general dielectric polarization without ferroelectric thin films"
+      - "battery electrode polarization papers"
+      - "ferromagnetic spin polarization papers without ferroelectric context"
+
+    expected_role_hints:
+      - "review_background"
+      - "mechanism_or_theory"
+      - "surface_probe_method"
+      - "material_case"
+      - "limitation_or_challenge"
+
+    feedback_scenario:
+      include_when_matches_any:
+        - "ferroelectric"
+        - "surface screening"
+        - "depolarization field"
+        - "PFM"
+      exclude_when_matches_any:
+        - "optical polarization"
+        - "political polarization"
+        - "polariton"
+      expected_effect: "ferroelectric surface-screening papers move upward; optics/social false positives move downward"
+
+  - id: surface_magnetization
+    display_name: "Surface magnetization"
+    domain: "antiferromagnetic and magnetoelectric materials"
+    novice_question_zh: "有没有和 Nicola A. Spaldin 的 Surface Magnetization in Antiferromagnets 和 Local Magnetoelectric Effects 相关的探测表面磁化和自旋极化重要性的文章？"
+    canonical_intent: >
+      Screen literature related to surface magnetization in antiferromagnets,
+      local magnetoelectric effects, surface magnetic order, spin polarization,
+      surface-sensitive probes, and materials such as Cr2O3, FeF2, NiO, and CuMnAs.
+    plan_only_eligible: true
+    full_retrieval_required: true
+    gold_labels_path: "data/gold_labels/surface_magnetization.csv"
+
+    ambiguous_terms:
+      - term: "Surface"
+        intended_meaning: "material surface or interface"
+        forbidden_meanings:
+          - "Microsoft Surface device"
+          - "surface-level metaphor"
+      - term: "magnetization"
+        intended_meaning: "surface magnetic moment or magnetic order"
+        forbidden_meanings:
+          - "magnetized consumer product"
+          - "geomagnetic surface map"
+
+    expected_query_anchors:
+      - id: surface_magnetization_core
+        any_of:
+          - "surface magnetization"
+          - "surface magnetic order"
+          - "surface magnetic moment"
+          - "surface magnetism"
+      - id: antiferromagnet_context
+        any_of:
+          - "antiferromagnet"
+          - "antiferromagnetic"
+          - "AFM"
+      - id: magnetoelectric_context
+        any_of:
+          - "magnetoelectric"
+          - "local magnetoelectric"
+          - "magnetic multipole"
+          - "multipolization"
+      - id: seed_authors_titles
+        any_of:
+          - "Spaldin"
+          - "Surface Magnetization in Antiferromagnets"
+          - "Local Magnetoelectric Effects"
+          - "Weber"
+          - "Urru"
+      - id: materials
+        any_of:
+          - "Cr2O3"
+          - "chromia"
+          - "FeF2"
+          - "NiO"
+          - "CuMnAs"
+      - id: surface_probe_methods
+        any_of:
+          - "SPLEEM"
+          - "XMCD-PEEM"
+          - "spin-polarized photoemission"
+          - "SP-STM"
+          - "NV magnetometry"
+          - "MOKE"
+          - "surface-sensitive"
+
+    expected_aspects:
+      - id: theory_symmetry
+        any_of:
+          - "symmetry analysis"
+          - "classification"
+          - "magnetic multipoles"
+      - id: local_magnetoelectric_predictor
+        any_of:
+          - "local magnetoelectric"
+          - "bulk-boundary"
+          - "predictor"
+      - id: material_examples
+        any_of:
+          - "Cr2O3"
+          - "FeF2"
+          - "NiO"
+          - "CuMnAs"
+      - id: detection_methods
+        any_of:
+          - "SPLEEM"
+          - "XMCD"
+          - "PEEM"
+          - "SP-STM"
+          - "NV magnetometry"
+      - id: roughness_compensation
+        any_of:
+          - "roughness"
+          - "compensated surface"
+          - "uncompensated surface"
+      - id: applications_limitations
+        any_of:
+          - "exchange bias"
+          - "magnetoelectric memory"
+          - "surface paramagnetism"
+          - "temperature"
+
+    forbidden_top10_patterns:
+      - "Microsoft Surface"
+      - "Surface Pro"
+      - "Surface Laptop"
+      - "geomagnetic"
+      - "earth surface magnetization"
+      - "magnetic water treatment"
+      - "ferromagnetic nanoparticle hyperthermia"
+      - "MRI surface coil"
+      - "topological insulator spin polarization without antiferromagnet"
+
+    false_positive_types:
+      - "Microsoft Surface device pages"
+      - "generic ferromagnetic nanoparticle or biomedical magnetization papers"
+      - "geomagnetism or earth surface magnetization papers"
+      - "spin-polarization papers without surface magnetic order or antiferromagnets"
+      - "magnetized surface treatment or coating applications unrelated to AFM materials"
+
+    expected_role_hints:
+      - "theory_origin"
+      - "conceptual_framework"
+      - "surface_probe_method"
+      - "nanoscale_readout"
+      - "material_case"
+      - "limitation_or_challenge"
+
+    feedback_scenario:
+      include_when_matches_any:
+        - "surface magnetization"
+        - "antiferromagnet"
+        - "magnetoelectric"
+        - "Cr2O3"
+        - "SPLEEM"
+        - "XMCD"
+      exclude_when_matches_any:
+        - "Microsoft Surface"
+        - "geomagnetic"
+        - "hyperthermia"
+      expected_effect: "AFM/magnetoelectric surface papers move upward; device/geomagnetic/biomedical false positives move downward"
+
+    thresholds:
+      planned_query_anchor_coverage_min: 0.80
+      query_family_coverage_min: 0.80
+      top10_forbidden_pattern_rate_max: 0.00
+      aspect_coverage_at10_min: 0.65
+
+  - id: perovskite_solar_defect_passivation
+    display_name: "Perovskite solar defect passivation"
+    domain: "halide perovskite photovoltaics"
+    novice_question_zh: "钙钛矿太阳能电池缺陷钝化该看哪些论文？尤其表面、晶界、界面 passivation。"
+    canonical_intent: >
+      Screen literature on defect passivation in halide perovskite solar cells,
+      including surface, grain-boundary, and interface passivation, halide vacancies,
+      trap states, nonradiative recombination, Lewis acid/base passivation, additives,
+      device efficiency, and stability.
+    plan_only_eligible: true
+    full_retrieval_required: true
+    gold_labels_path: "data/gold_labels/perovskite_solar_defect_passivation.csv"
+
+    ambiguous_terms:
+      - term: "perovskite"
+        intended_meaning: "halide perovskite solar cell absorber"
+        forbidden_meanings:
+          - "oxide perovskite catalyst"
+          - "geological perovskite mineral"
+          - "perovskite fuel cell material"
+      - term: "passivation"
+        intended_meaning: "defect/trap/interface passivation in solar cells"
+        forbidden_meanings:
+          - "corrosion passivation"
+          - "silicon passivation without perovskite"
+          - "battery surface passivation"
+
+    expected_query_anchors:
+      - id: perovskite_solar_core
+        any_of:
+          - "perovskite solar cell"
+          - "halide perovskite solar cell"
+          - "lead halide perovskite"
+          - "tin-based perovskite solar cell"
+      - id: defect_passivation
+        any_of:
+          - "defect passivation"
+          - "surface passivation"
+          - "grain boundary passivation"
+          - "interface passivation"
+      - id: defect_types
+        any_of:
+          - "halide vacancy"
+          - "iodine vacancy"
+          - "Pb defect"
+          - "Sn vacancy"
+          - "trap state"
+          - "deep-level defect"
+      - id: recombination
+        any_of:
+          - "nonradiative recombination"
+          - "carrier recombination"
+          - "trap-assisted recombination"
+      - id: passivation_chemistry
+        any_of:
+          - "Lewis base"
+          - "Lewis acid"
+          - "fullerene"
+          - "alkylammonium"
+          - "2D perovskite"
+          - "self-assembled monolayer"
+          - "additive engineering"
+      - id: performance_stability
+        any_of:
+          - "power conversion efficiency"
+          - "PCE"
+          - "stability"
+          - "hysteresis"
+
+    expected_aspects:
+      - id: defect_identity
+        any_of:
+          - "vacancy"
+          - "trap state"
+          - "deep defect"
+      - id: passivation_site
+        any_of:
+          - "surface"
+          - "grain boundary"
+          - "interface"
+      - id: passivation_agent
+        any_of:
+          - "Lewis base"
+          - "Lewis acid"
+          - "additive"
+          - "2D"
+          - "fullerene"
+      - id: recombination_mechanism
+        any_of:
+          - "nonradiative recombination"
+          - "carrier lifetime"
+          - "trap-assisted"
+      - id: device_performance
+        any_of:
+          - "PCE"
+          - "efficiency"
+          - "stability"
+          - "hysteresis"
+      - id: characterization_theory
+        any_of:
+          - "photoluminescence"
+          - "TRPL"
+          - "DLTS"
+          - "DFT"
+          - "XPS"
+
+    forbidden_top10_patterns:
+      - "oxide perovskite catalyst"
+      - "oxygen evolution"
+      - "solid oxide fuel cell"
+      - "geological perovskite"
+      - "silicon solar cell passivation"
+      - "corrosion passivation"
+      - "battery passivation"
+      - "perovskite LED only"
+      - "photocatalysis without solar cell"
+
+    false_positive_types:
+      - "oxide perovskite catalyst papers unrelated to solar cells"
+      - "silicon solar passivation papers without halide perovskites"
+      - "corrosion passivation papers"
+      - "perovskite LED papers with no photovoltaic context"
+      - "general defect physics without passivation or solar-cell relevance"
+
+    expected_role_hints:
+      - "review_background"
+      - "mechanism_or_theory"
+      - "material_case"
+      - "device_application"
+      - "characterization_method"
+
+    feedback_scenario:
+      include_when_matches_any:
+        - "defect passivation"
+        - "perovskite solar cell"
+        - "grain boundary"
+        - "nonradiative recombination"
+      exclude_when_matches_any:
+        - "oxide perovskite catalyst"
+        - "silicon solar cell"
+        - "corrosion passivation"
+      expected_effect: "halide-perovskite photovoltaic passivation papers move upward; oxide catalyst/silicon/corrosion papers move downward"
+
+validation_matrix:
+  plan_only_metrics:
+    - search_brief_completeness
+    - intent_anchor_coverage
+    - required_aspect_recall_in_brief
+    - ambiguity_resolution_score
+    - domain_boundary_completeness
+    - planned_query_anchor_coverage
+    - provider_query_completeness
+    - query_family_coverage
+    - lens_diversity
+    - query_specificity_score
+    - single_acronym_query_count
+    - forbidden_query_leakage_rate
+    - provider_query_adaptation_score
+
+  full_retrieval_metrics:
+    - provider_success_rate
+    - raw_retrieved_count
+    - merged_paper_count
+    - zero_result_failure
+    - retrieval_anchor_recall
+    - dedup_sanity_ratio
+    - missing_abstract_ratio
+    - top10_domain_in_scope_rate
+    - top10_out_of_scope_rate
+    - top10_forbidden_pattern_rate
+    - top10_anchor_coverage
+    - aspect_coverage_at_10
+    - screening_decision_completeness
+    - evidence_record_coverage
+    - strict_support_rate
+    - llm_invalid_evidence_rate
+    - span_audit_completeness
+    - ranking_score_transparency
+    - precision_at_10
+    - ndcg_at_10
+    - recall_at_10
+    - paper_role_assignment_rate
+    - paper_role_diversity
+    - report_section_completeness
+    - paper_card_coverage
+    - reading_path_presence
+    - gap_matrix_specificity
+    - suggested_next_search_specificity
+    - uncertainty_visibility
+    - feedback_directional_accuracy
+    - feedback_query_refinement_quality
+
+mode_definitions:
+  rule_mode:
+    planner_mode: "rule"
+    extractor_mode: "rule"
+    verifier_mode: "rule"
+    llm_backend_active: false
+    description: "Deterministic baseline. No LLM calls should be counted."
+
+  llm_enhanced_mode:
+    planner_mode: "llm"
+    extractor_mode: "llm"
+    verifier_mode: "llm"
+    llm_backend_active: true
+    description: >
+      LLM-enhanced condition. If the backend is requested but inactive, label the
+      run as llm_requested_but_inactive and do not count it as LLM-enhanced.
+
+comparison_rules:
+  llm_must_not_degrade:
+    - top10_forbidden_pattern_rate
+    - llm_invalid_evidence_rate
+    - top10_out_of_scope_rate
+  llm_should_improve_or_match:
+    - intent_anchor_coverage
+    - planned_query_anchor_coverage
+    - query_family_coverage
+    - aspect_coverage_at_10
+    - report_section_completeness
+    - feedback_directional_accuracy
+  hard_fail_if:
+    - "LLM-enhanced mode presents unverified evidence as reliable"
+    - "LLM-enhanced mode changes the intended scientific domain"
+    - "LLM-enhanced mode increases top10_forbidden_pattern_rate above 0.10"
+    - "LLM-enhanced mode is requested but silently falls back to rule-mode without trace"

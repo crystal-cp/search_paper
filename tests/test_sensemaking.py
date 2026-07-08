@@ -3,6 +3,7 @@ from lit_screening.agents.planner import PlannerAgent
 from lit_screening.agents.research_intent import ResearchIntentAgent
 from lit_screening.models import (
     AspectCoverageRecord,
+    DomainAssessment,
     EvidenceRecord,
     Paper,
     RankedPaper,
@@ -10,6 +11,7 @@ from lit_screening.models import (
     ScreeningDecision,
     VerificationResult,
 )
+from lit_screening.agents.llm_enhancement import render_user_report_markdown, verified_report_input
 from lit_screening.reading_path import generate_reading_path
 from lit_screening.result_groups import group_ranked_papers
 from lit_screening.scoring import compute_final_score
@@ -114,6 +116,226 @@ def test_reading_path_is_generated(tmp_path):
     assert "Recommended Reading Path" in path.read_text()
 
 
+def test_reading_path_excludes_out_of_scope_papers(tmp_path):
+    excluded = _ranked_paper(
+        "ocean",
+        "Ocean Seismic Network Pilot Experiment",
+        0.9,
+        decision="exclude",
+        reading_priority="exclude",
+        domain_decision="out_of_scope",
+    )
+    path = tmp_path / "reading_path.md"
+
+    diagnostics = generate_reading_path(
+        path,
+        [excluded],
+        {"evaluation_relevant": [_group_row(excluded)]},
+    )
+
+    text = path.read_text()
+    assert "Ocean Seismic Network Pilot Experiment" not in text
+    assert diagnostics["reading_path_out_of_scope_count"] == 0
+
+
+def test_reading_path_excludes_decision_exclude(tmp_path):
+    excluded = _ranked_paper(
+        "exclude-decision",
+        "Excluded SEI paper",
+        0.9,
+        decision="exclude",
+        reading_priority="read_later",
+        domain_decision="in_scope",
+    )
+    path = tmp_path / "reading_path.md"
+
+    diagnostics = generate_reading_path(
+        path,
+        [excluded],
+        {"recent_frontier": [_group_row(excluded)]},
+    )
+
+    assert "Excluded SEI paper" not in path.read_text()
+    assert diagnostics["reading_path_exclude_count"] == 0
+
+
+def test_reading_path_excludes_reading_priority_exclude(tmp_path):
+    excluded = _ranked_paper(
+        "exclude-priority",
+        "Priority excluded paper",
+        0.9,
+        decision="maybe",
+        reading_priority="exclude",
+        domain_decision="in_scope",
+    )
+    path = tmp_path / "reading_path.md"
+
+    generate_reading_path(
+        path,
+        [excluded],
+        {"background_or_survey": [_group_row(excluded)]},
+    )
+
+    assert "Priority excluded paper" not in path.read_text()
+
+
+def test_reading_path_deduplicates_papers_across_sections(tmp_path):
+    paper = _ranked_paper("p1", "Artificial SEI for lithium metal batteries", 0.9)
+    path = tmp_path / "reading_path.md"
+    groups = {
+        "implementation_relevant": [_group_row(paper)],
+        "evaluation_relevant": [_group_row(paper)],
+        "recent_frontier": [_group_row(paper)],
+    }
+
+    diagnostics = generate_reading_path(path, [paper], groups)
+    text = path.read_text()
+
+    assert text.count("Artificial SEI for lithium metal batteries") == 1
+    assert diagnostics["reading_path_duplicate_count"] == 0
+
+
+def test_user_report_read_first_excludes_out_of_scope():
+    good = _ranked_paper("good", "Artificial SEI for lithium metal batteries", 0.9)
+    ocean = _ranked_paper(
+        "ocean",
+        "Ocean Seismic Network Pilot Experiment",
+        0.95,
+        decision="exclude",
+        reading_priority="exclude",
+        domain_decision="out_of_scope",
+    )
+    artifact_input = verified_report_input(
+        [ocean, good],
+        [ocean.domain_assessment, good.domain_assessment],
+        {},
+        [],
+        {},
+        {},
+    )
+
+    report = render_user_report_markdown(artifact_input)
+
+    assert "Artificial SEI for lithium metal batteries" in report
+    assert "Ocean Seismic Network Pilot Experiment" not in report
+
+
+def test_reading_path_uses_priority_filtered_candidates(tmp_path):
+    must = _ranked_paper("must", "Core lithium artificial SEI", 0.9)
+    later = _ranked_paper(
+        "later",
+        "Read later lithium SEI characterization",
+        0.7,
+        reading_priority="read_later",
+    )
+    optional = _ranked_paper(
+        "optional",
+        "Optional mixed chemistry SEI review",
+        0.6,
+        decision="maybe",
+        reading_priority="optional",
+        domain_decision="borderline",
+    )
+    path = tmp_path / "reading_path.md"
+
+    generate_reading_path(
+        path,
+        [must, later, optional],
+        {
+            "must_read": [_group_row(must)],
+            "evaluation_relevant": [_group_row(later), _group_row(optional)],
+            "peripheral": [_group_row(optional)],
+        },
+    )
+    text = path.read_text()
+
+    assert "Core lithium artificial SEI" in text
+    assert "Read later lithium SEI characterization" in text
+    assert "Optional mixed chemistry SEI review" in text
+
+
+def test_ocean_seismic_pilot_not_in_sei_reading_path(tmp_path):
+    lithium = _ranked_paper("li", "Artificial SEI for lithium metal batteries", 0.9)
+    ocean = _ranked_paper(
+        "ocean",
+        "Ocean Seismic Network Pilot Experiment",
+        0.99,
+        decision="exclude",
+        reading_priority="exclude",
+        domain_decision="out_of_scope",
+        peripheral_context_reason="missing_target_lithium_context",
+    )
+    path = tmp_path / "reading_path.md"
+
+    diagnostics = generate_reading_path(
+        path,
+        [ocean, lithium],
+        {
+            "evaluation_relevant": [_group_row(ocean)],
+            "must_read": [_group_row(lithium)],
+        },
+    )
+
+    text = path.read_text()
+    assert "Ocean Seismic Network Pilot Experiment" not in text
+    assert "Artificial SEI for lithium metal batteries" in text
+    assert diagnostics["reading_path_exclude_count"] == 0
+    assert diagnostics["reading_path_out_of_scope_count"] == 0
+
+
+def test_reading_path_filters_still_exclude_out_of_scope(tmp_path):
+    ocean = _ranked_paper(
+        "ocean",
+        "Ocean Seismic Network Pilot Experiment",
+        0.99,
+        decision="exclude",
+        reading_priority="exclude",
+        domain_decision="out_of_scope",
+    )
+    path = tmp_path / "reading_path.md"
+
+    diagnostics = generate_reading_path(
+        path,
+        [ocean],
+        {"must_read": [_group_row(ocean)], "evaluation_relevant": [_group_row(ocean)]},
+    )
+
+    assert "Ocean Seismic Network Pilot Experiment" not in path.read_text()
+    assert diagnostics["reading_path_exclude_count"] == 0
+    assert diagnostics["reading_path_out_of_scope_count"] == 0
+
+
+def test_user_report_read_first_uses_must_read_when_available():
+    read_later = _ranked_paper(
+        "later",
+        "Read later OER catalyst overview",
+        0.8,
+        reading_priority="read_later",
+    )
+    must_read = _ranked_paper(
+        "must",
+        "Spin-state control of oxygen evolution reaction activity",
+        0.92,
+        reading_priority="must_read",
+    )
+    read_later.rank = 1
+    must_read.rank = 2
+    artifact_input = verified_report_input(
+        [read_later, must_read],
+        [read_later.domain_assessment, must_read.domain_assessment],
+        {},
+        [],
+        {},
+        {},
+    )
+
+    report = render_user_report_markdown(artifact_input)
+
+    assert report.index("Spin-state control of oxygen evolution reaction activity") < report.index(
+        "Read later OER catalyst overview"
+    )
+
+
 def test_prisma_like_flow_counts_records_and_reasons():
     paper = Paper(paper_id="p1", title="No abstract")
     verification = VerificationResult(
@@ -158,6 +380,10 @@ def _ranked_paper(
     title: str,
     final_score: float,
     support_level: str = "strict_support",
+    decision: str = "include",
+    reading_priority: str = "must_read",
+    domain_decision: str = "in_scope",
+    peripheral_context_reason: str = "",
 ) -> RankedPaper:
     paper = Paper(
         paper_id=paper_id,
@@ -188,4 +414,44 @@ def _ranked_paper(
         diversity_score=final_score,
     )
     scores.final_score = final_score
-    return RankedPaper(1, paper, evidence, verification, scores)
+    domain = DomainAssessment(
+        paper_id=paper_id,
+        domain_match_score=0.95 if domain_decision == "in_scope" else 0.3,
+        domain_decision=domain_decision,
+        off_topic_reason="test",
+        target_context_match=["lithium metal battery"]
+        if domain_decision != "out_of_scope"
+        else [],
+        peripheral_context_reason=peripheral_context_reason,
+        intent_centrality_score=0.9,
+        required_group_coverage_score=1.0,
+        topic_focus_score=0.9,
+    )
+    screening = ScreeningDecision(
+        paper_id=paper_id,
+        decision=decision,
+        decision_confidence=0.9,
+        primary_reason="test",
+        exclusion_reasons=[],
+        domain_match_score=domain.domain_match_score,
+        domain_decision=domain_decision,
+        reading_priority=reading_priority,
+        suggested_action=decision,
+    )
+    return RankedPaper(
+        1,
+        paper,
+        evidence,
+        verification,
+        scores,
+        domain_assessment=domain,
+        screening_decision=screening,
+    )
+
+
+def _group_row(item: RankedPaper) -> dict:
+    return {
+        "rank": item.rank,
+        "title": item.paper.title,
+        "paper_id": item.paper.paper_id,
+    }

@@ -233,6 +233,8 @@ def compute_score_breakdown(
     aspect_coverage_score: float = 0.0,
     domain_assessment: DomainAssessment | None = None,
     preference_score: float | None = None,
+    use_intent_centrality: bool = True,
+    use_group_coverage_ranking: bool = True,
 ) -> ScoreBreakdown:
     """Main scoring entrypoint for one paper.
 
@@ -247,17 +249,17 @@ def compute_score_breakdown(
         relevance = clamp(0.85 * relevance + 0.15 * aspect_coverage_score)
     intent_centrality = (
         domain_assessment.intent_centrality_score
-        if domain_assessment is not None
+        if domain_assessment is not None and use_intent_centrality
         else None
     )
     required_group_coverage = (
         domain_assessment.required_group_coverage_score
-        if domain_assessment is not None
+        if domain_assessment is not None and use_group_coverage_ranking
         else 0.0
     )
     missing_required_group_count = (
         domain_assessment.missing_required_group_count
-        if domain_assessment is not None
+        if domain_assessment is not None and use_group_coverage_ranking
         else 0
     )
     return compute_final_score(

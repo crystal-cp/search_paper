@@ -140,6 +140,8 @@ class ScreeningDecisionAgent:
                 score,
                 domain_decision,
                 domain=domain,
+                rank=item.rank,
+                support_level=support_level,
             ),
             suggested_action=suggested_action(decision, support_level, item.paper.abstract),
         )
@@ -236,23 +238,117 @@ def reading_priority(
     score: float,
     domain_decision: str,
     domain=None,
+    rank: int | None = None,
+    support_level: str = "",
 ) -> str:
     """Map screening decision to reading priority."""
 
     if decision == "exclude":
         return "exclude"
     if domain and (
-        getattr(domain, "missing_required_group_count", 0)
-        or group_coverage_limits_priority(domain)
+            getattr(domain, "missing_required_group_count", 0)
+            or group_coverage_limits_priority(domain)
     ):
         return "optional"
-    if decision == "include" and score >= 0.7:
+    if decision == "include" and _is_must_read_candidate(
+        score,
+        domain_decision,
+        domain,
+        rank=rank,
+        support_level=support_level,
+    ):
         return "must_read"
     if decision == "include":
         return "read_later"
     if domain_decision == "borderline":
         return "optional"
     return "read_later"
+
+
+def _is_must_read_candidate(
+    score: float,
+    domain_decision: str,
+    domain=None,
+    rank: int | None = None,
+    support_level: str = "",
+) -> bool:
+    """Return True only for first-pass core reading-path papers."""
+
+    if domain_decision != "in_scope":
+        return False
+    if support_level and support_level != "strict_support":
+        return False
+    if rank is not None and rank > 12:
+        return False
+    if score < 0.72:
+        return False
+    if domain is None:
+        return score >= 0.82 and (rank is None or rank <= 10)
+    if getattr(domain, "negative_context_match", None):
+        return False
+    if getattr(domain, "peripheral_context_reason", ""):
+        return False
+    if getattr(domain, "missing_required_group_count", 0):
+        return False
+    if getattr(domain, "required_group_coverage_score", 0.0) < 0.85:
+        return False
+    if getattr(domain, "intent_centrality_score", 0.0) < 0.78:
+        return False
+    if getattr(domain, "topic_focus_score", 0.0) < 0.65:
+        return False
+    if _target_context_required_for_priority(domain) and not getattr(
+        domain,
+        "target_context_match",
+        None,
+    ):
+        return False
+    return True
+
+
+def _target_context_required_for_priority(domain) -> bool:
+    """Return True when a contract context group should gate must-read status."""
+
+    required_matches = getattr(domain, "required_group_matches", {}) or {}
+    if any(
+        "target_chemistry" in str(name).lower()
+        or "target_context" in str(name).lower()
+        for name in required_matches
+    ):
+        return True
+    explanations = [
+        str(item).lower()
+        for item in getattr(domain, "group_coverage_explanation", [])
+    ]
+    return any(
+        "required:target_chemistry" in item
+        or "required:target_context" in item
+        for item in explanations
+    )
+
+
+def summarize_reading_priority_policy(ranked_papers) -> dict[str, object]:
+    """Summarize must-read policy behavior for diagnostics."""
+
+    target_context_required = any(
+        item.domain_assessment is not None
+        and _target_context_required_for_priority(item.domain_assessment)
+        for item in ranked_papers
+    )
+    must_read_count = sum(
+        1
+        for item in ranked_papers
+        if item.screening_decision
+        and item.screening_decision.reading_priority == "must_read"
+    )
+    return {
+        "target_context_required_for_priority": target_context_required,
+        "must_read_policy_reason": (
+            "explicit_target_context_group: must_read requires target_context_match, no negative_context_match, high coverage, high centrality, high topic focus, strict support, and top rank"
+            if target_context_required
+            else "no_explicit_target_context_group: must_read uses in-scope include decision, full group coverage, high centrality, high topic focus, strict support, and top rank without requiring target_context_match"
+        ),
+        "must_read_count": must_read_count,
+    }
 
 
 def group_coverage_limits_priority(domain) -> bool:

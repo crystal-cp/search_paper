@@ -77,6 +77,47 @@ FERROELECTRIC_TERMS = {
     "屏蔽",
 }
 
+LITHIUM_TARGET_MARKERS = {
+    "lithium battery",
+    "lithium-ion battery",
+    "lithium ion battery",
+    "li-ion battery",
+    "lithium metal battery",
+    "lithium metal anode",
+    "锂电池",
+    "锂离子电池",
+    "锂金属电池",
+}
+
+LITHIUM_TARGET_CHEMISTRY_TERMS = [
+    "lithium",
+    "lithium-ion",
+    "Li-ion",
+    "lithium metal",
+    "lithium metal battery",
+    "lithium metal anode",
+    "lithium battery",
+    "lithium-ion battery",
+    "graphite anode",
+    "silicon anode",
+]
+
+NON_TARGET_BATTERY_CHEMISTRY_TERMS = [
+    "sodium",
+    "sodium-ion",
+    "Na-ion",
+    "potassium",
+    "potassium-ion",
+    "K-ion",
+    "zinc",
+    "zinc-ion",
+    "Zn",
+    "AZIB",
+    "magnesium",
+    "aqueous zinc-ion",
+    "beyond lithium-ion",
+]
+
 
 class SearchContractAgent:
     """Build a domain-aware SearchContract before query planning."""
@@ -204,6 +245,16 @@ class SearchContractAgent:
                 *_specific_criteria(search_brief.exclusion_criteria),
             ],
             16,
+        )
+        constraint_groups = _unique_constraint_groups(
+            [
+                *constraint_groups,
+                *_lithium_target_chemistry_groups(
+                    question,
+                    search_brief,
+                    expert_intent,
+                ),
+            ]
         )
         return SearchContract(
             original_question=search_brief.original_question or question,
@@ -764,6 +815,54 @@ def _constraint_groups_from_generic_frame(
             )
         )
     return groups
+
+
+def _lithium_target_chemistry_groups(
+    question: str,
+    search_brief: SearchBrief,
+    expert_intent: ExpertResearchIntent | None,
+) -> list[SearchConstraintGroup]:
+    """Create explicit chemistry context guardrails for lithium SEI questions."""
+
+    text_parts = [
+        question,
+        search_brief.refined_question,
+        " ".join(search_brief.inclusion_criteria),
+        " ".join(search_brief.required_aspects),
+    ]
+    if expert_intent is not None:
+        text_parts.extend(
+            [
+                expert_intent.expert_rewritten_question,
+                " ".join(concept.term for concept in expert_intent.structured_concepts),
+            ]
+        )
+    normalized = " ".join(str(part or "").lower() for part in text_parts)
+    has_lithium_target = any(marker.lower() in normalized for marker in LITHIUM_TARGET_MARKERS)
+    has_sei = (
+        " sei" in f" {normalized}"
+        or "solid electrolyte interphase" in normalized
+        or "solid-electrolyte interphase" in normalized
+        or "界面" in normalized
+    )
+    if not (has_lithium_target and has_sei):
+        return []
+    return [
+        SearchConstraintGroup(
+            group_name="target_chemistry_group",
+            operator="OR",
+            terms=LITHIUM_TARGET_CHEMISTRY_TERMS,
+            source="search_contract_lithium_target_chemistry",
+            required=True,
+        ),
+        SearchConstraintGroup(
+            group_name="negative_context_group",
+            operator="OR",
+            terms=NON_TARGET_BATTERY_CHEMISTRY_TERMS,
+            source="search_contract_lithium_target_chemistry",
+            required=False,
+        ),
+    ]
 
 
 def _semantic_required_core_groups(

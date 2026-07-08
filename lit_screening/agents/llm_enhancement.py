@@ -682,7 +682,7 @@ def verified_report_input(
     retrieval_summary = report_retrieval_summary(provider_status, len(ranked_papers))
     task_profile = report_task_profile(search_contract, ranked_papers)
     rows = []
-    for item in ranked_papers[:12]:
+    for item in report_recommendable_papers(ranked_papers)[:12]:
         role = roles_by_id.get(item.paper.paper_id)
         assessment = item.domain_assessment
         decision = item.screening_decision
@@ -735,6 +735,40 @@ def verified_report_input(
         "suggested_next_searches": suggested_next_searches or [],
         "task_profile": task_profile,
     }
+
+
+def report_recommendable_papers(ranked_papers: list[RankedPaper]) -> list[RankedPaper]:
+    """Return papers safe to show in the novice-facing read-first table."""
+
+    candidates = [
+        item
+        for item in ranked_papers
+        if _is_user_report_recommendable(item)
+    ]
+    return sorted(candidates, key=_report_priority_key)
+
+
+def _is_user_report_recommendable(item: RankedPaper) -> bool:
+    decision = item.screening_decision
+    domain = item.domain_assessment
+    if decision is None:
+        return False
+    if decision.decision == "exclude" or decision.reading_priority == "exclude":
+        return False
+    if domain and domain.domain_decision == "out_of_scope":
+        return False
+    return True
+
+
+def _report_priority_key(item: RankedPaper) -> tuple[int, int]:
+    decision = item.screening_decision
+    priority = decision.reading_priority if decision else ""
+    priority_order = {
+        "must_read": 0,
+        "read_later": 1,
+        "optional": 2,
+    }
+    return (priority_order.get(priority, 3), item.rank)
 
 
 def render_user_report_markdown(artifact_input: dict[str, Any]) -> str:

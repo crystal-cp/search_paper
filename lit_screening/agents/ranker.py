@@ -33,6 +33,8 @@ class RankerAgent:
         ranking_profile: str = "balanced",
         aspect_coverage_records: list[AspectCoverageRecord] | None = None,
         domain_assessments: list[DomainAssessment] | None = None,
+        use_intent_centrality: bool = True,
+        use_group_coverage_ranking: bool = True,
     ) -> list[RankedPaper]:
         """Return papers sorted by final score."""
 
@@ -66,6 +68,8 @@ class RankerAgent:
                     AspectCoverageRecord(paper.paper_id, paper.title),
                 ).aspect_coverage_score,
                 domain_assessment=domain_assessment,
+                use_intent_centrality=use_intent_centrality,
+                use_group_coverage_ranking=use_group_coverage_ranking,
             )
             scores = seed_score_floor(paper, scores)
             preliminary.append(
@@ -102,6 +106,8 @@ class RankerAgent:
                     AspectCoverageRecord(item.paper.paper_id, item.paper.title),
                 ).aspect_coverage_score,
                 domain_assessment=item.domain_assessment,
+                use_intent_centrality=use_intent_centrality,
+                use_group_coverage_ranking=use_group_coverage_ranking,
             )
             scores = seed_score_floor(item.paper, scores)
             reranked.append(replace(item, scores=scores))

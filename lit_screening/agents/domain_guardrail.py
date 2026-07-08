@@ -502,6 +502,8 @@ def _optional_term_groups(contract: SearchContract | None) -> list[tuple[str, li
     for group in contract.constraint_groups:
         if group.required or not group.terms:
             continue
+        if group.group_name == "negative_context_group":
+            continue
         cleaned = _unique([str(item) for item in group.terms], limit=12)
         if cleaned:
             groups.append((group.group_name, _expand_group_terms(group.group_name, cleaned)))
@@ -638,6 +640,17 @@ def _lithium_context_drift(
     if not lithium_required:
         return []
     markers = [
+        "sodium",
+        "potassium",
+        "zinc",
+        "zn",
+        "azib",
+        "azibs",
+        "magnesium",
+        "beyond lithium-ion",
+        "beyond lithium ion",
+        "aqueous zinc-ion",
+        "aqueous zinc ion",
         "sodium-ion battery",
         "sodium ion battery",
         "potassium-ion battery",
@@ -665,7 +678,7 @@ def _lithium_context_drift(
         [
             marker
             for marker in markers
-            if _strict_context_marker_matches(marker, text)
+            if _chemistry_context_marker_matches(marker, text)
         ]
     )
     if negative_context_match:
@@ -690,17 +703,22 @@ def _target_context_signals(
     if not lithium_required:
         return [], [], 1.0
     target_terms = [
+        *_contract_group_terms(contract, "target_chemistry_group"),
         "lithium-ion battery",
         "lithium ion battery",
         "li-ion battery",
         "li ion battery",
         "lithium battery",
+        "lithium",
         "lithium metal",
         "lithium-metal",
+        "lithium metal battery",
+        "lithium metal anode",
         "graphite anode",
         "silicon anode",
     ]
     negative_terms = [
+        *_contract_group_terms(contract, "negative_context_group"),
         "beyond lithium-ion",
         "beyond lithium ion",
         "aqueous zinc-ion",
@@ -731,7 +749,7 @@ def _target_context_signals(
     ]
     target = _unique([term for term in target_terms if concept_matches(term, text)])
     negative = _unique(
-        [term for term in negative_terms if _strict_context_marker_matches(term, text)]
+        [term for term in negative_terms if _chemistry_context_marker_matches(term, text)]
     )
     if re.search(r"\bbeyond\s+li\s*-?\s*ion\b", text):
         negative.append("beyond li-ion")
@@ -752,6 +770,29 @@ def _strict_context_marker_matches(marker: str, text: str) -> bool:
         if variant in text and not _all_occurrences_negated(variant, text):
             return True
     return False
+
+
+def _chemistry_context_marker_matches(marker: str, text: str) -> bool:
+    cleaned = normalize_domain_text(marker)
+    if not cleaned:
+        return False
+    if cleaned in {"zn", "na", "k", "mg"}:
+        return re.search(rf"(?<![a-z0-9]){re.escape(cleaned)}(?![a-z0-9])", text) is not None
+    if cleaned in {"sodium", "potassium", "zinc", "magnesium", "azib", "azibs"}:
+        return concept_matches(cleaned, text)
+    return _strict_context_marker_matches(cleaned, text)
+
+
+def _contract_group_terms(contract: SearchContract, group_name: str) -> list[str]:
+    return _unique(
+        [
+            term
+            for group in contract.constraint_groups
+            if group.group_name == group_name
+            for term in group.terms
+        ],
+        limit=24,
+    )
 
 
 def _topic_focus_score(

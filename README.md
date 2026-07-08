@@ -1,8 +1,24 @@
-# Human-in-the-loop Multi-agent LLM System for Scientific Literature Screening
+# Human-centric Multi-agent LLM System for Evidence-grounded Scientific Literature Screening
 
 [中文说明](README.zh-CN.md)
 
-This repository is a lightweight, reproducible research prototype for evidence-grounded scientific literature screening. It is intentionally simple: the Streamlit UI is a thin wrapper around the core pipeline, with no PDF parsing, no vector database, and no mandatory LLM key.
+This repository is a lightweight, reproducible research prototype for
+human-centric, evidence-grounded scientific literature screening under imperfect
+research intent. It studies how a multi-agent AI system can turn incomplete,
+ambiguous, multilingual, or partially incorrect novice research questions into
+auditable screening decisions, ranked papers, evidence spans, reading roles, and
+next-search suggestions.
+
+The project is not a generic keyword-search wrapper, a paper summarizer, or a
+commercial literature-management product. Its research focus is novice intent
+repair, provider-aware query planning, abstract-grounded evidence validation,
+domain guardrails, role-aware ranking, human feedback, and transparent reporting.
+LLM-enhanced behavior is optional; the rule-based core must continue to run
+without an LLM key.
+
+For the detailed research framing and current system design, see
+[`docs/research_problem.md`](docs/research_problem.md) and
+[`docs/system_architecture.md`](docs/system_architecture.md).
 
 The MVP pipeline:
 

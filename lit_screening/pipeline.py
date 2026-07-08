@@ -34,7 +34,11 @@ from .agents.ranker import RankerAgent
 from .agents.research_intent import ResearchIntentAgent
 from .agents.retriever import RetrieverAgent
 from .agents.search_contract import SearchContractAgent
-from .agents.screening_decision import ScreeningDecisionAgent, summarize_screening_decisions
+from .agents.screening_decision import (
+    ScreeningDecisionAgent,
+    summarize_reading_priority_policy,
+    summarize_screening_decisions,
+)
 from .agents.seed_extraction import SeedExtractionAgent
 from .agents.snowball import (
     CitationSnowballAgent,
@@ -864,6 +868,9 @@ def apply_feedback_to_pipeline_result(
     metrics["screening_decisions"] = summarize_screening_decisions(
         screening_decisions
     )
+    reading_priority_policy = summarize_reading_priority_policy(ranked_after_feedback)
+    metrics.update(reading_priority_policy)
+    metrics["reading_priority_policy"] = reading_priority_policy
     metrics["paper_roles"] = summarize_paper_roles(result.paper_role_records)
     metrics["preference_learning"] = preference_learning_metrics(preference_learning)
     result_groups = group_ranked_papers(
@@ -932,11 +939,13 @@ def apply_feedback_to_pipeline_result(
         ranked_after_feedback,
         result.aspect_coverage_records,
     )
-    generate_reading_path(
+    reading_path_diagnostics = generate_reading_path(
         output_dir / "reading_path.md",
         ranked_after_feedback,
         result_groups,
     )
+    metrics.update(reading_path_diagnostics)
+    metrics["reading_path_diagnostics"] = reading_path_diagnostics
     decision_artifacts = write_decision_artifacts(
         output_dir,
         ranked_after_feedback,
@@ -2359,6 +2368,79 @@ def build_auto_query_repair_suggestions(
     }
 
 
+def flattened_provider_queries(queries_by_provider: dict[str, list[str]]) -> list[str]:
+    """Return stable unique query strings from provider query mapping."""
+
+    return _unique_strings(
+        [
+            query
+            for provider_queries in queries_by_provider.values()
+            for query in provider_queries
+        ]
+    )
+
+
+def build_query_repair_stage_status(
+    *,
+    repair_enabled: bool,
+    disabled_by_ablation: bool,
+    raw_candidate_queries_by_provider: dict[str, list[str]],
+    final_queries_by_provider: dict[str, list[str]],
+    query_provenance: dict[str, Any],
+    query_repair_suggestions: dict[str, Any],
+) -> dict[str, Any]:
+    """Summarize whether query repair changed final provider queries."""
+
+    raw_flat = flattened_provider_queries(raw_candidate_queries_by_provider)
+    final_flat = flattened_provider_queries(final_queries_by_provider)
+    raw_set = set(raw_flat)
+    final_set = set(final_flat)
+    added_queries = [
+        str(query)
+        for query in query_repair_suggestions.get("added_queries", []) or []
+        if str(query).strip()
+    ]
+    dropped_queries = query_provenance.get("dropped_queries", []) or []
+    removed_queries = [
+        str(query)
+        for query in query_repair_suggestions.get("removed_queries", []) or []
+        if str(query).strip()
+    ]
+    action_changes = [
+        action
+        for action in query_repair_suggestions.get("query_actions", []) or []
+        if isinstance(action, dict)
+        and str(action.get("action") or "").strip().lower() not in {"", "keep"}
+    ]
+    repaired_query_count = len(_unique_strings([*removed_queries, *added_queries]))
+    if not repaired_query_count:
+        repaired_query_count = len(action_changes)
+
+    reason = ""
+    if raw_set == final_set:
+        if disabled_by_ablation:
+            reason = "repair stage disabled but upstream sanitizer still applied"
+        elif not query_repair_suggestions.get("trigger_reasons"):
+            reason = "no repair issues detected"
+        elif query_provenance.get("applied"):
+            reason = "query family templates already generated clean queries"
+        else:
+            reason = "ablation partially_supported"
+    return {
+        "repair_enabled": repair_enabled,
+        "repair_applied": bool(query_repair_suggestions.get("applied")),
+        "disabled_by_ablation": disabled_by_ablation,
+        "raw_candidate_query_count": len(raw_flat),
+        "final_query_count": len(final_flat),
+        "dropped_query_count": len(dropped_queries),
+        "repaired_query_count": repaired_query_count,
+        "added_query_count": len(added_queries),
+        "reason_if_no_difference": reason,
+        "raw_only_queries": sorted(raw_set - final_set),
+        "final_only_queries": sorted(final_set - raw_set),
+    }
+
+
 def sync_query_critic_with_repair(
     critic: dict[str, Any],
     repair: dict[str, Any],
@@ -2875,6 +2957,141 @@ def summarize_paper_roles(records: list[PaperRoleRecord]) -> dict[str, Any]:
         "primary_role_counts": primary_role_counts,
         "role_counts": role_counts,
     }
+
+
+ABLATION_MODULES = {
+    "query_family": "QueryFamily retrieval expansion",
+    "query_repair": "Query repair suggestions and auto-repair",
+    "domain_guardrail": "Domain guardrail scoring and demotion",
+    "intent_repair": "Novice intent repair",
+    "intent_centrality": "Intent centrality score blending",
+    "group_coverage_ranking": "Required-group coverage ranking and priority limits",
+}
+
+
+def build_ablation_config(
+    *,
+    ablation_config_name: str,
+    cli_flags_used: list[str] | None = None,
+    legacy_query_planning: bool = False,
+    use_query_families: bool = True,
+    intent_repair: bool = True,
+    disable_query_repair: bool = False,
+    disable_domain_guardrail: bool = False,
+    disable_intent_centrality: bool = False,
+    disable_group_coverage_ranking: bool = False,
+) -> dict[str, Any]:
+    """Return a lightweight record of pilot ablation switches."""
+
+    disabled: list[str] = []
+    support: dict[str, str] = {}
+    if legacy_query_planning:
+        disabled.extend(["intent_repair", "query_family"])
+        support["legacy_query_planning"] = "supported"
+    if not use_query_families and "query_family" not in disabled:
+        disabled.append("query_family")
+        support["query_family"] = "supported"
+    if not intent_repair and "intent_repair" not in disabled:
+        disabled.append("intent_repair")
+        support["intent_repair"] = "supported"
+    if disable_query_repair:
+        disabled.append("query_repair")
+        support["query_repair"] = "supported"
+    if disable_domain_guardrail:
+        disabled.append("domain_guardrail")
+        support["domain_guardrail"] = "supported"
+    if disable_intent_centrality:
+        disabled.append("intent_centrality")
+        support["intent_centrality"] = "supported"
+    if disable_group_coverage_ranking:
+        disabled.append("group_coverage_ranking")
+        support["group_coverage_ranking"] = "partially_supported"
+
+    disabled = _unique_strings(disabled)
+    enabled = [
+        module for module in ABLATION_MODULES if module not in set(disabled)
+    ]
+    return {
+        "ablation_config_name": ablation_config_name or "custom_debug",
+        "disabled_modules": disabled,
+        "enabled_modules": enabled,
+        "cli_flags_used": cli_flags_used or [],
+        "support_status": support,
+        "notes": [
+            "Pilot ablation switches are for debug/evaluation only and do not change default behavior.",
+            "group_coverage_ranking is partially supported because group coverage also affects upstream domain assessment.",
+        ],
+    }
+
+
+def neutral_domain_assessments_for_ablation(
+    papers: list[Paper],
+) -> list[DomainAssessment]:
+    """Return pass-through domain assessments for no_domain_guardrail runs."""
+
+    return [
+        DomainAssessment(
+            paper_id=paper.paper_id,
+            domain_match_score=1.0,
+            domain_decision="in_scope",
+            off_topic_reason="domain_guardrail_disabled_for_ablation",
+            positive_domain_matches=["ablation_pass_through"],
+            negative_domain_matches=[],
+            missing_required_concepts=[],
+            forbidden_concepts_found=[],
+            required_group_matches={},
+            optional_group_matches={},
+            intent_centrality_score=1.0,
+            required_group_coverage_score=1.0,
+            missing_required_group_count=0,
+            group_coverage_explanation=["domain_guardrail_disabled_for_ablation"],
+            matched_groups=["ablation_pass_through"],
+            missing_groups=[],
+            target_context_match=[],
+            negative_context_match=[],
+            topic_focus_score=1.0,
+            aspect_match_score=1.0,
+            target_context_score=1.0,
+            negative_context_penalty=0.0,
+            peripheral_context_reason="",
+        )
+        for paper in papers
+    ]
+
+
+def neutralize_group_coverage_for_ablation(
+    assessments: list[DomainAssessment],
+) -> list[DomainAssessment]:
+    """Remove required-group ranking limits while preserving hard negatives."""
+
+    neutralized: list[DomainAssessment] = []
+    for assessment in assessments:
+        required_matches = {
+            key: True for key in assessment.required_group_matches
+        }
+        decision = assessment.domain_decision
+        score = assessment.domain_match_score
+        reason = assessment.off_topic_reason
+        if decision == "out_of_scope" and not assessment.forbidden_concepts_found:
+            decision = "borderline" if assessment.negative_domain_matches else "in_scope"
+            score = max(score, 0.55 if assessment.negative_domain_matches else 0.72)
+            reason = "group_coverage_ranking_disabled_for_ablation"
+        neutralized.append(
+            replace(
+                assessment,
+                domain_match_score=score,
+                domain_decision=decision,
+                off_topic_reason=reason,
+                required_group_matches=required_matches,
+                required_group_coverage_score=1.0,
+                missing_required_group_count=0,
+                group_coverage_explanation=[
+                    "group_coverage_ranking_disabled_for_ablation"
+                ],
+                missing_groups=[],
+            )
+        )
+    return neutralized
 
 
 def apply_research_engine_ranking_adjustments(
@@ -3419,6 +3636,12 @@ def run_pipeline(
     intent_repair: bool = True,
     legacy_query_planning: bool = False,
     query_family_provider_cap: int = 18,
+    disable_query_repair: bool = False,
+    disable_domain_guardrail: bool = False,
+    disable_intent_centrality: bool = False,
+    disable_group_coverage_ranking: bool = False,
+    ablation_config_name: str = "",
+    ablation_cli_flags: list[str] | None = None,
     llm_client: GenericLLMClient | None = None,
     retriever_agent: RetrieverAgent | None = None,
     snowball_agent: CitationSnowballAgent | None = None,
@@ -3436,6 +3659,20 @@ def run_pipeline(
     )
     if legacy_query_planning:
         effective_use_query_families = False
+    ablation_config = build_ablation_config(
+        ablation_config_name=ablation_config_name,
+        cli_flags_used=ablation_cli_flags,
+        legacy_query_planning=legacy_query_planning,
+        use_query_families=effective_use_query_families,
+        intent_repair=effective_intent_repair,
+        disable_query_repair=disable_query_repair,
+        disable_domain_guardrail=disable_domain_guardrail,
+        disable_intent_centrality=disable_intent_centrality,
+        disable_group_coverage_ranking=disable_group_coverage_ranking,
+    )
+    ablation_requested = bool(ablation_config_name or ablation_config["disabled_modules"])
+    if ablation_requested:
+        write_json(out / "ablation_config.json", ablation_config)
     run_logger = ScreeningRunLogger(out)
     external_progress_callback = progress_callback
 
@@ -3471,6 +3708,12 @@ def run_pipeline(
             "legacy_query_planning": legacy_query_planning,
             "use_query_families": effective_use_query_families,
             "query_family_provider_cap": query_family_provider_cap,
+            "ablation_config_name": ablation_config["ablation_config_name"]
+            if ablation_requested
+            else "",
+            "disabled_modules": ablation_config["disabled_modules"]
+            if ablation_requested
+            else [],
         },
     )
 
@@ -3770,7 +4013,7 @@ def run_pipeline(
         )
         query_pilot_diagnostics = pilot_workflow["diagnostics"]
         query_repair_suggestions = pilot_workflow["repair_suggestions"]
-        if auto_repair_queries:
+        if auto_repair_queries and not disable_query_repair:
             repaired_plan = query_repair_suggestions.get("repaired_query_plan")
             if isinstance(repaired_plan, QueryPlan):
                 query_plan = repaired_plan
@@ -3803,6 +4046,7 @@ def run_pipeline(
                         query_repair_suggestions.get("suggestions", [])
                     ),
                     "auto_repair_applied": auto_repair_queries,
+                    "query_repair_disabled": disable_query_repair,
                 },
             )
     elif skip_pilot_search:
@@ -3816,15 +4060,30 @@ def run_pipeline(
         search_contract=search_contract,
         concept_map=concept_map,
     )
-    auto_query_repair = build_auto_query_repair_suggestions(
-        query_plan=query_plan,
-        query_provenance=query_provenance,
-    )
-    if (
-        auto_query_repair.get("trigger_reasons")
-        and not query_repair_suggestions.get("enabled")
-    ):
-        query_repair_suggestions = auto_query_repair
+    raw_candidate_queries_before_repair = {
+        provider: list(queries_by_provider.get(provider, []))
+        for provider in providers
+    }
+    if disable_query_repair:
+        query_repair_suggestions = {
+            "enabled": False,
+            "applied": False,
+            "disabled_by_ablation": True,
+            "reason": "query_repair_disabled_for_ablation",
+            "suggestions": [],
+            "repaired_query_plan": None,
+            "trigger_reasons": [],
+        }
+    else:
+        auto_query_repair = build_auto_query_repair_suggestions(
+            query_plan=query_plan,
+            query_provenance=query_provenance,
+        )
+        if (
+            auto_query_repair.get("trigger_reasons")
+            and not query_repair_suggestions.get("enabled")
+        ):
+            query_repair_suggestions = auto_query_repair
     query_plan.openalex_queries = list(query_provenance.get("final_openalex_queries", []))
     query_plan.semantic_scholar_queries = list(
         query_provenance.get("final_semantic_scholar_queries", [])
@@ -3837,6 +4096,18 @@ def run_pipeline(
         ]
     )
     query_plan.query_families_applied = bool(query_provenance.get("applied"))
+    final_queries_after_repair = {
+        provider: list(queries_by_provider.get(provider, []))
+        for provider in providers
+    }
+    query_repair_stage_status = build_query_repair_stage_status(
+        repair_enabled=not disable_query_repair,
+        disabled_by_ablation=disable_query_repair,
+        raw_candidate_queries_by_provider=raw_candidate_queries_before_repair,
+        final_queries_by_provider=final_queries_after_repair,
+        query_provenance=query_provenance,
+        query_repair_suggestions=query_repair_suggestions,
+    )
     query_plan_payload["query_plan"] = query_plan
     query_plan_payload["queries"] = queries
     query_plan_payload["queries_by_provider"] = {
@@ -3900,6 +4171,21 @@ def run_pipeline(
     write_json(out / "query_provenance.json", query_provenance)
     write_json(out / "query_pilot_diagnostics.json", query_pilot_diagnostics)
     write_json(out / "query_repair_suggestions.json", query_repair_suggestions)
+    write_json(
+        out / "raw_candidate_queries_before_repair.json",
+        {
+            "queries_by_provider": raw_candidate_queries_before_repair,
+            "queries": flattened_provider_queries(raw_candidate_queries_before_repair),
+        },
+    )
+    write_json(
+        out / "final_queries_after_repair.json",
+        {
+            "queries_by_provider": final_queries_after_repair,
+            "queries": flattened_provider_queries(final_queries_after_repair),
+        },
+    )
+    write_json(out / "query_repair_stage_status.json", query_repair_stage_status)
     if progress_callback:
         progress_callback(
             "planning",
@@ -4149,19 +4435,27 @@ def run_pipeline(
     if progress_callback:
         progress_callback(
             "domain_guardrail",
-            "Assessing paper domain fit against the Search Contract",
+            "Bypassing domain guardrail for ablation"
+            if disable_domain_guardrail
+            else "Assessing paper domain fit against the Search Contract",
             {
                 "paper_count": len(merged_papers),
                 "domain": search_contract.domain_profile.domain_name
                 if search_contract
                 else "",
+                "disabled_by_ablation": disable_domain_guardrail,
             },
         )
-    domain_assessments = domain_guardrail.assess_many(
-        merged_papers,
-        search_contract,
-        query_plan=query_plan,
-    )
+    if disable_domain_guardrail:
+        domain_assessments = neutral_domain_assessments_for_ablation(merged_papers)
+    else:
+        domain_assessments = domain_guardrail.assess_many(
+            merged_papers,
+            search_contract,
+            query_plan=query_plan,
+        )
+    if disable_group_coverage_ranking:
+        domain_assessments = neutralize_group_coverage_for_ablation(domain_assessments)
     if progress_callback:
         domain_counts: dict[str, int] = {}
         for assessment in domain_assessments:
@@ -4191,6 +4485,8 @@ def run_pipeline(
         ranking_profile=ranking_profile,
         aspect_coverage_records=aspect_coverage_records,
         domain_assessments=domain_assessments,
+        use_intent_centrality=not disable_intent_centrality,
+        use_group_coverage_ranking=not disable_group_coverage_ranking,
     )
     if progress_callback:
         progress_callback(
@@ -4280,11 +4576,18 @@ def run_pipeline(
                 evidence_records,
                 required_aspects,
             )
-            domain_assessments = domain_guardrail.assess_many(
-                merged_papers,
-                search_contract,
-                query_plan=query_plan,
-            )
+            if disable_domain_guardrail:
+                domain_assessments = neutral_domain_assessments_for_ablation(merged_papers)
+            else:
+                domain_assessments = domain_guardrail.assess_many(
+                    merged_papers,
+                    search_contract,
+                    query_plan=query_plan,
+                )
+            if disable_group_coverage_ranking:
+                domain_assessments = neutralize_group_coverage_for_ablation(
+                    domain_assessments
+                )
             ranked_before_feedback = ranker.rank(
                 merged_papers,
                 evidence_records,
@@ -4295,6 +4598,8 @@ def run_pipeline(
                 ranking_profile=ranking_profile,
                 aspect_coverage_records=aspect_coverage_records,
                 domain_assessments=domain_assessments,
+                use_intent_centrality=not disable_intent_centrality,
+                use_group_coverage_ranking=not disable_group_coverage_ranking,
             )
         if progress_callback:
             progress_callback(
@@ -4543,6 +4848,7 @@ def run_pipeline(
         "enabled": bool(query_repair_suggestions.get("enabled")),
         "applied": bool(query_repair_suggestions.get("applied")),
         "suggestion_count": len(query_repair_suggestions.get("suggestions", [])),
+        "stage_status": query_repair_stage_status,
     }
     metrics["seed_paper_expansion"] = {
         "enabled": enable_snowballing,
@@ -4574,6 +4880,9 @@ def run_pipeline(
     metrics["screening_decisions"] = summarize_screening_decisions(
         screening_decisions
     )
+    reading_priority_policy = summarize_reading_priority_policy(ranked_final)
+    metrics.update(reading_priority_policy)
+    metrics["reading_priority_policy"] = reading_priority_policy
     metrics["paper_roles"] = paper_role_summary
     metrics["ranking_diagnostics"] = ranking_diagnostics
     metrics["research_tensions"] = research_tension_summary
@@ -4587,7 +4896,13 @@ def run_pipeline(
         "legacy_query_planning": legacy_query_planning,
         "use_query_families": effective_use_query_families,
         "query_family_provider_cap": query_family_provider_cap,
+        "disable_query_repair": disable_query_repair,
+        "disable_domain_guardrail": disable_domain_guardrail,
+        "disable_intent_centrality": disable_intent_centrality,
+        "disable_group_coverage_ranking": disable_group_coverage_ranking,
     }
+    if ablation_requested:
+        metrics["ablation_config"] = ablation_config
     metrics["search_intent"] = search_brief.search_intent
     metrics["average_aspect_coverage"] = (
         sum(record.aspect_coverage_score for record in aspect_coverage_records)
@@ -4640,6 +4955,8 @@ def run_pipeline(
         year_filter_stats=year_filter_stats,
         import_diagnostics=import_result.diagnostics(),
     )
+    if ablation_requested:
+        trace["ablation_config"] = ablation_config
     trace["concept_mapper"] = {
         **research_lens_trace.get("concept_mapper", {}),
         "domain": research_lens_trace.get("domain", ""),
@@ -4770,6 +5087,7 @@ def run_pipeline(
     trace["query_repair"] = {
         **query_repair_suggestions,
         "trigger_reasons": query_repair_suggestions.get("trigger_reasons", []),
+        "stage_status": query_repair_stage_status,
     }
     trace["llm_intent_enhancement"] = {
         "artifact": "llm_intent_enhancement.json",
@@ -4833,11 +5151,13 @@ def run_pipeline(
         ranked_final,
         aspect_coverage_records,
     )
-    generate_reading_path(
+    reading_path_diagnostics = generate_reading_path(
         out / "reading_path.md",
         ranked_final,
         result_groups,
     )
+    metrics.update(reading_path_diagnostics)
+    metrics["reading_path_diagnostics"] = reading_path_diagnostics
     decision_artifacts = write_decision_artifacts(
         out,
         ranked_final,
@@ -5164,6 +5484,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable novice-aware research intent repair.",
     )
     run.add_argument(
+        "--disable-query-repair",
+        action="store_true",
+        help="Debug/evaluation only: disable query-repair suggestions and auto-repair.",
+    )
+    run.add_argument(
+        "--disable-domain-guardrail",
+        action="store_true",
+        help="Debug/evaluation only: bypass domain guardrail demotion.",
+    )
+    run.add_argument(
+        "--disable-intent-centrality",
+        action="store_true",
+        help="Debug/evaluation only: remove intent-centrality blending from ranking.",
+    )
+    run.add_argument(
+        "--disable-group-coverage-ranking",
+        action="store_true",
+        help="Debug/evaluation only: neutralize required-group coverage ranking limits.",
+    )
+    run.add_argument(
+        "--ablation-config-name",
+        default="",
+        help="Optional pilot ablation config name to record in ablation_config.json.",
+    )
+    run.add_argument(
         "--query-family-provider-cap",
         type=int,
         default=18,
@@ -5190,6 +5535,21 @@ def main(argv: list[str] | None = None) -> int:
             key: value for key, value in weight_values.items() if value is not None
         } or None
         try:
+            ablation_flags_used = []
+            if args.use_query_families is False:
+                ablation_flags_used.append("--skip-query-families")
+            if args.legacy_query_planning:
+                ablation_flags_used.append("--legacy-query-planning")
+            if not args.intent_repair:
+                ablation_flags_used.append("--disable-intent-repair")
+            if args.disable_query_repair:
+                ablation_flags_used.append("--disable-query-repair")
+            if args.disable_domain_guardrail:
+                ablation_flags_used.append("--disable-domain-guardrail")
+            if args.disable_intent_centrality:
+                ablation_flags_used.append("--disable-intent-centrality")
+            if args.disable_group_coverage_ranking:
+                ablation_flags_used.append("--disable-group-coverage-ranking")
             result = run_pipeline(
                 question=args.question,
                 providers=args.providers,
@@ -5222,6 +5582,12 @@ def main(argv: list[str] | None = None) -> int:
                 intent_repair=args.intent_repair,
                 legacy_query_planning=args.legacy_query_planning,
                 query_family_provider_cap=args.query_family_provider_cap,
+                disable_query_repair=args.disable_query_repair,
+                disable_domain_guardrail=args.disable_domain_guardrail,
+                disable_intent_centrality=args.disable_intent_centrality,
+                disable_group_coverage_ranking=args.disable_group_coverage_ranking,
+                ablation_config_name=args.ablation_config_name,
+                ablation_cli_flags=ablation_flags_used,
             )
         except Exception as exc:
             ScreeningRunLogger(args.output_dir).log_exception(

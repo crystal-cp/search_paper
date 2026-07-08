@@ -994,6 +994,7 @@ def _repair_ai_literature_screening(question: str) -> ExpertResearchIntent:
 
 def _fallback_repair(question: str) -> ExpertResearchIntent:
     concepts = _downweighted_concepts(question)
+    concepts.extend(_sei_lithium_normalized_concepts(question))
     frame = build_generic_intent_frame(question)
     for term in frame.research_object:
         concepts.append(
@@ -1097,6 +1098,121 @@ def _fallback_repair(question: str) -> ExpertResearchIntent:
         ],
         confidence=0.55,
     )
+
+
+def _sei_lithium_normalized_concepts(question: str) -> list[IntentConcept]:
+    """Normalize explicit Chinese lithium/SEI wording without changing query generation."""
+
+    lowered = question.lower()
+    concepts: list[IntentConcept] = []
+    has_sei = _has_any(
+        lowered,
+        ["sei", "solid electrolyte interphase", "solid-electrolyte interphase"],
+    )
+    has_chinese_sei = "界面" in question or "固态电解质界面" in question
+    if has_sei or has_chinese_sei:
+        concepts.append(
+            _concept(
+                "solid electrolyte interphase",
+                "object",
+                "user_text",
+                0.94,
+                "User explicitly mentions SEI or an electrolyte interphase/interface.",
+                "must",
+                True,
+            )
+        )
+    if "锂电池" in question or _has_any(lowered, ["lithium battery", "lithium-ion battery", "li-ion battery"]):
+        concepts.extend(
+            [
+                _concept(
+                    "lithium battery",
+                    "material",
+                    "user_text",
+                    0.93,
+                    "Chinese 锂电池 maps to lithium battery context.",
+                    "must",
+                    True,
+                ),
+                _concept(
+                    "lithium-ion battery",
+                    "material",
+                    "user_text",
+                    0.88,
+                    "Lithium battery wording activates lithium-ion battery context for SEI screening.",
+                    "must",
+                    True,
+                ),
+            ]
+        )
+    if "锂金属电池" in question or _has_any(lowered, ["lithium metal battery", "lithium metal anode", "li metal"]):
+        concepts.extend(
+            [
+                _concept(
+                    "lithium metal battery",
+                    "material",
+                    "user_text",
+                    0.95,
+                    "Chinese 锂金属电池 maps to lithium metal battery context.",
+                    "must",
+                    True,
+                ),
+                _concept(
+                    "lithium metal anode",
+                    "material",
+                    "user_text",
+                    0.92,
+                    "Lithium metal battery wording implies lithium metal anode context.",
+                    "must",
+                    True,
+                ),
+            ]
+        )
+    if "人工 sei" in lowered or "人工sei" in lowered or _has_any(lowered, ["artificial sei", "engineered sei", "artificial solid electrolyte interphase"]):
+        concepts.extend(
+            [
+                _concept(
+                    "artificial SEI",
+                    "method",
+                    "user_text",
+                    0.94,
+                    "Chinese 人工 SEI maps to artificial SEI.",
+                    "must",
+                    True,
+                ),
+                _concept(
+                    "engineered SEI",
+                    "method",
+                    "user_text",
+                    0.86,
+                    "Artificial SEI wording activates engineered SEI terminology.",
+                    "optional",
+                    True,
+                ),
+                _concept(
+                    "artificial solid electrolyte interphase",
+                    "method",
+                    "user_text",
+                    0.86,
+                    "Artificial SEI wording expands to the full technical phrase.",
+                    "optional",
+                    True,
+                ),
+            ]
+        )
+    if "枝晶" in question or _has_any(lowered, ["dendrite", "lithium dendrite"]):
+        concepts.append(
+            _concept(
+                "lithium dendrite",
+                "mechanism",
+                "user_text",
+                0.88,
+                "Chinese 枝晶 in a lithium battery SEI question maps to lithium dendrite mechanisms.",
+                "optional",
+                True,
+            )
+        )
+    return concepts
 
 
 def _intent_from_concepts(

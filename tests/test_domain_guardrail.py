@@ -2,9 +2,10 @@ import pytest
 
 from lit_screening.agents.ambiguity_detector import AmbiguityDetectorAgent
 from lit_screening.agents.domain_guardrail import DomainGuardrailAgent
+from lit_screening.agents.intent_repair import NoviceIntentInterpreter
 from lit_screening.agents.ranker import RankerAgent
 from lit_screening.agents.research_intent import ResearchIntentAgent
-from lit_screening.agents.screening_decision import ScreeningDecisionAgent
+from lit_screening.agents.screening_decision import ScreeningDecisionAgent, reading_priority
 from lit_screening.agents.search_contract import SearchContractAgent
 from lit_screening.models import (
     DomainAssessment,
@@ -23,6 +24,276 @@ def build_contract(question: str):
         search_brief=brief,
         ambiguity_analysis=ambiguity,
     )
+
+
+def build_contract_with_intent_repair(question: str):
+    brief = ResearchIntentAgent().analyze(question)
+    ambiguity = AmbiguityDetectorAgent().analyze(question)
+    intent = NoviceIntentInterpreter().repair(question)
+    return SearchContractAgent().build(
+        question,
+        search_brief=brief,
+        ambiguity_analysis=ambiguity,
+        expert_intent=intent,
+    )
+
+
+def _priority_domain(
+    *,
+    required_group_matches: dict[str, bool] | None = None,
+    target_context_match: list[str] | None = None,
+    negative_context_match: list[str] | None = None,
+    peripheral_context_reason: str = "",
+    intent_centrality_score: float = 0.9,
+    required_group_coverage_score: float = 1.0,
+    missing_required_group_count: int = 0,
+    topic_focus_score: float = 0.9,
+    domain_decision: str = "in_scope",
+) -> DomainAssessment:
+    return DomainAssessment(
+        paper_id="priority-test",
+        domain_match_score=0.95,
+        domain_decision=domain_decision,
+        off_topic_reason="test",
+        required_group_matches=required_group_matches
+        or {"target_chemistry_group": True, "core_object_group": True},
+        target_context_match=(
+            ["lithium metal battery"]
+            if target_context_match is None
+            else target_context_match
+        ),
+        negative_context_match=(
+            [] if negative_context_match is None else negative_context_match
+        ),
+        peripheral_context_reason=peripheral_context_reason,
+        intent_centrality_score=intent_centrality_score,
+        required_group_coverage_score=required_group_coverage_score,
+        missing_required_group_count=missing_required_group_count,
+        topic_focus_score=topic_focus_score,
+    )
+
+
+def test_include_does_not_imply_must_read():
+    domain = _priority_domain()
+
+    assert (
+        reading_priority(
+            "include",
+            0.82,
+            "in_scope",
+            domain=domain,
+            rank=16,
+        )
+        == "read_later"
+    )
+
+
+def test_must_read_count_is_bounded_for_sei_lithium_case():
+    domain = _priority_domain()
+    priorities = [
+        reading_priority("include", 0.9, "in_scope", domain=domain, rank=rank)
+        for rank in range(1, 26)
+    ]
+
+    assert priorities.count("must_read") == 12
+    assert len(priorities) > priorities.count("must_read")
+
+
+def test_must_read_requires_target_context_match():
+    domain = _priority_domain(target_context_match=[])
+
+    assert (
+        reading_priority("include", 0.9, "in_scope", domain=domain, rank=1)
+        == "read_later"
+    )
+
+
+def test_negative_context_paper_never_must_read():
+    domain = _priority_domain(negative_context_match=["sodium-ion"])
+
+    assert (
+        reading_priority("include", 0.95, "in_scope", domain=domain, rank=1)
+        == "optional"
+    )
+
+
+def test_mixed_chemistry_review_optional_not_must_read():
+    domain = _priority_domain(
+        target_context_match=["lithium metal battery"],
+        negative_context_match=["sodium", "potassium"],
+        peripheral_context_reason="negative_or_beyond_target_chemistry_context",
+    )
+
+    assert (
+        reading_priority("include", 0.95, "in_scope", domain=domain, rank=1)
+        == "optional"
+    )
+
+
+def test_high_centrality_lithium_artificial_sei_can_be_must_read():
+    domain = _priority_domain(
+        target_context_match=["lithium metal battery", "lithium metal anode"],
+        intent_centrality_score=0.95,
+        required_group_coverage_score=1.0,
+        topic_focus_score=0.92,
+    )
+
+    assert (
+        reading_priority("include", 0.86, "in_scope", domain=domain, rank=3)
+        == "must_read"
+    )
+
+
+def test_must_read_does_not_require_target_context_when_no_target_group():
+    domain = _priority_domain(
+        required_group_matches={
+            "oer_reaction_group": True,
+            "spin_electronic_group": True,
+            "catalyst_material_group": True,
+        },
+        target_context_match=[],
+        intent_centrality_score=1.0,
+        required_group_coverage_score=1.0,
+        topic_focus_score=0.95,
+    )
+
+    assert (
+        reading_priority(
+            "include",
+            0.9,
+            "in_scope",
+            domain=domain,
+            rank=1,
+            support_level="strict_support",
+        )
+        == "must_read"
+    )
+
+
+def test_oer_full_coverage_in_scope_papers_can_be_must_read():
+    domain = _priority_domain(
+        required_group_matches={
+            "oxygen_evolution_group": True,
+            "spin_state_group": True,
+            "electronic_structure_group": True,
+        },
+        target_context_match=[],
+        intent_centrality_score=0.98,
+        required_group_coverage_score=1.0,
+        topic_focus_score=0.9,
+    )
+
+    assert (
+        reading_priority(
+            "include",
+            0.88,
+            "in_scope",
+            domain=domain,
+            rank=4,
+            support_level="strict_support",
+        )
+        == "must_read"
+    )
+
+
+def test_oer_must_read_count_nonzero_and_bounded():
+    domain = _priority_domain(
+        required_group_matches={
+            "oxygen_evolution_group": True,
+            "spin_state_group": True,
+            "electronic_structure_group": True,
+        },
+        target_context_match=[],
+        intent_centrality_score=0.99,
+        required_group_coverage_score=1.0,
+        topic_focus_score=0.92,
+    )
+    priorities = [
+        reading_priority(
+            "include",
+            0.9,
+            "in_scope",
+            domain=domain,
+            rank=rank,
+            support_level="strict_support",
+        )
+        for rank in range(1, 28)
+    ]
+
+    assert 8 <= priorities.count("must_read") <= 12
+    assert priorities.count("must_read") < priorities.count("read_later")
+
+
+def test_sei_must_read_still_requires_target_context():
+    domain = _priority_domain(target_context_match=[])
+
+    assert (
+        reading_priority(
+            "include",
+            0.95,
+            "in_scope",
+            domain=domain,
+            rank=1,
+            support_level="strict_support",
+        )
+        == "read_later"
+    )
+
+
+def test_negative_context_never_must_read_when_target_context_required():
+    domain = _priority_domain(
+        target_context_match=["lithium metal battery"],
+        negative_context_match=["sodium-ion battery"],
+    )
+
+    assert (
+        reading_priority(
+            "include",
+            0.95,
+            "in_scope",
+            domain=domain,
+            rank=1,
+            support_level="strict_support",
+        )
+        == "optional"
+    )
+
+
+def test_chinese_lithium_battery_maps_to_lithium_target_context():
+    question = "我想找锂电池里 SEI 是什么、怎么影响循环。"
+    intent = NoviceIntentInterpreter().repair(question)
+    contract = build_contract_with_intent_repair(question)
+    concept_terms = {concept.term for concept in intent.structured_concepts}
+    group_by_name = {group.group_name: group for group in contract.constraint_groups}
+
+    assert "lithium battery" in concept_terms
+    assert "lithium-ion battery" in concept_terms
+    assert "target_chemistry_group" in group_by_name
+    assert "lithium-ion battery" in group_by_name["target_chemistry_group"].terms
+
+
+def test_lithium_metal_battery_maps_to_lithium_metal_context():
+    question = "我想找锂金属电池里 SEI 怎么影响枝晶。"
+    intent = NoviceIntentInterpreter().repair(question)
+    contract = build_contract_with_intent_repair(question)
+    concept_terms = {concept.term for concept in intent.structured_concepts}
+    target_group = next(
+        group for group in contract.constraint_groups if group.group_name == "target_chemistry_group"
+    )
+
+    assert "lithium metal battery" in concept_terms
+    assert "lithium metal anode" in concept_terms
+    assert "lithium metal battery" in target_group.terms
+    assert "lithium metal anode" in target_group.terms
+
+
+def test_artificial_sei_maps_to_engineered_sei_terms():
+    intent = NoviceIntentInterpreter().repair("我想找锂电池里人工 SEI 的文章。")
+    concept_terms = {concept.term for concept in intent.structured_concepts}
+
+    assert "artificial SEI" in concept_terms
+    assert "engineered SEI" in concept_terms
+    assert "artificial solid electrolyte interphase" in concept_terms
 
 
 def test_ai_literature_contract_marks_clinical_screening_out_of_scope():
@@ -272,6 +543,72 @@ def test_sei_non_lithium_battery_not_must_read():
     assert "missing_required_group" in decision.exclusion_reasons
 
 
+def test_sei_sodium_potassium_mixed_review_not_must_read_for_lithium_query():
+    contract = build_contract_with_intent_repair(
+        "我想找锂电池里 SEI 是什么、怎么影响锂金属电池循环和枝晶，尤其人工 SEI 的文章。"
+    )
+    paper = Paper(
+        paper_id="mixed-li-na-k",
+        title=(
+            "Review of Emerging Concepts in SEI Analysis and Artificial SEI Membranes "
+            "for Lithium, Sodium, and Potassium Metal Battery Anodes"
+        ),
+        abstract=(
+            "This review compares lithium, sodium, and potassium metal battery anodes "
+            "and discusses artificial SEI membranes."
+        ),
+        year=2025,
+        citation_count=500,
+    )
+    ranked = _rank_for_contract([paper], contract)
+    decisions, _updated = ScreeningDecisionAgent().decide_many(ranked)
+    assessment = ranked[0].domain_assessment
+
+    assert assessment.domain_decision != "in_scope"
+    assert assessment.negative_context_match
+    assert assessment.peripheral_context_reason == "negative_or_beyond_target_chemistry_context"
+    assert decisions[0].decision != "include"
+    assert decisions[0].reading_priority != "must_read"
+
+
+def test_sei_sodium_ion_paper_not_include_for_lithium_query():
+    contract = build_contract_with_intent_repair(
+        "我想找锂电池里 SEI 是什么、怎么影响锂金属电池循环和枝晶，尤其人工 SEI 的文章。"
+    )
+    paper = Paper(
+        paper_id="sodium-sei",
+        title="Solubility of the Solid Electrolyte Interphase (SEI) in Sodium Ion Batteries",
+        abstract="This paper studies SEI solubility in sodium ion batteries and hard carbon anodes.",
+        year=2024,
+        citation_count=300,
+    )
+    ranked = _rank_for_contract([paper], contract)
+    decisions, _updated = ScreeningDecisionAgent().decide_many(ranked)
+
+    assert ranked[0].domain_assessment.negative_context_match
+    assert ranked[0].domain_assessment.domain_decision != "in_scope"
+    assert decisions[0].decision != "include"
+    assert decisions[0].reading_priority != "must_read"
+
+
+def test_mixed_li_na_k_review_marked_peripheral_background():
+    contract = build_contract_with_intent_repair(
+        "我想找锂电池里 SEI 是什么、怎么影响锂金属电池循环和枝晶，尤其人工 SEI 的文章。"
+    )
+    paper = Paper(
+        paper_id="mixed-review",
+        title="Artificial SEI membranes for lithium, sodium, and potassium metal battery anodes",
+        abstract="The review compares Li, Na, and K metal batteries rather than centering only lithium.",
+    )
+    assessment = DomainGuardrailAgent().assess(paper, contract)
+
+    assert assessment.target_context_match
+    assert assessment.negative_context_match
+    assert assessment.domain_decision == "borderline"
+    assert assessment.peripheral_context_reason == "negative_or_beyond_target_chemistry_context"
+    assert assessment.topic_focus_score <= 0.55
+
+
 def test_sei_zinc_sodium_potassium_downranked():
     contract = build_contract("我想了解锂离子电池中 SEI 界面的失效机制。")
     papers = [
@@ -312,6 +649,59 @@ def test_sei_zinc_sodium_potassium_downranked():
         assert by_id[paper_id].domain_assessment.domain_decision != "in_scope"
         assert by_id[paper_id].scores.final_score < by_id["li"].scores.final_score
         assert by_id[paper_id].domain_assessment.missing_required_group_count > 0
+
+
+def test_ablation_sei_shorter_query_forbidden_must_read_reduced():
+    contract = build_contract_with_intent_repair(
+        "我想找锂电池里 SEI 是什么、怎么影响锂金属电池循环和枝晶，尤其人工 SEI 的文章。"
+    )
+    papers = [
+        Paper(
+            paper_id="focused-li-artificial",
+            title="Artificial SEI for stable lithium metal battery anodes",
+            abstract=(
+                "Artificial solid electrolyte interphase layers suppress lithium dendrites "
+                "and improve lithium metal battery cycling."
+            ),
+            year=2022,
+            citation_count=100,
+        ),
+        Paper(
+            paper_id="mixed-li-na-k",
+            title="Review of SEI membranes for Lithium, Sodium, and Potassium Metal Battery Anodes",
+            abstract="This review compares lithium, sodium, and potassium metal batteries.",
+            year=2025,
+            citation_count=500,
+        ),
+        Paper(
+            paper_id="sodium-sei",
+            title="Solubility of the Solid Electrolyte Interphase in Sodium Ion Batteries",
+            abstract="Sodium-ion battery SEI solubility is measured for hard carbon anodes.",
+            year=2024,
+            citation_count=300,
+        ),
+        Paper(
+            paper_id="zinc-sei",
+            title="Interphase chemistry in aqueous zinc-ion batteries",
+            abstract="AZIB and zinc-ion battery interphases are reviewed.",
+            year=2024,
+            citation_count=250,
+        ),
+    ]
+    ranked = _rank_for_contract(papers, contract)
+    decisions, _updated = ScreeningDecisionAgent().decide_many(ranked)
+    decision_by_id = {decision.paper_id: decision for decision in decisions}
+
+    assert ranked[0].paper.paper_id == "focused-li-artificial"
+    forbidden_ids = {"mixed-li-na-k", "sodium-sei", "zinc-sei"}
+    assert all(
+        decision_by_id[paper_id].reading_priority != "must_read"
+        for paper_id in forbidden_ids
+    )
+    assert all(
+        decision_by_id[paper_id].decision != "include"
+        for paper_id in {"sodium-sei", "zinc-sei"}
+    )
 
 
 def test_oer_requires_reaction_and_spin_groups_for_include():
