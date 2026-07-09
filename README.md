@@ -28,6 +28,9 @@ artifacts.
 For the detailed research framing and current system design, see
 [`docs/research_problem.md`](docs/research_problem.md) and
 [`docs/system_architecture.md`](docs/system_architecture.md).
+For the plan-level LLM pilot diagnostic, see
+[`docs/llm_plan_level_pilot.md`](docs/llm_plan_level_pilot.md); it is not a
+formal full-retrieval LLM ablation conclusion.
 
 The v9 deterministic baseline pipeline:
 

@@ -177,94 +177,18 @@ class FakeLLMQueryPlanCriticProvider:
                     "evidence_from_query_plan": ["No user aspect mentions quantum transport."],
                 }
             )
-        if self.response_mode == "valid_single_acronym_query":
-            query_records = extract_query_records(input_payload)
-            weak_record = next(
-                (
-                    record
-                    for record in query_records
-                    if is_single_acronym_query(record["query"])
-                ),
-                None,
-            )
-            if weak_record is None:
-                fallback_record = next(
-                    (
-                        record
-                        for record in query_records
-                        if len(query_tokens(record["query"])) <= 2
-                    ),
-                    query_records[0] if query_records else {"query_id": "q1", "query": "SEI"},
-                )
-                query_id = fallback_record["query_id"]
-                query_text = fallback_record["query"]
-                return json.dumps(
-                    {
-                        "issues": [
-                            {
-                                "issue_type": "provider_query_too_short",
-                                "severity": "medium",
-                                "affected_query_ids": [query_id],
-                                "affected_query_text": query_text,
-                                "affected_aspect": "SEI",
-                                "evidence": [
-                                    (
-                                        "The affected provider query is too short "
-                                        f"to carry the SEI terminology expansion: {query_text}."
-                                    )
-                                ],
-                                "suggested_action": "strengthen_query",
-                                "suggested_terms": [
-                                    "solid electrolyte interphase",
-                                    "lithium battery",
-                                ],
-                                "rationale": (
-                                    "Strengthens a short provider query with a grounded SEI expansion; "
-                                    "the target context term still requires rule grounding."
-                                ),
-                            }
-                        ],
-                        "warnings": [],
-                        "confidence": "high",
-                        "evidence_from_query_plan": [
-                            f"Planned query {query_id} is short: {query_text}."
-                        ],
-                    }
-                )
-            query_id = weak_record["query_id"]
-            query_text = weak_record["query"]
+        if self.response_mode in {
+            "case_aware_weak_query",
+            "valid_single_acronym_query",
+            "valid_oer_single_acronym_query",
+            "valid_mof_short_query",
+        }:
             return json.dumps(
-                {
-                    "issues": [
-                        {
-                            "issue_type": "single_acronym_query",
-                            "severity": "high",
-                            "affected_query_ids": [query_id],
-                            "affected_query_text": query_text,
-                            "affected_aspect": "SEI",
-                            "evidence": [
-                                (
-                                    "The affected provider query contains only "
-                                    f"repeated SEI acronym tokens: {query_text}."
-                                )
-                            ],
-                            "suggested_action": "strengthen_query",
-                            "suggested_terms": [
-                                "solid electrolyte interphase",
-                                "lithium battery",
-                            ],
-                            "rationale": (
-                                "A single-acronym query is too broad for a "
-                                "lithium-battery SEI screening task."
-                            ),
-                        }
-                    ],
-                    "warnings": [],
-                    "confidence": "high",
-                    "evidence_from_query_plan": [
-                        f"Planned query {query_id} is {query_text}."
-                    ],
-                }
+                build_case_aware_fake_query_critic_payload(
+                    input_payload,
+                    response_mode=self.response_mode,
+                ),
+                ensure_ascii=False,
             )
         if self.response_mode == "no_issue":
             return json.dumps(
@@ -315,6 +239,179 @@ class FakeLLMQueryPlanCriticProvider:
                 "evidence_from_query_plan": ["No planned query contains artificial SEI."],
             }
         )
+
+
+def build_case_aware_fake_query_critic_payload(
+    input_payload: dict[str, Any],
+    *,
+    response_mode: str = "case_aware_weak_query",
+) -> dict[str, Any]:
+    """Return a fake critique grounded in the actual planned queries."""
+
+    query_records = extract_query_records(input_payload)
+    preferred_profile = {
+        "valid_single_acronym_query": "sei",
+        "valid_oer_single_acronym_query": "oer",
+        "valid_mof_short_query": "mof_co2",
+    }.get(response_mode, "")
+    issue_record = _first_fake_weak_query_record(
+        query_records,
+        preferred_profile=preferred_profile,
+    )
+    if issue_record is None:
+        return _fake_no_issue_payload(query_records)
+    return _fake_weak_query_payload(issue_record)
+
+
+def _first_fake_weak_query_record(
+    query_records: list[dict[str, str]],
+    *,
+    preferred_profile: str = "",
+) -> dict[str, Any] | None:
+    matches: list[dict[str, Any]] = []
+    for record in query_records:
+        profile = _fake_weak_query_profile(record["query"])
+        if profile is None:
+            continue
+        matches.append({**record, **profile})
+    if preferred_profile:
+        for match in matches:
+            if match["profile_id"] == preferred_profile:
+                return match
+        return None
+    return matches[0] if matches else None
+
+
+def _fake_weak_query_profile(query: str) -> dict[str, Any] | None:
+    normalized = normalize_text(query)
+    if is_single_acronym_query(query):
+        token = _single_acronym_token(query)
+        if token == "sei":
+            return {
+                "profile_id": "sei",
+                "issue_type": "single_acronym_query",
+                "severity": "high",
+                "affected_aspect": "SEI",
+                "suggested_terms": [
+                    "solid electrolyte interphase",
+                    "lithium battery",
+                ],
+                "rationale": (
+                    "A single-acronym query is too broad for an SEI screening task; "
+                    "only grounded terms can be applied by deterministic rules."
+                ),
+            }
+        if token == "oer":
+            return {
+                "profile_id": "oer",
+                "issue_type": "single_acronym_query",
+                "severity": "high",
+                "affected_aspect": "OER",
+                "suggested_terms": [
+                    "oxygen evolution reaction",
+                    "spin state",
+                ],
+                "rationale": (
+                    "A single-acronym query is too broad for an OER screening task; "
+                    "the glossary expansion is grounded by the acronym."
+                ),
+            }
+        if token == "mof":
+            return {
+                "profile_id": "mof",
+                "issue_type": "single_acronym_query",
+                "severity": "high",
+                "affected_aspect": "MOF",
+                "suggested_terms": [
+                    "metal-organic framework",
+                    "CO2 capture",
+                ],
+                "rationale": (
+                    "A single-acronym query is too broad for a MOF screening task; "
+                    "the framework expansion is grounded by the acronym."
+                ),
+            }
+    if normalized in {"mof co2", "co2 mof", "mof capture"}:
+        return {
+            "profile_id": "mof_co2",
+            "issue_type": "provider_query_too_short",
+            "severity": "medium",
+            "affected_aspect": "MOF CO2",
+            "suggested_terms": [
+                "metal-organic framework",
+                "CO2 capture",
+            ],
+            "rationale": (
+                "The short MOF/CO2 provider query lacks an explicit framework "
+                "expansion; deterministic grounding decides which terms apply."
+            ),
+        }
+    return None
+
+
+def _single_acronym_token(query: str) -> str:
+    tokens = acronym_only_meaningful_tokens(query)
+    return tokens[0] if tokens else ""
+
+
+def _fake_weak_query_payload(issue_record: dict[str, Any]) -> dict[str, Any]:
+    query_id = str(issue_record["query_id"])
+    query_text = str(issue_record["query"])
+    issue_type = str(issue_record["issue_type"])
+    if issue_type == "single_acronym_query":
+        evidence_text = (
+            "The affected provider query contains only repeated acronym tokens: "
+            f"{query_text}."
+        )
+    else:
+        evidence_text = (
+            "The affected provider query is too short to carry the intended "
+            f"terminology expansion: {query_text}."
+        )
+    return {
+        "issues": [
+            {
+                "issue_type": issue_type,
+                "severity": str(issue_record["severity"]),
+                "affected_query_ids": [query_id],
+                "affected_query_text": query_text,
+                "affected_aspect": str(issue_record["affected_aspect"]),
+                "evidence": [evidence_text],
+                "suggested_action": "strengthen_query",
+                "suggested_terms": list(issue_record["suggested_terms"]),
+                "rationale": str(issue_record["rationale"]),
+            }
+        ],
+        "warnings": [],
+        "confidence": "high",
+        "evidence_from_query_plan": [
+            f"Planned query {query_id} is weak: {query_text}."
+        ],
+    }
+
+
+def _fake_no_issue_payload(query_records: list[dict[str, str]]) -> dict[str, Any]:
+    examples = [record["query"] for record in query_records[:3]]
+    return {
+        "issues": [
+            {
+                "issue_type": "no_issue",
+                "severity": "info",
+                "affected_query_ids": [],
+                "affected_aspect": "",
+                "evidence": [
+                    "No acronym-only or short weak provider query was found."
+                ],
+                "suggested_action": "no_change",
+                "suggested_terms": [],
+                "rationale": "No verified repair opportunity in the current query plan.",
+            }
+        ],
+        "warnings": [],
+        "confidence": "high",
+        "evidence_from_query_plan": examples
+        or ["No planned provider queries were available."],
+    }
 
 
 @dataclass(frozen=True)
@@ -1857,8 +1954,18 @@ def extract_query_records(input_payload: dict[str, Any]) -> list[dict[str, str]]
             query_plan.get("planned_queries")
             or query_plan.get("queries")
             or query_plan.get("openalex_queries")
+            or query_plan.get("final_openalex_queries")
+            or query_plan.get("semantic_scholar_queries")
+            or query_plan.get("final_semantic_scholar_queries")
             or []
         )
+        if not candidates and isinstance(query_plan.get("final_provider_queries"), dict):
+            candidates = [
+                query
+                for queries in query_plan.get("final_provider_queries", {}).values()
+                if isinstance(queries, list)
+                for query in queries
+            ]
     else:
         candidates = query_plan
     records: list[dict[str, str]] = []

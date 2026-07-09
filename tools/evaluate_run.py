@@ -118,6 +118,15 @@ def unique_strings(values: list[str]) -> list[str]:
     return unique
 
 
+def normalized_query_key(query: str) -> str:
+    return re.sub(r"\s+", " ", str(query).strip().lower())
+
+
+def duplicate_query_count(queries: list[str]) -> int:
+    keys = [normalized_query_key(query) for query in queries if str(query).strip()]
+    return max(len(keys) - len(set(keys)), 0)
+
+
 def queries_from_query_artifact(data: Any) -> list[str]:
     if not isinstance(data, dict):
         return []
@@ -153,6 +162,154 @@ def collect_final_provider_queries(
             candidates.extend(flatten_strings(planned_queries.get(key)))
 
     return unique_strings(candidates)
+
+
+def collect_final_provider_query_candidates(
+    planned_queries: dict[str, Any],
+    query_provenance: dict[str, Any],
+    retrieval_diagnostics: dict[str, Any],
+) -> list[str]:
+    candidates: list[str] = []
+    for source in (query_provenance, planned_queries, retrieval_diagnostics):
+        for key in (
+            "final_provider_queries",
+            "queries_by_provider",
+            "final_openalex_queries",
+            "final_semantic_scholar_queries",
+        ):
+            if key in source:
+                candidates.extend(flatten_strings(source.get(key)))
+    query_plan = planned_queries.get("query_plan", {})
+    if isinstance(query_plan, dict):
+        for key in ("openalex_queries", "semantic_scholar_queries", "queries"):
+            candidates.extend(flatten_strings(query_plan.get(key)))
+    if not candidates:
+        for key in ("openalex_queries", "semantic_scholar_queries", "queries"):
+            candidates.extend(flatten_strings(planned_queries.get(key)))
+    return [str(query).strip() for query in candidates if str(query).strip()]
+
+
+def llm_trace_bool(trace: dict[str, Any], key: str, default: bool = False) -> bool:
+    if not isinstance(trace, dict):
+        return default
+    return bool(trace.get(key, default))
+
+
+def llm_trace_count(trace: dict[str, Any], key: str) -> int:
+    if not isinstance(trace, dict):
+        return 0
+    value = first_number(trace.get(key))
+    return int(value or 0)
+
+
+def repair_term_counts(repair_artifact: dict[str, Any]) -> tuple[int, int]:
+    if not isinstance(repair_artifact, dict):
+        return (0, 0)
+    grounded = 0
+    rejected = 0
+    for record in repair_artifact.get("applied_issue_records", []) or []:
+        if not isinstance(record, dict):
+            continue
+        grounded += len(record.get("applied_terms", []) or [])
+        rejected += len(record.get("rejected_terms", []) or [])
+    return (grounded, rejected)
+
+
+def repair_term_lists(repair_artifact: dict[str, Any]) -> tuple[list[str], list[str]]:
+    if not isinstance(repair_artifact, dict):
+        return ([], [])
+    applied_terms: list[str] = []
+    rejected_terms: list[str] = []
+    for record in repair_artifact.get("applied_issue_records", []) or []:
+        if not isinstance(record, dict):
+            continue
+        applied_terms.extend(
+            str(term)
+            for term in (record.get("applied_terms", []) or [])
+            if str(term).strip()
+        )
+        rejected_terms.extend(
+            str(term.get("term") if isinstance(term, dict) else term)
+            for term in (record.get("rejected_terms", []) or [])
+            if str(term.get("term") if isinstance(term, dict) else term).strip()
+        )
+    return (unique_strings(applied_terms), unique_strings(rejected_terms))
+
+
+def normalized_query_signature(queries: list[str]) -> tuple[str, ...]:
+    return tuple(sorted({normalized_query_key(query) for query in queries if str(query).strip()}))
+
+
+def direct_final_queries_from_artifact(data: dict[str, Any]) -> list[str]:
+    if not isinstance(data, dict):
+        return []
+    candidates: list[str] = []
+    for key in (
+        "final_provider_queries",
+        "queries_by_provider",
+        "final_openalex_queries",
+        "final_semantic_scholar_queries",
+        "queries",
+    ):
+        if key in data:
+            candidates.extend(flatten_strings(data.get(key)))
+    query_plan = data.get("query_plan", {})
+    if isinstance(query_plan, dict):
+        for key in ("openalex_queries", "semantic_scholar_queries", "queries"):
+            candidates.extend(flatten_strings(query_plan.get(key)))
+    return unique_strings(candidates)
+
+
+def query_artifacts_consistent(query_lists: list[list[str]]) -> bool:
+    signatures = [
+        normalized_query_signature(queries)
+        for queries in query_lists
+        if queries
+    ]
+    if len(signatures) <= 1:
+        return True
+    first = signatures[0]
+    return all(signature == first for signature in signatures[1:])
+
+
+def llm_query_before_after_example(
+    before_queries: list[str],
+    after_queries: list[str],
+) -> tuple[str, str]:
+    if not before_queries and not after_queries:
+        return ("", "")
+    max_len = max(len(before_queries), len(after_queries))
+    for index in range(max_len):
+        before = before_queries[index] if index < len(before_queries) else ""
+        after = after_queries[index] if index < len(after_queries) else ""
+        if normalized_query_key(before) != normalized_query_key(after):
+            return (before, after)
+    return (
+        before_queries[0] if before_queries else "",
+        after_queries[0] if after_queries else "",
+    )
+
+
+def research_gap_generation_status(
+    run: Path,
+    evaluation: dict[str, Any],
+    *,
+    retrieval_performed: bool,
+) -> str:
+    if isinstance(evaluation, dict):
+        for key in ("research_gap_generation_status", "gap_generation_status"):
+            value = str(evaluation.get(key) or "").strip()
+            if value:
+                return value
+    for path in (run / "research_gap_matrix.csv", run / "research_gap_matrix.tsv"):
+        rows = read_csv_rows(path)
+        if rows:
+            value = str(rows[0].get("gap_generation_status") or "").strip()
+            if value:
+                return value
+    if not retrieval_performed:
+        return "skipped"
+    return ""
 
 
 def load_benchmark_cases(path: Path = DEFAULT_BENCHMARK_PATH) -> dict[str, Any]:
@@ -716,11 +873,30 @@ def evaluate_run(
     merged_rows = read_csv_rows(run / "merged_papers.csv")
     exploration_quality = read_json(run / "exploration_quality.json", {})
     user_report = read_text(run / "user_report.md")
+    llm_intent_trace = read_json(run / "llm_intent_enhancement_trace.json", {})
+    llm_query_critic_trace = read_json(run / "llm_query_critic_trace.json", {})
+    query_repair_after_llm_critic = read_json(
+        run / "query_repair_after_llm_critic.json",
+        {},
+    )
+    query_plan_before_llm_critic = read_json(
+        run / "query_plan_before_llm_critic.json",
+        {},
+    )
+    query_plan_after_llm_critic = read_json(
+        run / "query_plan_after_llm_critic.json",
+        {},
+    )
 
     if not provider_status and isinstance(retrieval_diagnostics, dict):
         provider_status = retrieval_diagnostics.get("provider_status") or {}
 
     final_queries = collect_final_provider_queries(
+        planned_queries,
+        query_provenance,
+        retrieval_diagnostics,
+    )
+    final_query_candidates = collect_final_provider_query_candidates(
         planned_queries,
         query_provenance,
         retrieval_diagnostics,
@@ -741,7 +917,12 @@ def evaluate_run(
     repair_reason = str(
         query_repair_stage_status.get("reason_if_no_difference", "")
     ).lower()
+    llm_stage_repair_applied = bool(
+        query_repair_stage_status.get("llm_query_critic_repair_applied")
+    )
     repair_disabled_but_sanitizer_active = repair_disabled and (
+        not llm_stage_repair_applied
+    ) and (
         "upstream sanitizer" in repair_reason or raw_to_final_query_change_count > 0
     )
     no_query_repair_conclusive = not (
@@ -768,6 +949,26 @@ def evaluate_run(
         ensure_ascii=False,
     )
     anchor_coverage = calculate_anchor_coverage(case, text_blob)
+    query_family_coverage = (
+        exploration_quality.get("query_family_coverage")
+        if isinstance(exploration_quality, dict)
+        and "query_family_coverage" in exploration_quality
+        else exploration_quality.get("query_family_coverage_score")
+        if isinstance(exploration_quality, dict)
+        and "query_family_coverage_score" in exploration_quality
+        else anchor_coverage["score"]
+    )
+    missing_expected_anchor_count = (
+        len(anchor_coverage.get("missing_anchor_ids", []))
+        if anchor_coverage.get("total")
+        else None
+    )
+    cross_domain_injection_count = first_number(
+        exploration_quality.get("cross_domain_injection_count")
+        if isinstance(exploration_quality, dict)
+        else None,
+        retrieval_diagnostics.get("cross_domain_injection_count"),
+    )
 
     raw_count = first_number(
         retrieval_diagnostics.get("raw_retrieved_paper_count"),
@@ -870,6 +1071,74 @@ def evaluate_run(
         if isinstance(evaluation, dict)
         else {}
     )
+    retrieval_status = str(
+        evaluation.get(
+            "retrieval_status",
+            retrieval_diagnostics.get(
+                "retrieval_status",
+                exploration_quality.get("retrieval_status")
+                if isinstance(exploration_quality, dict)
+                else "",
+            ),
+        )
+        or ""
+    ).strip()
+    ranked_papers_based_on_real_retrieval = evaluation.get(
+        "ranked_papers_based_on_real_retrieval"
+    )
+    if ranked_papers_based_on_real_retrieval is None:
+        ranked_papers_based_on_real_retrieval = bool(
+            (raw_count or 0) > 0
+            and retrieval_status not in {"planning_only", "retrieval_not_performed"}
+        )
+    retrieval_performed = bool(
+        ranked_papers_based_on_real_retrieval
+        or (raw_count or 0) > 0
+        or retrieval_status in {"success", "partial_success"}
+    )
+    repair_grounded_term_count, repair_rejected_term_count = repair_term_counts(
+        query_repair_after_llm_critic
+    )
+    llm_applied_terms, llm_rejected_terms = repair_term_lists(
+        query_repair_after_llm_critic
+    )
+    llm_query_before_example, llm_query_after_example = llm_query_before_after_example(
+        queries_from_query_artifact(query_plan_before_llm_critic),
+        queries_from_query_artifact(query_plan_after_llm_critic),
+    )
+    llm_query_repair_applied = bool(
+        llm_trace_count(llm_query_critic_trace, "applied_issue_count")
+        or llm_trace_count(llm_query_critic_trace, "query_added_count")
+        or llm_trace_count(llm_query_critic_trace, "query_dropped_count")
+        or llm_trace_count(llm_query_critic_trace, "query_modified_count")
+        or query_repair_after_llm_critic.get("applied_issue_count")
+    )
+    planned_final_queries = direct_final_queries_from_artifact(planned_queries)
+    provenance_final_queries = direct_final_queries_from_artifact(query_provenance)
+    critic_after_queries = direct_final_queries_from_artifact(query_plan_after_llm_critic)
+    final_query_artifact_consistent = query_artifacts_consistent(
+        [
+            planned_final_queries,
+            final_queries_after_repair,
+            provenance_final_queries,
+        ]
+    )
+    repair_provenance_count = len(query_provenance.get("llm_query_critic_repairs", []) or [])
+    if not repair_provenance_count:
+        repair_provenance_count = len(
+            query_repair_after_llm_critic.get("applied_issue_records", []) or []
+        )
+    llm_query_critic_repair_artifact_consistent = (
+        query_artifacts_consistent(
+            [
+                planned_final_queries,
+                final_queries_after_repair,
+                provenance_final_queries,
+                critic_after_queries,
+            ]
+        )
+        and (not llm_query_repair_applied or repair_provenance_count > 0)
+    )
     metrics = {
         "run_dir": str(run),
         "case_id": (case or {}).get("id") or case_id,
@@ -888,8 +1157,12 @@ def evaluate_run(
             or retrieval_diagnostics.get("query_family_applied")
         ),
         "final_provider_query_count": len(final_queries),
+        "query_family_coverage": query_family_coverage,
         "single_acronym_query_count": len(single_acronym_queries),
         "single_acronym_queries": single_acronym_queries,
+        "duplicate_query_count": duplicate_query_count(final_query_candidates),
+        "missing_expected_anchor_count": missing_expected_anchor_count,
+        "cross_domain_injection_count": cross_domain_injection_count or 0,
         "overbroad_query_count": len(overbroad_queries),
         "overbroad_queries": overbroad_queries,
         "anchor_coverage": anchor_coverage["score"],
@@ -992,6 +1265,110 @@ def evaluate_run(
             reading_priority_policy,
             "target_context_required_for_priority",
         ),
+        "llm_intent_enabled": llm_trace_bool(llm_intent_trace, "llm_enabled"),
+        "llm_intent_called": llm_trace_bool(llm_intent_trace, "llm_called"),
+        "llm_intent_fallback_used": llm_trace_bool(
+            llm_intent_trace,
+            "fallback_used",
+        ),
+        "llm_intent_verified_candidate_count": llm_trace_count(
+            llm_intent_trace,
+            "verified_candidate_count",
+        ),
+        "llm_intent_applied_suggestion_count": llm_trace_count(
+            llm_intent_trace,
+            "applied_suggestion_count",
+        ),
+        "llm_intent_rejected_suggestion_count": llm_trace_count(
+            llm_intent_trace,
+            "rejected_suggestion_count",
+        ),
+        "llm_intent_unsupported_suggestion_count": llm_trace_count(
+            llm_intent_trace,
+            "unsupported_suggestion_count",
+        ),
+        "llm_intent_reason_if_no_change": str(
+            llm_intent_trace.get("reason_if_no_change", "")
+        )
+        if isinstance(llm_intent_trace, dict)
+        else "",
+        "llm_query_critic_enabled": llm_trace_bool(
+            llm_query_critic_trace,
+            "llm_query_critic_enabled",
+        ),
+        "llm_query_critic_called": llm_trace_bool(
+            llm_query_critic_trace,
+            "llm_called",
+        ),
+        "llm_query_critic_fallback_used": llm_trace_bool(
+            llm_query_critic_trace,
+            "fallback_used",
+        ),
+        "verified_issue_count": llm_trace_count(
+            llm_query_critic_trace,
+            "verified_issue_count",
+        ),
+        "rejected_issue_count": llm_trace_count(
+            llm_query_critic_trace,
+            "rejected_issue_count",
+        ),
+        "unsupported_issue_count": llm_trace_count(
+            llm_query_critic_trace,
+            "unsupported_issue_count",
+        ),
+        "applied_issue_count": llm_trace_count(
+            llm_query_critic_trace,
+            "applied_issue_count",
+        ),
+        "rejected_for_application_count": llm_trace_count(
+            llm_query_critic_trace,
+            "rejected_for_application_count",
+        ),
+        "query_added_count": llm_trace_count(
+            llm_query_critic_trace,
+            "query_added_count",
+        ),
+        "query_dropped_count": llm_trace_count(
+            llm_query_critic_trace,
+            "query_dropped_count",
+        ),
+        "query_modified_count": llm_trace_count(
+            llm_query_critic_trace,
+            "query_modified_count",
+        ),
+        "repair_applied": llm_query_repair_applied,
+        "repair_grounded_term_count": repair_grounded_term_count,
+        "repair_rejected_term_count": repair_rejected_term_count,
+        "llm_query_critic_repair_applied": llm_query_repair_applied,
+        "llm_query_critic_repaired_query_count": (
+            llm_trace_count(llm_query_critic_trace, "query_added_count")
+            + llm_trace_count(llm_query_critic_trace, "query_dropped_count")
+            + llm_trace_count(llm_query_critic_trace, "query_modified_count")
+        ),
+        "llm_query_critic_original_query_example": llm_query_before_example,
+        "llm_query_critic_repaired_query_example": llm_query_after_example,
+        "llm_query_critic_applied_terms": "; ".join(llm_applied_terms),
+        "llm_query_critic_rejected_terms": "; ".join(llm_rejected_terms),
+        "llm_query_critic_repair_provenance_count": repair_provenance_count,
+        "llm_query_critic_repair_artifact_consistent": (
+            llm_query_critic_repair_artifact_consistent
+        ),
+        "final_query_artifact_consistent": final_query_artifact_consistent,
+        "llm_query_critic_reason_if_no_change": str(
+            llm_query_critic_trace.get("reason_if_no_change", "")
+        )
+        if isinstance(llm_query_critic_trace, dict)
+        else "",
+        "llm_query_before_example": llm_query_before_example,
+        "llm_query_after_example": llm_query_after_example,
+        "paper_decision_mutation_count": 0 if not retrieval_performed else None,
+        "retrieval_performed": retrieval_performed,
+        "research_gap_generation_status": research_gap_generation_status(
+            run,
+            evaluation,
+            retrieval_performed=retrieval_performed,
+        ),
+        "ranked_papers_based_on_real_retrieval": ranked_papers_based_on_real_retrieval,
         "report_has_provider_status": (
             "provider status" in report_lower
             or "provider_summary" in report_lower

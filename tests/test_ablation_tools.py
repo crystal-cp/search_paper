@@ -4,8 +4,12 @@ import json
 import pytest
 
 from tools.compare_ablations import SUMMARY_COLUMNS, compare_ablations
-from tools.evaluate_run import evaluate_run
-from tools.run_ablations import ABLATION_CONFIGS, main as run_ablations_main
+from tools.evaluate_run import evaluate_run, load_benchmark_cases
+from tools.run_ablations import (
+    ABLATION_CONFIGS,
+    main as run_ablations_main,
+    select_cases,
+)
 
 
 @pytest.fixture(scope="module")
@@ -29,6 +33,29 @@ def plan_ablation_root(tmp_path_factory):
 
 def _run_dir(root, config_name):
     return root / "ai_literature_screening" / config_name
+
+
+@pytest.fixture(scope="module")
+def weak_sei_repair_root(tmp_path_factory):
+    root = tmp_path_factory.mktemp("weak-sei-repair")
+    exit_code = run_ablations_main(
+        [
+            "--mode",
+            "plan",
+            "--configs",
+            "llm_query_critic_diagnostic_only,llm_query_critic_repair_applied",
+            "--case-id",
+            "weak_sei_acronym_query",
+            "--output-root",
+            str(root),
+        ]
+    )
+    assert exit_code == 0
+    return root
+
+
+def _weak_sei_repair_run_dir(root):
+    return root / "weak_sei_acronym_query" / "llm_query_critic_repair_applied"
 
 
 def _write_json(path, payload):
@@ -633,3 +660,652 @@ def test_full_summary_reads_target_context_required_for_priority(tmp_path):
         csv_row = next(csv.DictReader(handle))
     assert csv_row["reading_path_paper_count"] == "11"
     assert csv_row["target_context_required_for_priority"] == "false"
+
+
+def _write_llm_plan_run(
+    root,
+    *,
+    case_id="ai_literature_screening",
+    config_name="llm_query_critic_diagnostic_only",
+    intent_trace=None,
+    critic_trace=None,
+    repair_artifact=None,
+    case_metadata=None,
+    before_queries=None,
+    after_queries=None,
+):
+    run_dir = root / case_id / config_name
+    _write_query_run(
+        run_dir,
+        case_id,
+        config_name,
+        ['LLM "literature screening"', 'LLM "literature screening"'],
+    )
+    config = ABLATION_CONFIGS[config_name]
+    _write_json(
+        run_dir / "ablation_config.json",
+        {
+            "ablation_config_name": config_name,
+            "mode": "plan",
+            "disabled_modules": config.get("disabled_modules", []),
+            "enabled_modules": config.get("enabled_modules_extra", []),
+            "support_status": config.get("support_status", {}),
+            "mode_support": config.get("mode_support"),
+            "applies_query_changes": config.get("applies_query_changes"),
+            "uses_real_llm": config.get("uses_real_llm"),
+            "diagnostic_only": config.get("diagnostic_only"),
+            "warning_if_pilot_only": config.get("warning_if_pilot_only"),
+            "case_metadata": case_metadata or {},
+        },
+    )
+    _write_json(
+        run_dir / "retrieval_diagnostics.json",
+        {
+            "retrieval_status": "planning_only",
+            "ranked_papers_based_on_real_retrieval": False,
+            "raw_retrieved_paper_count": 0,
+            "merged_paper_count": 0,
+        },
+    )
+    _write_json(
+        run_dir / "evaluation.json",
+        {
+            "retrieval_status": "planning_only",
+            "ranked_papers_based_on_real_retrieval": False,
+        },
+    )
+    if intent_trace is not None:
+        _write_json(run_dir / "llm_intent_enhancement_trace.json", intent_trace)
+    if critic_trace is not None:
+        _write_json(run_dir / "llm_query_critic_trace.json", critic_trace)
+    if repair_artifact is not None:
+        _write_json(run_dir / "query_repair_after_llm_critic.json", repair_artifact)
+    if before_queries is not None:
+        _write_json(
+            run_dir / "query_plan_before_llm_critic.json",
+            {"queries": before_queries},
+        )
+    if after_queries is not None:
+        _write_json(
+            run_dir / "query_plan_after_llm_critic.json",
+            {"queries": after_queries},
+        )
+    return run_dir
+
+
+def test_llm_plan_ablation_configs_exist():
+    for config_name in [
+        "full_system",
+        "llm_intent_frame_only",
+        "llm_query_critic_diagnostic_only",
+        "llm_query_critic_repair_applied",
+        "llm_intent_plus_query_critic_repair",
+    ]:
+        assert config_name in ABLATION_CONFIGS
+
+
+def test_llm_plan_ablation_configs_mark_pilot_or_diagnostic():
+    assert ABLATION_CONFIGS["full_system"]["support_status"]["full_system"] == "baseline"
+    for config_name in [
+        "llm_intent_frame_only",
+        "llm_query_critic_diagnostic_only",
+        "llm_query_critic_repair_applied",
+        "llm_intent_plus_query_critic_repair",
+    ]:
+        config = ABLATION_CONFIGS[config_name]
+        assert config["mode_support"] == "plan_level"
+        assert config["uses_real_llm"] is False
+        assert config["warning_if_pilot_only"]
+
+
+def test_weak_plan_cases_are_diagnostic_stress_cases():
+    benchmark = load_benchmark_cases()
+    weak_cases = {
+        case["id"]: case
+        for case in benchmark["cases"]
+        if str(case.get("llm_plan_diagnostic_group") or "")
+        == "weak_plan_positive_control"
+    }
+
+    assert {
+        "weak_sei_acronym_query",
+        "weak_oer_acronym_query",
+        "weak_mof_short_query",
+    }.issubset(weak_cases)
+    for case in weak_cases.values():
+        assert case["diagnostic_only"] is True
+        assert case["stress_case"] is True
+        assert case["formal_benchmark_inclusion"] == "not part of formal benchmark conclusion"
+
+
+def test_run_ablations_default_plan_group_excludes_weak_controls():
+    benchmark = load_benchmark_cases()
+
+    clean_cases = select_cases(benchmark, None, "plan")
+    weak_cases = select_cases(benchmark, None, "plan", "weak_plan_positive_controls")
+
+    assert all(not case.get("stress_case") for case in clean_cases)
+    assert {case["id"] for case in clean_cases} == {
+        "ai_literature_screening",
+        "mof_co2_capture",
+        "thin_film_deposition",
+        "sei_lithium_battery",
+        "oer_spin_state",
+    }
+    assert {case["id"] for case in weak_cases} >= {
+        "weak_sei_acronym_query",
+        "weak_oer_acronym_query",
+        "weak_mof_short_query",
+    }
+
+
+def test_llm_query_critic_diagnostic_config_does_not_apply_repairs():
+    config = ABLATION_CONFIGS["llm_query_critic_diagnostic_only"]
+    assert "--enable-llm-query-critic" in config["flags"]
+    assert "--apply-llm-query-critic-repairs" not in config["flags"]
+    assert config["applies_query_changes"] is False
+    assert config["diagnostic_only"] is True
+
+
+def test_llm_query_critic_repair_config_applies_only_with_apply_flag():
+    diagnostic = ABLATION_CONFIGS["llm_query_critic_diagnostic_only"]
+    repair = ABLATION_CONFIGS["llm_query_critic_repair_applied"]
+    assert "--apply-llm-query-critic-repairs" not in diagnostic["flags"]
+    assert "--apply-llm-query-critic-repairs" in repair["flags"]
+    assert repair["applies_query_changes"] is True
+
+
+def test_llm_intent_plus_query_critic_config_enables_both_modules():
+    config = ABLATION_CONFIGS["llm_intent_plus_query_critic_repair"]
+    assert "--enable-llm-intent-enhancer" in config["flags"]
+    assert "--enable-llm-query-critic" in config["flags"]
+    assert "--apply-llm-query-critic-repairs" in config["flags"]
+    assert "llm_intent_frame_enhancer" in config["enabled_modules_extra"]
+    assert "llm_query_plan_critic" in config["enabled_modules_extra"]
+
+
+def test_llm_intent_frame_fake_positive_called_when_configured(tmp_path):
+    root = tmp_path / "ablations"
+    exit_code = run_ablations_main(
+        [
+            "--mode",
+            "plan",
+            "--configs",
+            "llm_intent_frame_only",
+            "--case-id",
+            "sei_lithium",
+            "--output-root",
+            str(root),
+        ]
+    )
+
+    assert exit_code == 0
+    trace = json.loads(
+        (
+            root
+            / "sei_lithium_battery"
+            / "llm_intent_frame_only"
+            / "llm_intent_enhancement_trace.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert trace["llm_enabled"] is True
+    assert trace["llm_called"] is True
+    assert trace["fallback_used"] is False
+    assert trace["verified_candidate_count"] > 0
+    assert trace["applied_suggestion_count"] > 0
+
+
+def test_compare_ablations_includes_llm_intent_metrics(tmp_path):
+    root = tmp_path / "ablations"
+    _write_llm_plan_run(
+        root,
+        config_name="llm_intent_frame_only",
+        intent_trace={
+            "llm_enabled": True,
+            "llm_called": True,
+            "fallback_used": False,
+            "verified_candidate_count": 2,
+            "applied_suggestion_count": 1,
+            "rejected_suggestion_count": 1,
+            "unsupported_suggestion_count": 0,
+        },
+    )
+    csv_path = tmp_path / "reports" / "ablation_summary.csv"
+    md_path = tmp_path / "reports" / "ablation_summary.md"
+
+    rows = compare_ablations(root, csv_path=csv_path, markdown_path=md_path)
+
+    row = rows[0]
+    assert row["llm_intent_enabled"] is True
+    assert row["llm_intent_called"] is True
+    assert row["llm_intent_verified_candidate_count"] == 2
+    assert row["llm_intent_applied_suggestion_count"] == 1
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        assert "llm_intent_verified_candidate_count" in reader.fieldnames
+
+
+def test_compare_ablations_includes_llm_query_critic_metrics(tmp_path):
+    root = tmp_path / "ablations"
+    _write_llm_plan_run(
+        root,
+        config_name="llm_query_critic_repair_applied",
+        critic_trace={
+            "llm_query_critic_enabled": True,
+            "llm_called": True,
+            "fallback_used": False,
+            "verified_issue_count": 1,
+            "rejected_issue_count": 0,
+            "unsupported_issue_count": 0,
+            "applied_issue_count": 1,
+            "rejected_for_application_count": 0,
+            "query_added_count": 0,
+            "query_dropped_count": 0,
+            "query_modified_count": 1,
+        },
+        repair_artifact={
+            "apply_enabled": True,
+            "applied_issue_count": 1,
+            "applied_issue_records": [
+                {
+                    "applied_terms": ["solid electrolyte interphase"],
+                    "rejected_terms": [{"term": "lithium battery"}],
+                }
+            ],
+        },
+    )
+    csv_path = tmp_path / "reports" / "ablation_summary.csv"
+    md_path = tmp_path / "reports" / "ablation_summary.md"
+
+    rows = compare_ablations(root, csv_path=csv_path, markdown_path=md_path)
+
+    row = rows[0]
+    assert row["llm_query_critic_enabled"] is True
+    assert row["verified_issue_count"] == 1
+    assert row["applied_issue_count"] == 1
+    assert row["query_modified_count"] == 1
+    assert row["repair_grounded_term_count"] == 1
+    assert row["repair_rejected_term_count"] == 1
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        assert "verified_issue_count" in reader.fieldnames
+        assert "repair_grounded_term_count" in reader.fieldnames
+
+
+def test_plan_level_llm_ablation_does_not_generate_fake_gaps(tmp_path):
+    root = tmp_path / "ablations"
+    _write_llm_plan_run(root, config_name="llm_query_critic_diagnostic_only")
+    rows = compare_ablations(
+        root,
+        csv_path=tmp_path / "reports" / "ablation_summary.csv",
+        markdown_path=tmp_path / "reports" / "ablation_summary.md",
+    )
+
+    assert rows[0]["retrieval_performed"] is False
+    assert rows[0]["ranked_papers_based_on_real_retrieval"] is False
+    assert rows[0]["research_gap_generation_status"] == "skipped"
+
+
+def test_plan_level_llm_ablation_does_not_mutate_paper_decisions(tmp_path):
+    root = tmp_path / "ablations"
+    _write_llm_plan_run(root, config_name="llm_query_critic_repair_applied")
+    rows = compare_ablations(
+        root,
+        csv_path=tmp_path / "reports" / "ablation_summary.csv",
+        markdown_path=tmp_path / "reports" / "ablation_summary.md",
+    )
+
+    assert rows[0]["paper_decision_mutation_count"] == 0
+
+
+def test_llm_plan_ablation_clean_case_no_verified_opportunity_is_not_failure(tmp_path):
+    root = tmp_path / "ablations"
+    _write_llm_plan_run(
+        root,
+        config_name="llm_query_critic_diagnostic_only",
+        critic_trace={
+            "llm_query_critic_enabled": True,
+            "llm_called": True,
+            "fallback_used": False,
+            "verified_issue_count": 0,
+            "rejected_issue_count": 1,
+            "applied_issue_count": 0,
+        },
+    )
+
+    rows = compare_ablations(
+        root,
+        csv_path=tmp_path / "reports" / "ablation_summary.csv",
+        markdown_path=tmp_path / "reports" / "ablation_summary.md",
+    )
+
+    assert "No verified repair opportunity; clean plan remained unchanged." in rows[0]["notes"]
+
+
+def test_llm_plan_ablation_repair_enabled_but_no_verified_issue_notes_no_opportunity(tmp_path):
+    root = tmp_path / "ablations"
+    _write_llm_plan_run(
+        root,
+        config_name="llm_query_critic_repair_applied",
+        critic_trace={
+            "llm_query_critic_enabled": True,
+            "llm_called": True,
+            "fallback_used": False,
+            "verified_issue_count": 0,
+            "rejected_issue_count": 1,
+            "applied_issue_count": 0,
+        },
+    )
+
+    rows = compare_ablations(
+        root,
+        csv_path=tmp_path / "reports" / "ablation_summary.csv",
+        markdown_path=tmp_path / "reports" / "ablation_summary.md",
+    )
+
+    assert "Repair flag enabled, but no verified grounded issue was available." in rows[0]["notes"]
+    assert "No verified repair opportunity; clean plan remained unchanged." in rows[0]["notes"]
+
+
+def test_llm_intent_frame_fallback_summary_not_counted_as_positive_llm_effect(tmp_path):
+    root = tmp_path / "ablations"
+    _write_llm_plan_run(
+        root,
+        config_name="llm_intent_frame_only",
+        intent_trace={
+            "llm_enabled": True,
+            "llm_called": False,
+            "fallback_used": True,
+            "reason_if_no_change": "llm_provider_unavailable",
+        },
+    )
+
+    rows = compare_ablations(
+        root,
+        csv_path=tmp_path / "reports" / "ablation_summary.csv",
+        markdown_path=tmp_path / "reports" / "ablation_summary.md",
+    )
+
+    assert "Intent enhancer fallback only; not a positive LLM intent test." in rows[0]["notes"]
+
+
+def test_summary_distinguishes_clean_diagnostic_from_positive_control(tmp_path):
+    root = tmp_path / "ablations"
+    _write_llm_plan_run(
+        root,
+        config_name="llm_query_critic_diagnostic_only",
+        critic_trace={
+            "llm_query_critic_enabled": True,
+            "llm_called": True,
+            "verified_issue_count": 0,
+            "applied_issue_count": 0,
+        },
+    )
+    _write_llm_plan_run(
+        root,
+        case_id="weak_sei_acronym_query",
+        config_name="llm_query_critic_repair_applied",
+        critic_trace={
+            "llm_query_critic_enabled": True,
+            "llm_called": True,
+            "verified_issue_count": 1,
+            "applied_issue_count": 1,
+            "query_modified_count": 1,
+        },
+        repair_artifact={
+            "apply_enabled": True,
+            "applied_issue_count": 1,
+            "applied_issue_records": [
+                {
+                    "applied_terms": ["solid electrolyte interphase"],
+                    "rejected_terms": [{"term": "lithium battery"}],
+                }
+            ],
+        },
+        case_metadata={
+            "diagnostic_group": "weak_plan_positive_control",
+            "diagnostic_only": True,
+            "stress_case": True,
+            "formal_benchmark_inclusion": "not part of formal benchmark conclusion",
+        },
+        before_queries=["SEI"],
+        after_queries=['SEI "solid electrolyte interphase"'],
+    )
+    md_path = tmp_path / "reports" / "ablation_summary.md"
+
+    compare_ablations(
+        root,
+        csv_path=tmp_path / "reports" / "ablation_summary.csv",
+        markdown_path=md_path,
+    )
+
+    text = md_path.read_text(encoding="utf-8")
+    assert "No verified repair opportunity; clean plan remained unchanged." in text
+    assert "Weak-plan positive controls:" in text
+    assert "weak_sei_acronym_query / llm_query_critic_repair_applied" in text
+    assert 'before=SEI, after=SEI "solid electrolyte interphase"' in text
+
+
+def test_llm_query_critic_repair_updates_final_queries_after_repair(weak_sei_repair_root):
+    run_dir = _weak_sei_repair_run_dir(weak_sei_repair_root)
+    final_queries = json.loads(
+        (run_dir / "final_queries_after_repair.json").read_text(encoding="utf-8")
+    )
+
+    assert 'sei SEI "solid electrolyte interphase"' in final_queries["queries"]
+    assert "sei SEI" not in final_queries["queries"]
+    assert (
+        'sei SEI "solid electrolyte interphase"'
+        in final_queries["queries_by_provider"]["openalex"]
+    )
+    assert "sei SEI" not in final_queries["queries_by_provider"]["openalex"]
+
+
+def test_llm_query_critic_repair_updates_query_provenance(weak_sei_repair_root):
+    run_dir = _weak_sei_repair_run_dir(weak_sei_repair_root)
+    provenance = json.loads(
+        (run_dir / "query_provenance.json").read_text(encoding="utf-8")
+    )
+    record = provenance["llm_query_critic_repairs"][0]
+
+    assert (
+        'sei SEI "solid electrolyte interphase"'
+        in provenance["final_provider_queries"]["openalex"]
+    )
+    assert "sei SEI" not in provenance["final_provider_queries"]["openalex"]
+    assert record["source"] == "llm_query_critic_suggested_rule_applied"
+    assert record["issue_type"] == "single_acronym_query"
+    assert record["suggested_action"] == "strengthen_query"
+    assert record["original_query"] == "sei SEI"
+    assert record["new_query"] == 'sei SEI "solid electrolyte interphase"'
+    assert record["applied_terms"] == ["solid electrolyte interphase"]
+    assert record["rejected_terms"][0]["term"] == "lithium battery"
+    assert record["term_grounding"][0]["grounding_source"]
+    assert record["term_grounding"][0]["grounding_reason"]
+    assert record["verifier_reason"]
+
+
+def test_llm_query_critic_repair_updates_query_repair_stage_status(weak_sei_repair_root):
+    run_dir = _weak_sei_repair_run_dir(weak_sei_repair_root)
+    status = json.loads(
+        (run_dir / "query_repair_stage_status.json").read_text(encoding="utf-8")
+    )
+
+    assert status["deterministic_query_repair_enabled"] is False
+    assert status["llm_query_critic_repair_enabled"] is True
+    assert status["llm_query_critic_repair_applied"] is True
+    assert status["repair_applied"] is True
+    assert status["query_modified_count"] > 0
+    assert (
+        status["reason_if_no_difference"]
+        != "repair stage disabled but upstream sanitizer still applied"
+    )
+
+
+def test_llm_query_critic_repair_updates_evaluation_query_repair_section(weak_sei_repair_root):
+    run_dir = _weak_sei_repair_run_dir(weak_sei_repair_root)
+    evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
+    query_repair = evaluation["query_repair"]
+
+    assert query_repair["deterministic_query_repair_enabled"] is False
+    assert query_repair["llm_query_critic_repair_enabled"] is True
+    assert query_repair["llm_query_critic_repair_applied"] is True
+    assert query_repair["llm_query_critic_applied_issue_count"] == 1
+    assert query_repair["query_modified_count"] == 1
+    assert query_repair["repair_grounded_term_count"] == 1
+    assert query_repair["repair_rejected_term_count"] == 1
+
+
+def test_llm_query_critic_repair_artifacts_are_consistent(weak_sei_repair_root):
+    run_dir = _weak_sei_repair_run_dir(weak_sei_repair_root)
+    metrics = evaluate_run(run_dir, case_id="weak_sei_acronym_query")
+
+    assert metrics["llm_query_critic_repair_artifact_consistent"] is True
+    assert metrics["final_query_artifact_consistent"] is True
+    assert metrics["llm_query_critic_repair_provenance_count"] == 1
+
+
+def test_compare_ablations_reports_llm_repair_examples(weak_sei_repair_root, tmp_path):
+    md_path = tmp_path / "reports" / "ablation_summary.md"
+
+    rows = compare_ablations(
+        weak_sei_repair_root,
+        csv_path=tmp_path / "reports" / "ablation_summary.csv",
+        markdown_path=md_path,
+    )
+
+    repair_row = next(
+        row for row in rows if row["config_name"] == "llm_query_critic_repair_applied"
+    )
+    assert repair_row["llm_query_critic_original_query_example"] == "sei SEI"
+    assert (
+        repair_row["llm_query_critic_repaired_query_example"]
+        == 'sei SEI "solid electrolyte interphase"'
+    )
+    text = md_path.read_text(encoding="utf-8")
+    assert "applied_terms=solid electrolyte interphase" in text
+    assert "artifact_consistent=true" in text
+
+
+def test_summary_does_not_claim_quality_improvement_when_score_drops(
+    weak_sei_repair_root,
+    tmp_path,
+):
+    md_path = tmp_path / "reports" / "ablation_summary.md"
+
+    compare_ablations(
+        weak_sei_repair_root,
+        csv_path=tmp_path / "reports" / "ablation_summary.csv",
+        markdown_path=md_path,
+    )
+
+    text = md_path.read_text(encoding="utf-8")
+    assert (
+        "Repair was applied and provenance is valid, but query_quality_score did not improve "
+        "under current heuristic; this should be interpreted as repair-mechanism validation, "
+        "not quality improvement."
+    ) in text
+
+
+def test_final_query_artifact_consistent_metric(tmp_path):
+    run_dir = tmp_path / "weak_sei_acronym_query" / "llm_query_critic_repair_applied"
+    _write_query_run(
+        run_dir,
+        "weak_sei_acronym_query",
+        "llm_query_critic_repair_applied",
+        ['sei SEI "solid electrolyte interphase"'],
+    )
+    _write_json(
+        run_dir / "final_queries_after_repair.json",
+        {"queries_by_provider": {"openalex": ["sei SEI"]}, "queries": ["sei SEI"]},
+    )
+    _write_json(
+        run_dir / "query_provenance.json",
+        {
+            "final_provider_queries": {
+                "openalex": ['sei SEI "solid electrolyte interphase"']
+            },
+            "llm_query_critic_repairs": [{"source": "llm_query_critic_suggested_rule_applied"}],
+        },
+    )
+
+    metrics = evaluate_run(run_dir, case_id="weak_sei_acronym_query")
+
+    assert metrics["final_query_artifact_consistent"] is False
+
+
+def test_weak_sei_acronym_positive_control_applies_repair(tmp_path):
+    root = tmp_path / "ablations"
+    exit_code = run_ablations_main(
+        [
+            "--mode",
+            "plan",
+            "--configs",
+            "llm_query_critic_repair_applied",
+            "--case-id",
+            "weak_sei_acronym_query",
+            "--output-root",
+            str(root),
+        ]
+    )
+
+    assert exit_code == 0
+    run_dir = root / "weak_sei_acronym_query" / "llm_query_critic_repair_applied"
+    trace = json.loads((run_dir / "llm_query_critic_trace.json").read_text(encoding="utf-8"))
+    repair = json.loads((run_dir / "query_repair_after_llm_critic.json").read_text(encoding="utf-8"))
+
+    assert trace["verified_issue_count"] > 0
+    assert trace["applied_issue_count"] > 0
+    assert trace["query_modified_count"] + trace["query_added_count"] > 0
+    assert repair["applied_issue_records"][0]["source"] == "llm_query_critic_suggested_rule_applied"
+    assert repair["applied_issue_records"][0]["applied_terms"]
+
+
+def test_weak_oer_acronym_positive_control_applies_repair(tmp_path):
+    root = tmp_path / "ablations"
+    exit_code = run_ablations_main(
+        [
+            "--mode",
+            "plan",
+            "--configs",
+            "llm_query_critic_repair_applied",
+            "--case-id",
+            "weak_oer_acronym_query",
+            "--output-root",
+            str(root),
+        ]
+    )
+
+    assert exit_code == 0
+    run_dir = root / "weak_oer_acronym_query" / "llm_query_critic_repair_applied"
+    trace = json.loads((run_dir / "llm_query_critic_trace.json").read_text(encoding="utf-8"))
+    repair = json.loads((run_dir / "query_repair_after_llm_critic.json").read_text(encoding="utf-8"))
+
+    assert trace["verified_issue_count"] > 0
+    assert trace["applied_issue_count"] > 0
+    assert trace["query_modified_count"] + trace["query_added_count"] > 0
+    record = repair["applied_issue_records"][0]
+    assert record["source"] == "llm_query_critic_suggested_rule_applied"
+    assert "oxygen evolution reaction" in record["applied_terms"]
+
+
+def test_llm_plan_ablation_summary_warns_not_formal_full_ablation(tmp_path):
+    root = tmp_path / "ablations"
+    _write_llm_plan_run(
+        root,
+        config_name="llm_intent_plus_query_critic_repair",
+        intent_trace={"llm_enabled": True, "llm_called": True},
+        critic_trace={"llm_query_critic_enabled": True, "llm_called": True},
+    )
+    md_path = tmp_path / "reports" / "ablation_summary.md"
+
+    compare_ablations(
+        root,
+        csv_path=tmp_path / "reports" / "ablation_summary.csv",
+        markdown_path=md_path,
+    )
+
+    text = md_path.read_text(encoding="utf-8")
+    assert "LLM plan-level diagnostic summary" in text
+    assert "does not prove full retrieval improvement" in text
+    assert "LLM modules do not make paper-level decisions" in text

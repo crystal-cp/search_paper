@@ -59,6 +59,7 @@ from .evaluation.exploration_quality import (
 from .importers import ImportResult, import_papers_from_file
 from .llm_client import GenericLLMClient
 from .llm.intent_frame_enhancer import (
+    FakeLLMIntentProvider,
     GenericLLMIntentProvider,
     LLMIntentFrameEnhancer as OptionalLLMIntentFrameEnhancer,
     LLMIntentProvider,
@@ -2443,6 +2444,10 @@ def build_query_repair_stage_status(
             reason = "ablation partially_supported"
     return {
         "repair_enabled": repair_enabled,
+        "deterministic_query_repair_enabled": repair_enabled,
+        "deterministic_query_repair_applied": bool(query_repair_suggestions.get("applied")),
+        "llm_query_critic_repair_enabled": False,
+        "llm_query_critic_repair_applied": False,
         "repair_applied": bool(query_repair_suggestions.get("applied")),
         "disabled_by_ablation": disabled_by_ablation,
         "raw_candidate_query_count": len(raw_flat),
@@ -2450,10 +2455,156 @@ def build_query_repair_stage_status(
         "dropped_query_count": len(dropped_queries),
         "repaired_query_count": repaired_query_count,
         "added_query_count": len(added_queries),
+        "query_added_count": len(added_queries),
+        "query_dropped_count": len(dropped_queries),
+        "query_modified_count": 0,
         "reason_if_no_difference": reason,
         "raw_only_queries": sorted(raw_set - final_set),
         "final_only_queries": sorted(final_set - raw_set),
     }
+
+
+def llm_query_critic_repair_summary(
+    repair_result: Any,
+) -> dict[str, Any]:
+    """Return a compact serializable summary of applied LLM critic repairs."""
+
+    records = list(getattr(repair_result, "applied_issue_records", []) or [])
+    applied_terms = _unique_strings(
+        [
+            str(term)
+            for record in records
+            for term in (record.get("applied_terms", []) or [])
+            if str(term).strip()
+        ]
+    )
+    rejected_terms = _unique_strings(
+        [
+            str(term.get("term") if isinstance(term, dict) else term)
+            for record in records
+            for term in (record.get("rejected_terms", []) or [])
+            if str(term.get("term") if isinstance(term, dict) else term).strip()
+        ]
+    )
+    term_grounding = [
+        grounding
+        for record in records
+        for grounding in (record.get("term_grounding", []) or [])
+        if isinstance(grounding, dict)
+    ]
+    original_examples = [
+        str(record.get("original_query") or "")
+        for record in records
+        if str(record.get("original_query") or "").strip()
+    ]
+    repaired_examples = [
+        str(record.get("new_query") or record.get("added_query") or "")
+        for record in records
+        if str(record.get("new_query") or record.get("added_query") or "").strip()
+    ]
+    return {
+        "enabled": bool(getattr(repair_result, "apply_enabled", False)),
+        "applied": bool(getattr(repair_result, "applied_issue_count", 0)),
+        "applied_issue_count": int(getattr(repair_result, "applied_issue_count", 0) or 0),
+        "rejected_for_application_count": int(
+            getattr(repair_result, "rejected_for_application_count", 0) or 0
+        ),
+        "query_added_count": int(getattr(repair_result, "query_added_count", 0) or 0),
+        "query_dropped_count": int(getattr(repair_result, "query_dropped_count", 0) or 0),
+        "query_modified_count": int(getattr(repair_result, "query_modified_count", 0) or 0),
+        "repaired_query_count": int(
+            (getattr(repair_result, "query_added_count", 0) or 0)
+            + (getattr(repair_result, "query_dropped_count", 0) or 0)
+            + (getattr(repair_result, "query_modified_count", 0) or 0)
+        ),
+        "provenance_count": len(records),
+        "original_query_example": original_examples[0] if original_examples else "",
+        "repaired_query_example": repaired_examples[0] if repaired_examples else "",
+        "applied_terms": applied_terms,
+        "rejected_terms": rejected_terms,
+        "term_grounding": term_grounding,
+    }
+
+
+def synchronize_final_query_artifacts_after_llm_critic_repair(
+    *,
+    providers: list[str],
+    query_plan_payload: dict[str, Any],
+    query_plan: QueryPlan,
+    queries_by_provider: dict[str, list[str]],
+    raw_candidate_queries_before_repair: dict[str, list[str]],
+    query_provenance: dict[str, Any],
+    final_queries_after_repair: dict[str, list[str]],
+    query_repair_stage_status: dict[str, Any],
+    query_repair_suggestions: dict[str, Any],
+    query_repair_after_llm_critic: Any,
+    disable_query_repair: bool,
+    apply_llm_query_critic_repairs: bool,
+) -> tuple[dict[str, list[str]], dict[str, Any]]:
+    """Synchronize final query artifacts after explicit LLM critic repairs."""
+
+    final_queries = {
+        provider: list(queries_by_provider.get(provider, []))
+        for provider in providers
+    }
+    flat_queries = flattened_provider_queries(final_queries)
+    query_plan.openalex_queries = list(final_queries.get("openalex", []))
+    query_plan.semantic_scholar_queries = list(final_queries.get("semantic_scholar", []))
+    query_plan_payload["query_plan"] = query_plan
+    query_plan_payload["queries"] = _unique_strings(flat_queries)
+    query_plan_payload["queries_by_provider"] = final_queries
+    query_plan_payload["final_provider_queries"] = final_queries
+    query_plan_payload["final_openalex_queries"] = query_plan.openalex_queries
+    query_plan_payload["final_semantic_scholar_queries"] = query_plan.semantic_scholar_queries
+
+    query_provenance["final_provider_queries"] = final_queries
+    query_provenance["final_openalex_queries"] = query_plan.openalex_queries
+    query_provenance["final_semantic_scholar_queries"] = query_plan.semantic_scholar_queries
+    query_provenance["provider_query_counts"] = {
+        provider: len(queries) for provider, queries in final_queries.items()
+    }
+    summary = llm_query_critic_repair_summary(query_repair_after_llm_critic)
+    query_provenance["llm_query_critic_repair_summary"] = summary
+
+    final_queries_after_repair = final_queries
+    raw_flat = flattened_provider_queries(raw_candidate_queries_before_repair)
+    raw_set = set(raw_flat)
+    raw_candidate_count = len(raw_flat)
+    final_set = set(flat_queries)
+    query_repair_stage_status.update(
+        {
+            "deterministic_query_repair_enabled": not disable_query_repair,
+            "deterministic_query_repair_applied": bool(query_repair_suggestions.get("applied")),
+            "llm_query_critic_repair_enabled": bool(apply_llm_query_critic_repairs),
+            "llm_query_critic_repair_applied": bool(summary["applied"]),
+            "repair_applied": bool(
+                query_repair_suggestions.get("applied") or summary["applied"]
+            ),
+            "disabled_by_ablation": bool(disable_query_repair),
+            "final_query_count": len(flat_queries),
+            "repaired_query_count": summary["repaired_query_count"],
+            "query_added_count": summary["query_added_count"],
+            "query_dropped_count": summary["query_dropped_count"],
+            "query_modified_count": summary["query_modified_count"],
+            "llm_query_critic_applied_issue_count": summary["applied_issue_count"],
+            "llm_query_critic_repaired_query_count": summary["repaired_query_count"],
+            "llm_query_critic_original_query_example": summary["original_query_example"],
+            "llm_query_critic_repaired_query_example": summary["repaired_query_example"],
+            "llm_query_critic_applied_terms": summary["applied_terms"],
+            "llm_query_critic_rejected_terms": summary["rejected_terms"],
+            "llm_query_critic_repair_provenance_count": summary["provenance_count"],
+            "reason_if_no_difference": ""
+            if summary["applied"]
+            else query_repair_stage_status.get("reason_if_no_difference", ""),
+            "raw_only_queries": sorted(raw_set - final_set),
+            "final_only_queries": sorted(final_set - raw_set),
+        }
+    )
+    if raw_candidate_count:
+        query_repair_stage_status["raw_to_final_query_change_count"] = len(
+            raw_set.symmetric_difference(final_set)
+        )
+    return final_queries_after_repair, query_repair_stage_status
 
 
 def sync_query_critic_with_repair(
@@ -4309,6 +4460,22 @@ def run_pipeline(
                 query_plan_payload["llm_query_critic_repair_provenance"] = (
                     query_repair_after_llm_critic.provenance_updates
                 )
+                final_queries_after_repair, query_repair_stage_status = (
+                    synchronize_final_query_artifacts_after_llm_critic_repair(
+                        providers=providers,
+                        query_plan_payload=query_plan_payload,
+                        query_plan=query_plan,
+                        queries_by_provider=queries_by_provider,
+                        raw_candidate_queries_before_repair=raw_candidate_queries_before_repair,
+                        query_provenance=query_provenance,
+                        final_queries_after_repair=final_queries_after_repair,
+                        query_repair_stage_status=query_repair_stage_status,
+                        query_repair_suggestions=query_repair_suggestions,
+                        query_repair_after_llm_critic=query_repair_after_llm_critic,
+                        disable_query_repair=disable_query_repair,
+                        apply_llm_query_critic_repairs=apply_llm_query_critic_repairs,
+                    )
+                )
                 query_critic_trace = replace(
                     query_critic_trace,
                     applied_issue_count=query_repair_after_llm_critic.applied_issue_count,
@@ -5013,6 +5180,53 @@ def run_pipeline(
     metrics["query_repair"] = {
         "enabled": bool(query_repair_suggestions.get("enabled")),
         "applied": bool(query_repair_suggestions.get("applied")),
+        "deterministic_query_repair_enabled": bool(
+            query_repair_stage_status.get("deterministic_query_repair_enabled")
+        ),
+        "deterministic_query_repair_applied": bool(
+            query_repair_stage_status.get("deterministic_query_repair_applied")
+        ),
+        "llm_query_critic_repair_enabled": bool(
+            query_repair_stage_status.get("llm_query_critic_repair_enabled")
+        ),
+        "llm_query_critic_repair_applied": bool(
+            query_repair_stage_status.get("llm_query_critic_repair_applied")
+        ),
+        "llm_query_critic_applied_issue_count": int(
+            query_repair_stage_status.get("llm_query_critic_applied_issue_count", 0)
+            or 0
+        ),
+        "llm_query_critic_repaired_query_count": int(
+            query_repair_stage_status.get("llm_query_critic_repaired_query_count", 0)
+            or 0
+        ),
+        "query_added_count": int(query_repair_stage_status.get("query_added_count", 0) or 0),
+        "query_dropped_count": int(query_repair_stage_status.get("query_dropped_count", 0) or 0),
+        "query_modified_count": int(
+            query_repair_stage_status.get("query_modified_count", 0) or 0
+        ),
+        "repair_grounded_term_count": len(
+            query_repair_stage_status.get("llm_query_critic_applied_terms", []) or []
+        ),
+        "repair_rejected_term_count": len(
+            query_repair_stage_status.get("llm_query_critic_rejected_terms", []) or []
+        ),
+        "llm_query_critic_applied_terms": query_repair_stage_status.get(
+            "llm_query_critic_applied_terms",
+            [],
+        ),
+        "llm_query_critic_rejected_terms": query_repair_stage_status.get(
+            "llm_query_critic_rejected_terms",
+            [],
+        ),
+        "llm_query_critic_original_query_example": query_repair_stage_status.get(
+            "llm_query_critic_original_query_example",
+            "",
+        ),
+        "llm_query_critic_repaired_query_example": query_repair_stage_status.get(
+            "llm_query_critic_repaired_query_example",
+            "",
+        ),
         "suggestion_count": len(query_repair_suggestions.get("suggestions", [])),
         "stage_status": query_repair_stage_status,
     }
@@ -5557,6 +5771,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicit opt-in: run optional LLM intent-frame enhancer before final SearchContract artifacts.",
     )
     run.add_argument(
+        "--llm-intent-provider",
+        choices=["none", "fake"],
+        default="none",
+        help="Provider for opt-in LLMIntentFrameEnhancer diagnostics. Defaults to none.",
+    )
+    run.add_argument(
+        "--fake-llm-intent-mode",
+        choices=[
+            "valid",
+            "malformed",
+            "overbroad",
+            "unsupported_domain_expansion",
+            "decision_fields",
+        ],
+        default="valid",
+        help="Fake LLMIntentFrameEnhancer response mode for offline tests.",
+    )
+    run.add_argument(
         "--strictness",
         choices=["strict", "balanced", "broad"],
         default="balanced",
@@ -5714,7 +5946,10 @@ def build_parser() -> argparse.ArgumentParser:
             "malformed_json",
             "forbidden_decision_fields",
             "unsupported_suggestion",
+            "case_aware_weak_query",
             "valid_single_acronym_query",
+            "valid_oer_single_acronym_query",
+            "valid_mof_short_query",
             "no_issue",
         ],
         default="valid",
@@ -5762,6 +5997,19 @@ def main(argv: list[str] | None = None) -> int:
                 ablation_flags_used.append("--enable-llm-query-critic")
             if args.apply_llm_query_critic_repairs:
                 ablation_flags_used.append("--apply-llm-query-critic-repairs")
+            llm_intent_provider = None
+            if args.llm_intent_provider == "fake":
+                ablation_flags_used.extend(
+                    [
+                        "--llm-intent-provider",
+                        "fake",
+                        "--fake-llm-intent-mode",
+                        args.fake_llm_intent_mode,
+                    ]
+                )
+                llm_intent_provider = FakeLLMIntentProvider(
+                    response_mode=args.fake_llm_intent_mode
+                )
             llm_query_critic_provider = None
             if args.llm_query_critic_provider == "fake":
                 ablation_flags_used.extend(
@@ -5786,6 +6034,7 @@ def main(argv: list[str] | None = None) -> int:
                 use_cache=not args.disable_cache,
                 llm_backend=args.llm_backend,
                 enable_llm_intent_enhancer=args.enable_llm_intent_enhancer,
+                llm_intent_provider=llm_intent_provider,
                 enable_llm_query_critic=args.enable_llm_query_critic,
                 llm_query_critic_provider=llm_query_critic_provider,
                 apply_llm_query_critic_repairs=args.apply_llm_query_critic_repairs,

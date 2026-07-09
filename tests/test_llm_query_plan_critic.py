@@ -301,6 +301,51 @@ def test_fake_llm_query_plan_critic_provider_returns_valid_single_acronym_issue(
     assert payload["issues"][0]["affected_query_ids"] == ["q1"]
 
 
+def test_fake_query_critic_is_case_aware_not_hardcoded_sei_for_all_cases():
+    provider = FakeLLMQueryPlanCriticProvider(response_mode="case_aware_weak_query")
+
+    oer_payload = json.loads(
+        provider.critique_query_plan(
+            {
+                "user_question": "OER",
+                "query_plan": {"planned_queries": [{"query_id": "q1", "query": "OER"}]},
+            }
+        )
+    )
+    mof_payload = json.loads(
+        provider.critique_query_plan(
+            {
+                "user_question": "MOF CO2",
+                "query_plan": {
+                    "planned_queries": [{"query_id": "q2", "query": "MOF CO2"}]
+                },
+            }
+        )
+    )
+    clean_payload = json.loads(
+        provider.critique_query_plan(
+            {
+                "user_question": "AI literature screening evidence verification",
+                "query_plan": {
+                    "planned_queries": [
+                        {
+                            "query_id": "q3",
+                            "query": '"AI literature screening" "evidence verification"',
+                        }
+                    ]
+                },
+            }
+        )
+    )
+
+    assert oer_payload["issues"][0]["affected_aspect"] == "OER"
+    assert "oxygen evolution reaction" in oer_payload["issues"][0]["suggested_terms"]
+    assert mof_payload["issues"][0]["affected_aspect"] == "MOF CO2"
+    assert "metal-organic framework" in mof_payload["issues"][0]["suggested_terms"]
+    assert clean_payload["issues"][0]["issue_type"] == "no_issue"
+    assert "SEI" not in json.dumps(oer_payload, ensure_ascii=False)
+
+
 def test_single_acronym_normalizer_accepts_repeated_case_variant():
     assert is_single_acronym_query("sei SEI")
     assert is_single_acronym_query("SEI SEI")

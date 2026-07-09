@@ -22,19 +22,115 @@ except ModuleNotFoundError:
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+CLEAN_LLM_PLAN_BENCHMARK_CASE_IDS = {
+    "ai_literature_screening",
+    "mof_co2_capture",
+    "thin_film_deposition",
+    "sei_lithium_battery",
+    "oer_spin_state",
+}
+
 ABLATION_CONFIGS: dict[str, dict[str, Any]] = {
     "deterministic_baseline": {
         "flags": [],
         "disabled_modules": [],
+        "mode_support": "plan_level",
+        "support_status": {"full_system": "baseline"},
+        "applies_query_changes": False,
+        "uses_real_llm": False,
+        "diagnostic_only": False,
+        "warning_if_pilot_only": "",
     },
     "full_system": {
         "flags": [],
         "disabled_modules": [],
+        "mode_support": "plan_level",
+        "support_status": {"full_system": "baseline"},
+        "applies_query_changes": False,
+        "uses_real_llm": False,
+        "diagnostic_only": False,
+        "warning_if_pilot_only": "",
     },
     "llm_intent_frame_only": {
-        "flags": ["--enable-llm-intent-enhancer"],
+        "flags": [
+            "--enable-llm-intent-enhancer",
+            "--llm-intent-provider",
+            "fake",
+            "--fake-llm-intent-mode",
+            "valid",
+        ],
         "disabled_modules": [],
         "enabled_modules_extra": ["llm_intent_frame_enhancer"],
+        "mode_support": "plan_level",
+        "support_status": {"llm_intent_frame_enhancer": "diagnostic_controlled"},
+        "applies_query_changes": False,
+        "uses_real_llm": False,
+        "diagnostic_only": True,
+        "warning_if_pilot_only": "Plan-level diagnostic only; not a formal LLM ablation conclusion.",
+    },
+    "llm_query_critic_diagnostic_only": {
+        "flags": [
+            "--enable-llm-query-critic",
+            "--llm-query-critic-provider",
+            "fake",
+            "--fake-llm-query-critic-mode",
+            "case_aware_weak_query",
+        ],
+        "disabled_modules": [],
+        "enabled_modules_extra": ["llm_query_plan_critic"],
+        "mode_support": "plan_level",
+        "support_status": {"llm_query_plan_critic": "diagnostic_artifacts_only"},
+        "applies_query_changes": False,
+        "uses_real_llm": False,
+        "diagnostic_only": True,
+        "warning_if_pilot_only": "Critique artifacts only; query plan must remain unchanged.",
+    },
+    "llm_query_critic_repair_applied": {
+        "flags": [
+            "--enable-llm-query-critic",
+            "--apply-llm-query-critic-repairs",
+            "--llm-query-critic-provider",
+            "fake",
+            "--fake-llm-query-critic-mode",
+            "case_aware_weak_query",
+        ],
+        "disabled_modules": [],
+        "enabled_modules_extra": ["llm_query_plan_critic"],
+        "mode_support": "plan_level",
+        "support_status": {"llm_query_plan_critic_repairs": "controlled_repair_pilot"},
+        "applies_query_changes": True,
+        "uses_real_llm": False,
+        "diagnostic_only": False,
+        "warning_if_pilot_only": "Controlled repair pilot; only deterministic rule-applied query changes are allowed.",
+    },
+    "llm_intent_plus_query_critic_repair": {
+        "flags": [
+            "--enable-llm-intent-enhancer",
+            "--llm-intent-provider",
+            "fake",
+            "--fake-llm-intent-mode",
+            "valid",
+            "--enable-llm-query-critic",
+            "--apply-llm-query-critic-repairs",
+            "--llm-query-critic-provider",
+            "fake",
+            "--fake-llm-query-critic-mode",
+            "case_aware_weak_query",
+        ],
+        "disabled_modules": [],
+        "enabled_modules_extra": [
+            "llm_intent_frame_enhancer",
+            "llm_query_plan_critic",
+        ],
+        "mode_support": "plan_level",
+        "support_status": {
+            "llm_intent_frame_enhancer": "diagnostic_controlled",
+            "llm_query_plan_critic_repairs": "controlled_repair_pilot",
+        },
+        "applies_query_changes": True,
+        "uses_real_llm": False,
+        "diagnostic_only": False,
+        "warning_if_pilot_only": "Controlled combined LLM plan-level pilot; not a full retrieval ablation.",
     },
     "llm_query_critic_only": {
         "flags": [
@@ -42,11 +138,17 @@ ABLATION_CONFIGS: dict[str, dict[str, Any]] = {
             "--llm-query-critic-provider",
             "fake",
             "--fake-llm-query-critic-mode",
-            "valid",
+            "case_aware_weak_query",
         ],
         "disabled_modules": [],
         "enabled_modules_extra": ["llm_query_plan_critic"],
+        "mode_support": "plan_level",
         "support_status": {"llm_query_plan_critic": "diagnostic_artifacts_only"},
+        "applies_query_changes": False,
+        "uses_real_llm": False,
+        "diagnostic_only": True,
+        "warning_if_pilot_only": "Backward-compatible alias for llm_query_critic_diagnostic_only.",
+        "alias_for": "llm_query_critic_diagnostic_only",
     },
     "legacy_query_planning": {
         "flags": ["--legacy-query-planning"],
@@ -92,7 +194,12 @@ def parse_config_names(value: str) -> list[str]:
     return names
 
 
-def select_cases(benchmark: dict[str, Any], case_id: str | None, mode: str) -> list[dict[str, Any]]:
+def select_cases(
+    benchmark: dict[str, Any],
+    case_id: str | None,
+    mode: str,
+    case_group: str = "clean_benchmark",
+) -> list[dict[str, Any]]:
     cases = list(benchmark.get("cases") or [])
     if case_id:
         normalized = normalize_case_id(case_id)
@@ -101,7 +208,46 @@ def select_cases(benchmark: dict[str, Any], case_id: str | None, mode: str) -> l
         cases = [case for case in cases if case.get("plan_only_eligible", True)]
     else:
         cases = [case for case in cases if case.get("full_retrieval_required", True)]
+    if not case_id and mode == "plan":
+        if case_group == "clean_benchmark":
+            cases = [
+                case
+                for case in cases
+                if case.get("id") in CLEAN_LLM_PLAN_BENCHMARK_CASE_IDS
+                and not case.get("diagnostic_only")
+                and not case.get("stress_case")
+            ]
+        elif case_group == "weak_plan_positive_controls":
+            cases = [
+                case
+                for case in cases
+                if str(case.get("llm_plan_diagnostic_group") or "")
+                == "weak_plan_positive_control"
+                or bool(case.get("stress_case"))
+            ]
     return cases
+
+
+def llm_query_critic_config_enabled(config_name: str) -> bool:
+    config = ABLATION_CONFIGS[config_name]
+    modules = set(config.get("enabled_modules_extra", []) or [])
+    return "llm_query_plan_critic" in modules or config_name in {
+        "llm_query_critic_diagnostic_only",
+        "llm_query_critic_repair_applied",
+        "llm_query_critic_only",
+        "llm_intent_plus_query_critic_repair",
+    }
+
+
+def case_extra_flags(case: dict[str, Any], *, config_name: str, mode: str) -> list[str]:
+    if mode != "plan" or not llm_query_critic_config_enabled(config_name):
+        return []
+    if str(case.get("llm_plan_diagnostic_group") or "") != "weak_plan_positive_control":
+        return []
+    configured = case.get("llm_plan_extra_flags")
+    if isinstance(configured, list) and configured:
+        return [str(flag) for flag in configured]
+    return ["--legacy-query-planning", "--skip-query-families", "--disable-query-repair"]
 
 
 def build_pipeline_command(
@@ -114,6 +260,7 @@ def build_pipeline_command(
     max_per_query: int,
     query_family_provider_cap: int,
 ) -> list[str]:
+    extra_flags = case_extra_flags(case, config_name=config_name, mode=mode)
     command = [
         sys.executable,
         "-m",
@@ -146,6 +293,7 @@ def build_pipeline_command(
             ]
         )
     command.extend(ABLATION_CONFIGS[config_name]["flags"])
+    command.extend(extra_flags)
     return command
 
 
@@ -171,11 +319,28 @@ def synthetic_provider_status(providers: list[str]) -> dict[str, dict[str, Any]]
 def write_fallback_ablation_config(
     output_dir: Path,
     *,
+    case: dict[str, Any],
     config_name: str,
     mode: str,
     command: list[str],
+    extra_flags: list[str] | None = None,
 ) -> None:
     config = ABLATION_CONFIGS[config_name]
+    case_metadata = {
+        "case_id": str(case.get("id") or ""),
+        "diagnostic_group": str(
+            case.get("llm_plan_diagnostic_group")
+            or ("weak_plan_positive_control" if case.get("stress_case") else "clean_benchmark_diagnostic")
+        ),
+        "diagnostic_only": bool(case.get("diagnostic_only", False)),
+        "stress_case": bool(case.get("stress_case", False)),
+        "formal_benchmark_inclusion": str(
+            case.get("formal_benchmark_inclusion")
+            or case.get("benchmark_inclusion")
+            or ""
+        ),
+        "case_extra_flags_used": extra_flags or [],
+    }
     payload = {
         "ablation_config_name": config_name,
         "mode": mode,
@@ -195,6 +360,13 @@ def write_fallback_ablation_config(
         + list(config.get("enabled_modules_extra", [])),
         "cli_flags_used": config.get("flags", []),
         "support_status": config.get("support_status", {}),
+        "mode_support": config.get("mode_support", ""),
+        "applies_query_changes": bool(config.get("applies_query_changes", False)),
+        "uses_real_llm": bool(config.get("uses_real_llm", False)),
+        "diagnostic_only": bool(config.get("diagnostic_only", False)),
+        "warning_if_pilot_only": config.get("warning_if_pilot_only", ""),
+        "alias_for": config.get("alias_for", ""),
+        "case_metadata": case_metadata,
         "pipeline_command": command,
         "written_by": "tools/run_ablations.py",
     }
@@ -203,10 +375,19 @@ def write_fallback_ablation_config(
         try:
             existing = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(existing, dict):
+                merged_support_status = {
+                    **dict(existing.get("support_status", {}) or {}),
+                    **dict(config.get("support_status", {}) or {}),
+                }
                 payload = {
                     **payload,
                     **existing,
                     "mode": existing.get("mode") or mode,
+                    "support_status": merged_support_status,
+                    "case_metadata": {
+                        **case_metadata,
+                        **dict(existing.get("case_metadata", {}) or {}),
+                    },
                     "pipeline_command": existing.get("pipeline_command") or command,
                 }
         except json.JSONDecodeError:
@@ -238,6 +419,7 @@ def run_one(
         max_per_query=max_per_query,
         query_family_provider_cap=query_family_provider_cap,
     )
+    extra_flags = case_extra_flags(case, config_name=config_name, mode=mode)
     completed = subprocess.run(
         command,
         cwd=str(REPO_ROOT),
@@ -262,9 +444,11 @@ def run_one(
     )
     write_fallback_ablation_config(
         output_dir,
+        case=case,
         config_name=config_name,
         mode=mode,
         command=command,
+        extra_flags=extra_flags,
     )
     if mode == "full" and not (output_dir / "provider_status.json").exists():
         (output_dir / "provider_status.json").write_text(
@@ -326,6 +510,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--benchmark", default=str(DEFAULT_BENCHMARK_PATH))
     parser.add_argument("--case-id", default=None)
     parser.add_argument("--mode", choices=["plan", "full"], required=True)
+    parser.add_argument(
+        "--case-group",
+        choices=["clean_benchmark", "weak_plan_positive_controls", "all"],
+        default="clean_benchmark",
+        help="Plan-mode case family to run when --case-id is not provided.",
+    )
     parser.add_argument("--configs", required=True)
     parser.add_argument("--providers", nargs="+", default=["openalex"])
     parser.add_argument("--output-root", default="outputs/ablations")
@@ -348,7 +538,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config_names = parse_config_names(args.configs)
     benchmark = load_benchmark_cases(Path(args.benchmark))
-    cases = select_cases(benchmark, args.case_id, args.mode)
+    cases = select_cases(benchmark, args.case_id, args.mode, args.case_group)
     output_root = Path(args.output_root)
     if args.overwrite and output_root.exists():
         shutil.rmtree(output_root)

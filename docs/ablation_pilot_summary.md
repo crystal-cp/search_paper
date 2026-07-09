@@ -141,6 +141,53 @@ diagnostic, not as a completed formal LLM ablation study. The LLM will not
 replace evidence validation, domain guardrails, ranking decisions, reading
 priority, or paper-level include/exclude decisions.
 
+## LLM Plan-Level Pilot v3
+
+The `llm_plan_ablation_pilot_v3` run completed 34 plan-level runs with
+`returncode=0`. This is a plan-level pilot diagnostic, not a full retrieval
+ablation and not a formal paper-level LLM conclusion.
+
+The clean benchmark diagnostic covered:
+
+- `ai_screening`
+- `mof_co2`
+- `thin_film_methods`
+- `sei_lithium`
+- `oer_spin_state`
+
+In these clean cases, QueryFamily plans remained stable and
+`LLMQueryPlanCritic` did not force unnecessary repairs. The runs preserved the
+expected safety properties: `retrieval_performed=false`,
+`research_gap_generation_status=skipped`,
+`ranked_papers_based_on_real_retrieval=false`, and
+`paper_decision_mutation_count=0`.
+
+The weak-plan positive controls covered:
+
+- `weak_sei_acronym_query`
+- `weak_oer_acronym_query`
+- `weak_mof_short_query`
+
+These controls verified that weak plans can trigger grounded critic findings
+and deterministic rule-applied repairs when the explicit repair flag is enabled.
+The examples are mechanism checks, not formal benchmark evidence:
+
+| Case | Before | After |
+| --- | --- | --- |
+| `weak_sei_acronym_query` | `sei SEI` | `sei SEI "solid electrolyte interphase"` |
+| `weak_oer_acronym_query` | `oer OER` | `oer OER "oxygen evolution reaction"` |
+| `weak_mof_short_query` | `MOF CO2` | `MOF CO2 "metal-organic framework"` |
+
+Artifact consistency was fixed for repair-applied runs. Final query artifacts,
+critic after-plan artifacts, query provenance, repair-stage status, evaluation
+metrics, and ablation summaries now agree about whether an LLM critic repair was
+applied.
+
+The correct interpretation is mechanism validation under plan-only conditions.
+This pilot does not claim full retrieval improvement, does not claim uniform
+`query_quality_score` improvement, and does not show that LLM-enhanced configs
+improve downstream paper ranking or screening decisions.
+
 ## Partially Supported Ablations
 
 Partially supported ablations must be marked clearly in summaries. In particular,

@@ -1149,6 +1149,73 @@ cases:
         - "corrosion passivation"
       expected_effect: "halide-perovskite photovoltaic passivation papers move upward; oxide catalyst/silicon/corrosion papers move downward"
 
+  - id: weak_sei_acronym_query
+    display_name: "Weak SEI acronym query"
+    domain: "battery materials"
+    question: "SEI"
+    canonical_intent: "Diagnostic stress case for a deliberately weak SEI acronym-only plan."
+    plan_only_eligible: true
+    full_retrieval_required: false
+    diagnostic_only: true
+    stress_case: true
+    llm_plan_diagnostic_group: "weak_plan_positive_control"
+    formal_benchmark_inclusion: "not part of formal benchmark conclusion"
+    llm_plan_extra_flags:
+      - "--legacy-query-planning"
+      - "--skip-query-families"
+      - "--disable-query-repair"
+    expected_query_anchors:
+      - id: sei_core
+        any_of:
+          - "SEI"
+          - "solid electrolyte interphase"
+
+  - id: weak_oer_acronym_query
+    display_name: "Weak OER acronym query"
+    domain: "electrocatalysis"
+    question: "OER"
+    canonical_intent: "Diagnostic stress case for a deliberately weak OER acronym-only plan."
+    plan_only_eligible: true
+    full_retrieval_required: false
+    diagnostic_only: true
+    stress_case: true
+    llm_plan_diagnostic_group: "weak_plan_positive_control"
+    formal_benchmark_inclusion: "not part of formal benchmark conclusion"
+    llm_plan_extra_flags:
+      - "--legacy-query-planning"
+      - "--skip-query-families"
+      - "--disable-query-repair"
+    expected_query_anchors:
+      - id: oer_core
+        any_of:
+          - "OER"
+          - "oxygen evolution reaction"
+
+  - id: weak_mof_short_query
+    display_name: "Weak MOF CO2 short query"
+    domain: "porous materials"
+    question: "MOF CO2"
+    canonical_intent: "Diagnostic stress case for a deliberately short MOF CO2 plan."
+    plan_only_eligible: true
+    full_retrieval_required: false
+    diagnostic_only: true
+    stress_case: true
+    llm_plan_diagnostic_group: "weak_plan_positive_control"
+    formal_benchmark_inclusion: "not part of formal benchmark conclusion"
+    llm_plan_extra_flags:
+      - "--legacy-query-planning"
+      - "--skip-query-families"
+      - "--disable-query-repair"
+    expected_query_anchors:
+      - id: mof_core
+        any_of:
+          - "MOF"
+          - "metal-organic framework"
+      - id: co2_context
+        any_of:
+          - "CO2"
+          - "carbon dioxide"
+
 validation_matrix:
   plan_only_metrics:
     - search_brief_completeness
