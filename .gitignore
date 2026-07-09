@@ -1,14 +1,23 @@
 .env
 .DS_Store
 .venv/
+
+# Python/runtime artifacts
 __pycache__/
+**/__pycache__/
 *.py[cod]
 .pytest_cache/
 .coverage
 htmlcov/
 
+# Local review/export bundles
+*.zip
+review_meta/
+
+# Raw provider caches
 data/cache/*
 !data/cache/.gitkeep
 
+# Generated run outputs
 outputs/*
 !outputs/.gitkeep

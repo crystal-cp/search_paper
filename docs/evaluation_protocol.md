@@ -12,7 +12,7 @@ its reasoning.
 The v9 deterministic baseline is the current frozen rule-controlled baseline.
 LLM behavior is optional or planned for controlled future evaluation and must
 not directly decide `include` / `exclude`, `must_read`, `out_of_scope`,
-`final_score`, `domain_decision`, or evidence validity.
+`final_score`, `domain_decision`, evidence validity, or `reading_priority`.
 
 ## Evaluation Modes
 
@@ -307,11 +307,13 @@ Pilot summaries must be diagnostic and cautious.
 
 ## Future LLM Evaluation
 
-LLMIntentFrameEnhancer phase 1 should be measured against this deterministic
-baseline before any stronger LLM components are introduced. The first question is
-whether the LLM helps recover novice intent slots, especially for multilingual
-questions, abbreviations, aliases, target context, and negative context, without
-injecting unsupported domains. LLMQueryPlanCritic remains future work and should
-not be treated as part of the phase 1 intent-frame evaluation. LLM variants must
-not bypass rule-owned screening, evidence, domain, ranking, or reading-priority
-decisions.
+LLMIntentFrameEnhancer and LLMQueryPlanCritic are now available as optional,
+controlled planning-layer diagnostics. Their current evidence is limited to
+plan-level pilots and a small full-retrieval safety pilot. The next formal
+question is whether these controlled planning suggestions improve retrieval or
+screening outcomes under stable provider conditions and human labels.
+
+Until that study is run, LLM variants must be described as diagnostic or safety
+pilots. They must not be presented as a completed formal LLM ablation, and they
+must not bypass rule-owned screening, evidence, domain, ranking, or
+`reading_priority` decisions.

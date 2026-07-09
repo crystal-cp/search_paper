@@ -85,7 +85,7 @@ The safety contract for this pilot is:
 - A deterministic verifier checks whether proposed issues are supported.
 - The deterministic rule applier only applies verified and grounded terms.
 - Ungrounded target or context anchors are rejected.
-- The LLM does not decide `include`, `exclude`, `must_read`, `domain_decision`, `final_score`, or evidence validity.
+- The LLM does not decide `include`, `exclude`, `must_read`, `domain_decision`, `final_score`, evidence validity, or `reading_priority`.
 
 When `--apply-llm-query-critic-repairs` is not enabled, verified critic findings
 remain diagnostic artifacts and should not change final queries. When the flag

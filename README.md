@@ -13,6 +13,10 @@ The project is not a generic keyword-search wrapper, a paper summarizer, or a
 commercial literature-management product. Its research focus is novice intent
 repair, provider-aware query planning, abstract-grounded evidence validation,
 domain guardrails, role-aware ranking, human feedback, and transparent reporting.
+
+User question is not a search query. User question is noisy evidence of research
+intent. The system must infer, repair, and operationalize that intent.
+
 The current frozen baseline is **v9 deterministic baseline**: a rule-controlled,
 reproducible pipeline where QueryFamily planning is enabled by default and LLM
 behavior is not required.
@@ -21,19 +25,22 @@ LLM is a controlled enhancement layer, not the decision maker. LLM-enhanced
 behavior is optional or planned for controlled evaluation; the rule-based core
 must continue to run without an LLM key. An LLM must not directly decide
 `include` / `exclude`, `must_read`, `out_of_scope`, `final_score`,
-`domain_decision`, or evidence validity. Those decisions are owned by explicit
-rules, span validation, domain guardrails, ranking diagnostics, and auditable
-artifacts.
+`domain_decision`, evidence validity, or `reading_priority`. Those decisions are
+owned by explicit rules, span validation, domain guardrails, ranking
+diagnostics, and auditable artifacts.
 
-For the detailed research framing and current system design, see
-[`docs/research_problem.md`](docs/research_problem.md) and
-[`docs/system_architecture.md`](docs/system_architecture.md).
-For the plan-level LLM pilot diagnostic, see
-[`docs/llm_plan_level_pilot.md`](docs/llm_plan_level_pilot.md); it is not a
-formal full-retrieval LLM ablation conclusion.
-For the small full-retrieval LLM safety pilot, see
-[`docs/llm_full_retrieval_pilot.md`](docs/llm_full_retrieval_pilot.md); it is a
-safety check, not a formal performance-ablation conclusion.
+Core project docs:
+
+- [`docs/research_problem.md`](docs/research_problem.md)
+- [`docs/system_architecture.md`](docs/system_architecture.md)
+- [`docs/evaluation_protocol.md`](docs/evaluation_protocol.md)
+- [`docs/ablation_pilot_summary.md`](docs/ablation_pilot_summary.md)
+- [`docs/llm_plan_level_pilot.md`](docs/llm_plan_level_pilot.md)
+- [`docs/llm_full_retrieval_pilot.md`](docs/llm_full_retrieval_pilot.md)
+
+The LLM pilot docs are diagnostic safety and mechanism checks. They are not a
+formal full-retrieval LLM ablation conclusion and do not claim LLM improves
+retrieval precision, `Precision@10`, or ranking quality.
 
 The v9 deterministic baseline pipeline:
 
@@ -111,15 +118,19 @@ paper-level decisions.
 
 ## Optional DeepSeek LLM Enhancement
 
-The default v9 baseline is deterministic and rule-controlled. You can optionally
-use an OpenAI-compatible LLM backend for controlled query-planning, evidence
-extraction, and/or verification experiments. DeepSeek support is built in
-through `DEEPSEEK_API_KEY`.
+The current research baseline is deterministic and rule-controlled. You can
+optionally configure an OpenAI-compatible LLM backend for controlled experiments,
+but the baseline does not require an LLM key and does not let LLM output own
+screening decisions. DeepSeek support is built in through `DEEPSEEK_API_KEY`.
 
-LLM output is advisory. It can propose translations, query ideas, extraction
-candidates, or critic diagnostics, but it must not directly decide
-`include` / `exclude`, `must_read`, `out_of_scope`, `final_score`,
-`domain_decision`, or evidence validity.
+Current LLM research paths are controlled enhancement layers.
+`LLMIntentFrameEnhancer` and `LLMQueryPlanCritic` are advisory: they may propose
+intent-frame suggestions or query-plan critiques, but deterministic verifiers,
+rule appliers, and provenance tracking decide whether any suggestion is accepted
+into artifacts. LLM output must not directly decide `include` / `exclude`,
+`must_read`, `out_of_scope`, `final_score`, `domain_decision`, evidence
+validity, or `reading_priority`.
+
 When the research question is written in Chinese, the planner prepares an
 English `planning_question` before retrieval. With `--planner-mode llm`, the
 LLM is asked to translate the question and generate English scholarly queries.

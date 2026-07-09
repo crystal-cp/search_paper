@@ -24,7 +24,7 @@ The v9 deterministic baseline includes:
 The baseline remains deterministic and rule-controlled. LLM components are
 optional or planned controlled enhancements. LLM output must not directly decide
 include/exclude, must-read status, out-of-scope status, final score, domain
-decision, or evidence validity.
+decision, evidence validity, or reading priority.
 
 ## Smoke Run Coverage
 
