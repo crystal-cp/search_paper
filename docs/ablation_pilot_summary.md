@@ -188,6 +188,40 @@ This pilot does not claim full retrieval improvement, does not claim uniform
 `query_quality_score` improvement, and does not show that LLM-enhanced configs
 improve downstream paper ranking or screening decisions.
 
+## Small Full-Retrieval LLM Safety Pilot v2
+
+The `llm_full_pilot_v2` run completed 4 full-retrieval runs with
+`returncode=0`:
+
+- `sei_lithium_battery / full_system`
+- `sei_lithium_battery / llm_intent_plus_query_critic_repair`
+- `oer_spin_state / full_system`
+- `oer_spin_state / llm_intent_plus_query_critic_repair`
+
+Retrieval succeeded in all four runs. The runs were based on real retrieval
+artifacts, with `retrieval_performed=true` and
+`ranked_papers_based_on_real_retrieval=true`.
+
+Safety interpretation:
+
+- Reading-path safety counts stayed at zero.
+- SEI negative-context papers did not enter `must_read` or `include`.
+- OER kept a bounded nonzero `must_read_count` of 12.
+- `llm_direct_paper_decision_mutation_count=0`.
+- `llm_direct_evidence_validation_mutation_count=0`.
+- `llm_direct_ranking_mutation_count=0`.
+- Final query artifacts and LLM repair artifacts remained consistent.
+
+In the LLM-enhanced config, `LLMIntentFrameEnhancer`,
+`LLMQueryPlanCritic`, and the apply-LLM-query-critic-repairs flag were enabled.
+The clean full QueryFamily plans had no verified grounded repair opportunity, so
+`llm_query_critic_repair_enabled=true` while
+`llm_query_critic_repair_applied=false`. This is a safe no-op, not a failure.
+
+This pilot is a small full-pipeline safety diagnostic. It does not claim LLM
+retrieval precision improvement, `Precision@10` improvement, ranking-quality
+improvement, or completion of a formal full LLM ablation.
+
 ## Partially Supported Ablations
 
 Partially supported ablations must be marked clearly in summaries. In particular,

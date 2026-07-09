@@ -504,6 +504,28 @@ def provider_success_rate(provider_status: dict[str, Any]) -> float | None:
     return successes / len(statuses)
 
 
+def provider_error_count(provider_status: dict[str, Any]) -> int | None:
+    if not isinstance(provider_status, dict) or not provider_status:
+        return None
+    count = 0
+    for status_payload in provider_status.values():
+        if not isinstance(status_payload, dict):
+            continue
+        status = str(status_payload.get("status") or "").strip().lower()
+        error_type = str(status_payload.get("error_type") or "").strip().lower()
+        message = str(status_payload.get("message") or "").strip().lower()
+        if (
+            status in FATAL_PROVIDER_STATES
+            or "error" in status
+            or "failed" in status
+            or "error" in error_type
+            or "failed" in error_type
+            or ("error" in message and status not in SUCCESS_PROVIDER_STATES)
+        ):
+            count += 1
+    return count
+
+
 def first_number(*values: Any) -> int | None:
     for value in values:
         if isinstance(value, bool):
@@ -515,6 +537,26 @@ def first_number(*values: Any) -> int | None:
         if isinstance(value, str) and value.strip().isdigit():
             return int(value.strip())
     return None
+
+
+def provider_returned_paper_count(provider_status: dict[str, Any]) -> int | None:
+    if not isinstance(provider_status, dict) or not provider_status:
+        return None
+    total = 0
+    observed = False
+    for status_payload in provider_status.values():
+        if not isinstance(status_payload, dict):
+            continue
+        count = first_number(
+            status_payload.get("returned_paper_count"),
+            status_payload.get("retrieved_paper_count"),
+            status_payload.get("paper_count"),
+        )
+        if count is None:
+            continue
+        observed = True
+        total += count
+    return total if observed else None
 
 
 def normalize_match_text(text: str) -> str:
@@ -975,13 +1017,26 @@ def evaluate_run(
         retrieval_diagnostics.get("raw_retrieved_count"),
         retrieval_diagnostics.get("original_paper_count"),
         retrieval_diagnostics.get("raw_paper_count"),
+        evaluation.get("raw_retrieved_paper_count")
+        if isinstance(evaluation, dict)
+        else None,
+        evaluation.get("raw_retrieved_count")
+        if isinstance(evaluation, dict)
+        else None,
         exploration_quality.get("raw_retrieved_paper_count")
         if isinstance(exploration_quality, dict)
         else None,
+        provider_returned_paper_count(provider_status),
     )
     merged_count = first_number(
         retrieval_diagnostics.get("merged_paper_count"),
         retrieval_diagnostics.get("merged_count"),
+        evaluation.get("merged_paper_count")
+        if isinstance(evaluation, dict)
+        else None,
+        evaluation.get("merged_count")
+        if isinstance(evaluation, dict)
+        else None,
         exploration_quality.get("merged_paper_count")
         if isinstance(exploration_quality, dict)
         else None,
@@ -992,6 +1047,9 @@ def evaluate_run(
     duplicate_count = first_number(
         retrieval_diagnostics.get("duplicate_count"),
         retrieval_diagnostics.get("duplicate_records_removed"),
+        evaluation.get("duplicate_count")
+        if isinstance(evaluation, dict)
+        else None,
     )
     if duplicate_count is None and raw_count is not None and merged_count is not None:
         duplicate_count = max(raw_count - merged_count, 0)
@@ -1044,6 +1102,20 @@ def evaluate_run(
         row
         for row in ranked_rows
         if str(row.get("decision", "")).strip().lower() == "include"
+    ]
+    optional_rows = [
+        row
+        for row in ranked_rows
+        if str(row.get("decision", "")).strip().lower() == "optional"
+        or str(row.get("reading_priority", "")).strip().lower() == "optional"
+    ]
+    exclude_rows = [
+        row
+        for row in ranked_rows
+        if str(row.get("decision", "")).strip().lower() == "exclude"
+        or str(row.get("reading_priority", "")).strip().lower() == "exclude"
+        or str(row.get("domain_decision", "")).strip().lower()
+        in {"exclude", "out_of_scope"}
     ]
     include_false_positive_count = (
         sum(
@@ -1113,6 +1185,62 @@ def evaluate_run(
         or llm_trace_count(llm_query_critic_trace, "query_modified_count")
         or query_repair_after_llm_critic.get("applied_issue_count")
     )
+    evaluation_query_repair = (
+        evaluation.get("query_repair", {})
+        if isinstance(evaluation, dict)
+        else {}
+    )
+    llm_query_repair_enabled = bool(
+        query_repair_stage_status.get(
+            "llm_query_critic_repair_enabled",
+            query_repair_after_llm_critic.get(
+                "apply_enabled",
+                evaluation_query_repair.get(
+                    "llm_query_critic_repair_enabled",
+                    False,
+                )
+                if isinstance(evaluation_query_repair, dict)
+                else False,
+            ),
+        )
+    )
+    llm_query_critic_verified_issue_count = llm_trace_count(
+        llm_query_critic_trace,
+        "verified_issue_count",
+    )
+    if not llm_query_critic_verified_issue_count:
+        llm_query_critic_verified_issue_count = int(
+            query_repair_stage_status.get(
+                "llm_query_critic_verified_issue_count",
+                evaluation_query_repair.get("llm_query_critic_verified_issue_count", 0)
+                if isinstance(evaluation_query_repair, dict)
+                else 0,
+            )
+            or 0
+        )
+    llm_query_critic_applied_issue_count = llm_trace_count(
+        llm_query_critic_trace,
+        "applied_issue_count",
+    )
+    if not llm_query_critic_applied_issue_count:
+        llm_query_critic_applied_issue_count = int(
+            query_repair_stage_status.get(
+                "llm_query_critic_applied_issue_count",
+                evaluation_query_repair.get("llm_query_critic_applied_issue_count", 0)
+                if isinstance(evaluation_query_repair, dict)
+                else 0,
+            )
+            or 0
+        )
+    llm_query_critic_reason_if_no_change = str(
+        llm_query_critic_trace.get("reason_if_no_change", "")
+        or query_repair_stage_status.get("llm_query_critic_reason_if_no_change", "")
+        or (
+            evaluation_query_repair.get("llm_query_critic_reason_if_no_change", "")
+            if isinstance(evaluation_query_repair, dict)
+            else ""
+        )
+    )
     planned_final_queries = direct_final_queries_from_artifact(planned_queries)
     provenance_final_queries = direct_final_queries_from_artifact(query_provenance)
     critic_after_queries = direct_final_queries_from_artifact(query_plan_after_llm_critic)
@@ -1168,6 +1296,7 @@ def evaluate_run(
         "anchor_coverage": anchor_coverage["score"],
         "anchor_coverage_detail": anchor_coverage,
         "provider_success_rate": provider_success_rate(provider_status),
+        "provider_error_count": provider_error_count(provider_status),
         "provider_status": provider_status,
         "query_repair_enabled": bool(
             query_repair_stage_status.get(
@@ -1208,6 +1337,7 @@ def evaluate_run(
         "no_query_repair_conclusive": no_query_repair_conclusive,
         "merged_count": merged_count,
         "raw_retrieved_count": raw_count,
+        "retrieval_status": retrieval_status,
         "duplicate_count": duplicate_count,
         "duplicate_ratio": duplicate_ratio,
         "top20_false_positive_count": top20_false_positive_count,
@@ -1222,8 +1352,18 @@ def evaluate_run(
         "forbidden_pattern_top20_rows": forbidden_top20_rows,
         "must_read_count": len(must_read_rows),
         "include_count": len(include_rows),
+        "optional_count": len(optional_rows),
+        "exclude_count": len(exclude_rows),
         "forbidden_pattern_must_read_count": must_read_false_positive_count,
         "forbidden_pattern_include_count": include_false_positive_count,
+        "negative_context_top10": (
+            len(forbidden_top10_rows) if forbidden_patterns else None
+        ),
+        "negative_context_top20": (
+            len(forbidden_top20_rows) if forbidden_patterns else None
+        ),
+        "negative_context_must_read": must_read_false_positive_count,
+        "negative_context_include": include_false_positive_count,
         "must_read_false_positive_count": must_read_false_positive_count,
         "must_read_precision_heuristic": must_read_precision,
         **quality_metrics,
@@ -1339,7 +1479,14 @@ def evaluate_run(
         "repair_applied": llm_query_repair_applied,
         "repair_grounded_term_count": repair_grounded_term_count,
         "repair_rejected_term_count": repair_rejected_term_count,
+        "llm_query_critic_repair_enabled": llm_query_repair_enabled,
         "llm_query_critic_repair_applied": llm_query_repair_applied,
+        "llm_query_critic_verified_issue_count": (
+            llm_query_critic_verified_issue_count
+        ),
+        "llm_query_critic_applied_issue_count": (
+            llm_query_critic_applied_issue_count
+        ),
         "llm_query_critic_repaired_query_count": (
             llm_trace_count(llm_query_critic_trace, "query_added_count")
             + llm_trace_count(llm_query_critic_trace, "query_dropped_count")
@@ -1354,14 +1501,32 @@ def evaluate_run(
             llm_query_critic_repair_artifact_consistent
         ),
         "final_query_artifact_consistent": final_query_artifact_consistent,
-        "llm_query_critic_reason_if_no_change": str(
-            llm_query_critic_trace.get("reason_if_no_change", "")
-        )
-        if isinstance(llm_query_critic_trace, dict)
-        else "",
+        "llm_query_critic_reason_if_no_change": llm_query_critic_reason_if_no_change,
         "llm_query_before_example": llm_query_before_example,
         "llm_query_after_example": llm_query_after_example,
-        "paper_decision_mutation_count": 0 if not retrieval_performed else None,
+        "llm_direct_paper_decision_mutation_count": int(
+            evaluation.get("llm_direct_paper_decision_mutation_count", 0)
+            if isinstance(evaluation, dict)
+            else 0
+        ),
+        "llm_direct_evidence_validation_mutation_count": int(
+            evaluation.get("llm_direct_evidence_validation_mutation_count", 0)
+            if isinstance(evaluation, dict)
+            else 0
+        ),
+        "llm_direct_ranking_mutation_count": int(
+            evaluation.get("llm_direct_ranking_mutation_count", 0)
+            if isinstance(evaluation, dict)
+            else 0
+        ),
+        "paper_decision_mutation_count": int(
+            evaluation.get(
+                "paper_decision_mutation_count",
+                0 if not retrieval_performed else 0,
+            )
+            if isinstance(evaluation, dict)
+            else 0
+        ),
         "retrieval_performed": retrieval_performed,
         "research_gap_generation_status": research_gap_generation_status(
             run,

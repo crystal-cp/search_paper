@@ -2448,6 +2448,9 @@ def build_query_repair_stage_status(
         "deterministic_query_repair_applied": bool(query_repair_suggestions.get("applied")),
         "llm_query_critic_repair_enabled": False,
         "llm_query_critic_repair_applied": False,
+        "llm_query_critic_verified_issue_count": 0,
+        "llm_query_critic_applied_issue_count": 0,
+        "llm_query_critic_reason_if_no_change": "",
         "repair_applied": bool(query_repair_suggestions.get("applied")),
         "disabled_by_ablation": disabled_by_ablation,
         "raw_candidate_query_count": len(raw_flat),
@@ -2526,6 +2529,98 @@ def llm_query_critic_repair_summary(
     }
 
 
+def update_query_repair_stage_status_with_llm_critic(
+    *,
+    query_repair_stage_status: dict[str, Any],
+    query_critic_trace: Any,
+    query_repair_after_llm_critic: Any,
+    apply_llm_query_critic_repairs: bool,
+) -> dict[str, Any]:
+    """Record LLM critic repair enablement even when no repair is applied."""
+
+    summary = llm_query_critic_repair_summary(query_repair_after_llm_critic)
+    verified_issue_count = int(
+        getattr(query_critic_trace, "verified_issue_count", 0) or 0
+    )
+    reason = str(getattr(query_critic_trace, "reason_if_no_change", "") or "")
+    if apply_llm_query_critic_repairs and not summary["applied"]:
+        if not verified_issue_count:
+            reason = "no_verified_grounded_issue_available_clean_plan_unchanged"
+        elif summary["rejected_for_application_count"]:
+            reason = reason or "verified_issue_available_but_no_safe_grounded_repair_applied"
+        else:
+            reason = reason or "no_llm_query_critic_repair_applied"
+
+    query_repair_stage_status.update(
+        {
+            "llm_query_critic_repair_enabled": bool(apply_llm_query_critic_repairs),
+            "llm_query_critic_repair_applied": bool(summary["applied"]),
+            "llm_query_critic_verified_issue_count": verified_issue_count,
+            "llm_query_critic_applied_issue_count": summary["applied_issue_count"],
+            "llm_query_critic_reason_if_no_change": reason,
+            "llm_query_critic_repaired_query_count": summary["repaired_query_count"],
+            "llm_query_critic_original_query_example": summary["original_query_example"],
+            "llm_query_critic_repaired_query_example": summary["repaired_query_example"],
+            "llm_query_critic_applied_terms": summary["applied_terms"],
+            "llm_query_critic_rejected_terms": summary["rejected_terms"],
+            "llm_query_critic_repair_provenance_count": summary["provenance_count"],
+            "repair_applied": bool(
+                query_repair_stage_status.get("deterministic_query_repair_applied")
+                or summary["applied"]
+            ),
+        }
+    )
+    if apply_llm_query_critic_repairs and not summary["applied"]:
+        query_repair_stage_status["reason_if_no_difference"] = reason
+    return query_repair_stage_status
+
+
+def provider_query_signature(queries_by_provider: dict[str, list[str]]) -> tuple[str, ...]:
+    """Return a normalized signature for provider-query artifact comparison."""
+
+    return tuple(
+        sorted(
+            {
+                " ".join(str(query).split()).lower()
+                for query in flattened_provider_queries(queries_by_provider)
+                if str(query).strip()
+            }
+        )
+    )
+
+
+def provider_queries_from_artifact(payload: Any) -> dict[str, list[str]]:
+    """Extract provider query mappings from common query artifacts."""
+
+    if not isinstance(payload, dict):
+        return {}
+    for key in ("final_provider_queries", "queries_by_provider"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return {
+                str(provider): [str(query) for query in queries or []]
+                for provider, queries in value.items()
+                if isinstance(queries, list)
+            }
+    return {}
+
+
+def provider_query_artifacts_consistent(
+    artifacts: list[dict[str, list[str]]],
+) -> bool:
+    """Return whether non-empty provider-query artifacts agree."""
+
+    signatures = [
+        provider_query_signature(artifact)
+        for artifact in artifacts
+        if artifact and provider_query_signature(artifact)
+    ]
+    if len(signatures) <= 1:
+        return True
+    first = signatures[0]
+    return all(signature == first for signature in signatures[1:])
+
+
 def synchronize_final_query_artifacts_after_llm_critic_repair(
     *,
     providers: list[str],
@@ -2577,6 +2672,10 @@ def synchronize_final_query_artifacts_after_llm_critic_repair(
             "deterministic_query_repair_applied": bool(query_repair_suggestions.get("applied")),
             "llm_query_critic_repair_enabled": bool(apply_llm_query_critic_repairs),
             "llm_query_critic_repair_applied": bool(summary["applied"]),
+            "llm_query_critic_verified_issue_count": int(
+                query_repair_stage_status.get("llm_query_critic_verified_issue_count", 0)
+                or 0
+            ),
             "repair_applied": bool(
                 query_repair_suggestions.get("applied") or summary["applied"]
             ),
@@ -2587,6 +2686,12 @@ def synchronize_final_query_artifacts_after_llm_critic_repair(
             "query_dropped_count": summary["query_dropped_count"],
             "query_modified_count": summary["query_modified_count"],
             "llm_query_critic_applied_issue_count": summary["applied_issue_count"],
+            "llm_query_critic_reason_if_no_change": ""
+            if summary["applied"]
+            else query_repair_stage_status.get(
+                "llm_query_critic_reason_if_no_change",
+                "",
+            ),
             "llm_query_critic_repaired_query_count": summary["repaired_query_count"],
             "llm_query_critic_original_query_example": summary["original_query_example"],
             "llm_query_critic_repaired_query_example": summary["repaired_query_example"],
@@ -4407,6 +4512,7 @@ def run_pipeline(
         query_repair_suggestions,
     )
     write_json(out / "llm_query_critic.json", llm_query_critic)
+    query_plan_after_llm_critic: dict[str, Any] = {}
     if enable_llm_query_critic:
         query_plan_critic_input_payload = {
             "user_question": question,
@@ -4491,6 +4597,12 @@ def run_pipeline(
                     rejected_for_application_count=query_repair_after_llm_critic.rejected_for_application_count,
                     reason_if_no_change="llm_query_critic_no_safe_repairs_applied",
                 )
+        query_repair_stage_status = update_query_repair_stage_status_with_llm_critic(
+            query_repair_stage_status=query_repair_stage_status,
+            query_critic_trace=query_critic_trace,
+            query_repair_after_llm_critic=query_repair_after_llm_critic,
+            apply_llm_query_critic_repairs=apply_llm_query_critic_repairs,
+        )
         write_query_plan_critic_artifacts(
             out,
             query_plan_before_llm_critic=optional_query_critic_result.query_plan_before_llm_critic,
@@ -5164,7 +5276,62 @@ def run_pipeline(
     metrics["ranked_papers_based_on_real_retrieval"] = retrieval_context[
         "ranked_papers_based_on_real_retrieval"
     ]
+    metrics["retrieval_performed"] = bool(
+        retrieval_context["ranked_papers_based_on_real_retrieval"]
+        or retrieval_context["retrieval_status"] in {"success", "partial_success"}
+    )
     metrics["retrieval_context"] = retrieval_context
+    final_query_artifact_consistent = provider_query_artifacts_consistent(
+        [
+            provider_queries_from_artifact(query_plan_payload),
+            final_queries_after_repair,
+            provider_queries_from_artifact(query_provenance),
+        ]
+    )
+    llm_repair_provenance_count = int(
+        query_repair_stage_status.get("llm_query_critic_repair_provenance_count", 0)
+        or len(query_provenance.get("llm_query_critic_repairs", []) or [])
+    )
+    llm_query_critic_repair_artifact_consistent = (
+        provider_query_artifacts_consistent(
+            [
+                provider_queries_from_artifact(query_plan_payload),
+                final_queries_after_repair,
+                provider_queries_from_artifact(query_provenance),
+                provider_queries_from_artifact(query_plan_after_llm_critic),
+            ]
+        )
+        and (
+            not bool(query_repair_stage_status.get("llm_query_critic_repair_applied"))
+            or llm_repair_provenance_count > 0
+        )
+    )
+    metrics["final_query_artifact_consistent"] = final_query_artifact_consistent
+    metrics["llm_query_critic_repair_artifact_consistent"] = (
+        llm_query_critic_repair_artifact_consistent
+    )
+    metrics["llm_direct_paper_decision_mutation_count"] = 0
+    metrics["llm_direct_evidence_validation_mutation_count"] = 0
+    metrics["llm_direct_ranking_mutation_count"] = 0
+    metrics["paper_decision_mutation_count"] = 0
+    metrics["llm_query_critic_repair_enabled"] = bool(
+        query_repair_stage_status.get("llm_query_critic_repair_enabled")
+    )
+    metrics["llm_query_critic_repair_applied"] = bool(
+        query_repair_stage_status.get("llm_query_critic_repair_applied")
+    )
+    metrics["llm_query_critic_verified_issue_count"] = int(
+        query_repair_stage_status.get("llm_query_critic_verified_issue_count", 0)
+        or 0
+    )
+    metrics["llm_query_critic_applied_issue_count"] = int(
+        query_repair_stage_status.get("llm_query_critic_applied_issue_count", 0)
+        or 0
+    )
+    metrics["llm_query_critic_reason_if_no_change"] = str(
+        query_repair_stage_status.get("llm_query_critic_reason_if_no_change", "")
+        or ""
+    )
     metrics["year_filter"] = year_filter_stats
     metrics["imported_library"] = import_result.diagnostics()
     metrics["scoring_weights"] = active_scoring_weights
@@ -5192,9 +5359,21 @@ def run_pipeline(
         "llm_query_critic_repair_applied": bool(
             query_repair_stage_status.get("llm_query_critic_repair_applied")
         ),
+        "llm_query_critic_verified_issue_count": int(
+            query_repair_stage_status.get("llm_query_critic_verified_issue_count", 0)
+            or 0
+        ),
         "llm_query_critic_applied_issue_count": int(
             query_repair_stage_status.get("llm_query_critic_applied_issue_count", 0)
             or 0
+        ),
+        "llm_query_critic_reason_if_no_change": str(
+            query_repair_stage_status.get("llm_query_critic_reason_if_no_change", "")
+            or ""
+        ),
+        "final_query_artifact_consistent": final_query_artifact_consistent,
+        "llm_query_critic_repair_artifact_consistent": (
+            llm_query_critic_repair_artifact_consistent
         ),
         "llm_query_critic_repaired_query_count": int(
             query_repair_stage_status.get("llm_query_critic_repaired_query_count", 0)

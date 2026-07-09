@@ -30,6 +30,11 @@ CLEAN_LLM_PLAN_BENCHMARK_CASE_IDS = {
     "oer_spin_state",
 }
 
+SMALL_FULL_LLM_PILOT_CASE_IDS = {
+    "sei_lithium_battery",
+    "oer_spin_state",
+}
+
 ABLATION_CONFIGS: dict[str, dict[str, Any]] = {
     "deterministic_baseline": {
         "flags": [],
@@ -45,6 +50,7 @@ ABLATION_CONFIGS: dict[str, dict[str, Any]] = {
         "flags": [],
         "disabled_modules": [],
         "mode_support": "plan_level",
+        "full_mode_support": "small_full_retrieval_safety_pilot",
         "support_status": {"full_system": "baseline"},
         "applies_query_changes": False,
         "uses_real_llm": False,
@@ -97,6 +103,7 @@ ABLATION_CONFIGS: dict[str, dict[str, Any]] = {
         "disabled_modules": [],
         "enabled_modules_extra": ["llm_query_plan_critic"],
         "mode_support": "plan_level",
+        "full_mode_support": "small_full_retrieval_safety_pilot",
         "support_status": {"llm_query_plan_critic_repairs": "controlled_repair_pilot"},
         "applies_query_changes": True,
         "uses_real_llm": False,
@@ -123,6 +130,7 @@ ABLATION_CONFIGS: dict[str, dict[str, Any]] = {
             "llm_query_plan_critic",
         ],
         "mode_support": "plan_level",
+        "full_mode_support": "small_full_retrieval_safety_pilot",
         "support_status": {
             "llm_intent_frame_enhancer": "diagnostic_controlled",
             "llm_query_plan_critic_repairs": "controlled_repair_pilot",
@@ -208,6 +216,12 @@ def select_cases(
         cases = [case for case in cases if case.get("plan_only_eligible", True)]
     else:
         cases = [case for case in cases if case.get("full_retrieval_required", True)]
+        if not case_id and case_group == "small_full_llm_pilot":
+            cases = [
+                case
+                for case in cases
+                if case.get("id") in SMALL_FULL_LLM_PILOT_CASE_IDS
+            ]
     if not case_id and mode == "plan":
         if case_group == "clean_benchmark":
             cases = [
@@ -361,6 +375,7 @@ def write_fallback_ablation_config(
         "cli_flags_used": config.get("flags", []),
         "support_status": config.get("support_status", {}),
         "mode_support": config.get("mode_support", ""),
+        "full_mode_support": config.get("full_mode_support", ""),
         "applies_query_changes": bool(config.get("applies_query_changes", False)),
         "uses_real_llm": bool(config.get("uses_real_llm", False)),
         "diagnostic_only": bool(config.get("diagnostic_only", False)),
@@ -512,9 +527,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=["plan", "full"], required=True)
     parser.add_argument(
         "--case-group",
-        choices=["clean_benchmark", "weak_plan_positive_controls", "all"],
+        choices=[
+            "clean_benchmark",
+            "weak_plan_positive_controls",
+            "small_full_llm_pilot",
+            "all",
+        ],
         default="clean_benchmark",
-        help="Plan-mode case family to run when --case-id is not provided.",
+        help="Case family to run when --case-id is not provided.",
     )
     parser.add_argument("--configs", required=True)
     parser.add_argument("--providers", nargs="+", default=["openalex"])

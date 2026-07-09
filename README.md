@@ -31,6 +31,9 @@ For the detailed research framing and current system design, see
 For the plan-level LLM pilot diagnostic, see
 [`docs/llm_plan_level_pilot.md`](docs/llm_plan_level_pilot.md); it is not a
 formal full-retrieval LLM ablation conclusion.
+For the small full-retrieval LLM safety pilot, see
+[`docs/llm_full_retrieval_pilot.md`](docs/llm_full_retrieval_pilot.md); it is a
+safety check, not a formal performance-ablation conclusion.
 
 The v9 deterministic baseline pipeline:
 

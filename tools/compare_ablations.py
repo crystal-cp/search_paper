@@ -47,15 +47,24 @@ SUMMARY_COLUMNS = [
     "raw_to_final_query_change_count",
     "repair_disabled_but_sanitizer_active",
     "no_query_repair_conclusive",
+    "raw_retrieved_count",
     "merged_count",
+    "retrieval_status",
     "duplicate_ratio",
     "provider_success_rate",
+    "provider_error_count",
     "must_read_count",
     "include_count",
+    "optional_count",
+    "exclude_count",
     "forbidden_pattern_top10_count",
     "forbidden_pattern_top20_count",
     "forbidden_pattern_must_read_count",
     "forbidden_pattern_include_count",
+    "negative_context_top10",
+    "negative_context_top20",
+    "negative_context_must_read",
+    "negative_context_include",
     "required_group_coverage_top10",
     "intent_centrality_mean_top10",
     "reading_path_paper_count",
@@ -86,7 +95,10 @@ SUMMARY_COLUMNS = [
     "repair_applied",
     "repair_grounded_term_count",
     "repair_rejected_term_count",
+    "llm_query_critic_repair_enabled",
     "llm_query_critic_repair_applied",
+    "llm_query_critic_verified_issue_count",
+    "llm_query_critic_applied_issue_count",
     "llm_query_critic_repaired_query_count",
     "llm_query_critic_original_query_example",
     "llm_query_critic_repaired_query_example",
@@ -98,6 +110,9 @@ SUMMARY_COLUMNS = [
     "llm_query_critic_reason_if_no_change",
     "llm_query_before_example",
     "llm_query_after_example",
+    "llm_direct_paper_decision_mutation_count",
+    "llm_direct_evidence_validation_mutation_count",
+    "llm_direct_ranking_mutation_count",
     "paper_decision_mutation_count",
     "retrieval_performed",
     "research_gap_generation_status",
@@ -204,6 +219,7 @@ def row_for_run(run_dir: Path, benchmark: Path) -> dict[str, Any]:
             *support_details,
             "query_repair:diagnostic_non_conclusive",
         ]
+    run_mode = str(config.get("mode") or command_record.get("mode", "")).strip()
 
     notes: list[str] = []
     if support_level == "partially_supported":
@@ -237,7 +253,11 @@ def row_for_run(run_dir: Path, benchmark: Path) -> dict[str, Any]:
         notes.append("forbidden-pattern hit among must-read papers")
     if metrics.get("forbidden_pattern_include_count"):
         notes.append("forbidden-pattern hit among included papers")
-    if str(config.get("mode_support") or "") == "plan_level" and str(
+    if run_mode == "full" and str(config_name).startswith("llm_"):
+        notes.append(
+            "Small full-retrieval LLM safety pilot; not a formal LLM ablation conclusion"
+        )
+    elif str(config.get("mode_support") or "") == "plan_level" and str(
         config_name
     ).startswith("llm_"):
         notes.append("LLM plan-level diagnostic; not a formal full retrieval ablation")
@@ -251,11 +271,17 @@ def row_for_run(run_dir: Path, benchmark: Path) -> dict[str, Any]:
     ):
         notes.append("Intent enhancer fallback only; not a positive LLM intent test.")
     if metrics.get("llm_query_critic_enabled") and not metrics.get("applied_issue_count"):
-        if bool(config.get("applies_query_changes", False)):
-            notes.append("Repair flag enabled, but no verified grounded issue was available.")
+        if metrics.get("llm_query_critic_repair_enabled"):
+            notes.append(
+                "LLM repair apply flag enabled, but no verified grounded issue was available; clean plan remained unchanged."
+            )
+        elif bool(config.get("applies_query_changes", False)):
+            notes.append("Repair flag configured, but status did not report enabled.")
+        else:
+            notes.append("LLM repair disabled; critic diagnostics only.")
         if not stress_case and not metrics.get("verified_issue_count"):
             notes.append("No verified repair opportunity; clean plan remained unchanged.")
-        if not bool(config.get("applies_query_changes", False)) and (
+        if not metrics.get("llm_query_critic_repair_enabled") and (
             stress_case or metrics.get("verified_issue_count")
         ):
             notes.append("LLM query critic did not mutate query plan")
@@ -273,7 +299,7 @@ def row_for_run(run_dir: Path, benchmark: Path) -> dict[str, Any]:
     return {
         "case_id": case_id,
         "config_name": config_name,
-        "mode": config.get("mode") or command_record.get("mode", ""),
+        "mode": run_mode,
         "diagnostic_case_group": diagnostic_case_group,
         "stress_case": stress_case,
         "query_family_applied": metrics.get("query_family_applied"),
@@ -299,17 +325,26 @@ def row_for_run(run_dir: Path, benchmark: Path) -> dict[str, Any]:
             "repair_disabled_but_sanitizer_active"
         ),
         "no_query_repair_conclusive": metrics.get("no_query_repair_conclusive"),
+        "raw_retrieved_count": metrics.get("raw_retrieved_count"),
         "merged_count": metrics.get("merged_count"),
+        "retrieval_status": metrics.get("retrieval_status"),
         "duplicate_ratio": metrics.get("duplicate_ratio"),
         "provider_success_rate": metrics.get("provider_success_rate"),
+        "provider_error_count": metrics.get("provider_error_count"),
         "must_read_count": metrics.get("must_read_count"),
         "include_count": metrics.get("include_count"),
+        "optional_count": metrics.get("optional_count"),
+        "exclude_count": metrics.get("exclude_count"),
         "forbidden_pattern_top10_count": metrics.get("forbidden_pattern_top10_count"),
         "forbidden_pattern_top20_count": metrics.get("forbidden_pattern_top20_count"),
         "forbidden_pattern_must_read_count": metrics.get(
             "forbidden_pattern_must_read_count"
         ),
         "forbidden_pattern_include_count": metrics.get("forbidden_pattern_include_count"),
+        "negative_context_top10": metrics.get("negative_context_top10"),
+        "negative_context_top20": metrics.get("negative_context_top20"),
+        "negative_context_must_read": metrics.get("negative_context_must_read"),
+        "negative_context_include": metrics.get("negative_context_include"),
         "required_group_coverage_top10": metrics.get("required_group_coverage_top10"),
         "intent_centrality_mean_top10": metrics.get("intent_centrality_mean_top10"),
         "reading_path_paper_count": metrics.get("reading_path_paper_count"),
@@ -358,8 +393,17 @@ def row_for_run(run_dir: Path, benchmark: Path) -> dict[str, Any]:
         "repair_applied": metrics.get("repair_applied"),
         "repair_grounded_term_count": metrics.get("repair_grounded_term_count"),
         "repair_rejected_term_count": metrics.get("repair_rejected_term_count"),
+        "llm_query_critic_repair_enabled": metrics.get(
+            "llm_query_critic_repair_enabled"
+        ),
         "llm_query_critic_repair_applied": metrics.get(
             "llm_query_critic_repair_applied"
+        ),
+        "llm_query_critic_verified_issue_count": metrics.get(
+            "llm_query_critic_verified_issue_count"
+        ),
+        "llm_query_critic_applied_issue_count": metrics.get(
+            "llm_query_critic_applied_issue_count"
         ),
         "llm_query_critic_repaired_query_count": metrics.get(
             "llm_query_critic_repaired_query_count"
@@ -390,6 +434,15 @@ def row_for_run(run_dir: Path, benchmark: Path) -> dict[str, Any]:
         ),
         "llm_query_before_example": metrics.get("llm_query_before_example"),
         "llm_query_after_example": metrics.get("llm_query_after_example"),
+        "llm_direct_paper_decision_mutation_count": metrics.get(
+            "llm_direct_paper_decision_mutation_count"
+        ),
+        "llm_direct_evidence_validation_mutation_count": metrics.get(
+            "llm_direct_evidence_validation_mutation_count"
+        ),
+        "llm_direct_ranking_mutation_count": metrics.get(
+            "llm_direct_ranking_mutation_count"
+        ),
         "paper_decision_mutation_count": metrics.get("paper_decision_mutation_count"),
         "retrieval_performed": metrics.get("retrieval_performed"),
         "research_gap_generation_status": metrics.get("research_gap_generation_status"),
@@ -557,6 +610,11 @@ def comparison_notes(rows: list[dict[str, Any]]) -> list[str]:
                 "`no_group_coverage_ranking` is partially supported and not conclusive because group coverage also affects upstream assessment artifacts."
             )
         elif config_name.startswith("llm_"):
+            is_full_llm_pilot = str(row.get("mode") or "") == "full"
+            if is_full_llm_pilot:
+                notes.append(
+                    "Small full-retrieval LLM safety pilot; interpret retrieval and ranking deltas cautiously because provider ranking and retrieval stochasticity may affect results."
+                )
             if row.get("llm_query_critic_repair_applied"):
                 quality_delta = (
                     metric_delta(row, diagnostic_query_critic, "query_quality_score")
@@ -592,7 +650,11 @@ def comparison_notes(rows: list[dict[str, Any]]) -> list[str]:
                 notes.append(
                     "No verified repair opportunity; clean plan remained unchanged."
                 )
-            if row.get("llm_query_critic_enabled") and bool(row.get("applied_issue_count")):
+            if (
+                row.get("llm_query_critic_enabled")
+                and bool(row.get("applied_issue_count"))
+                and row.get("stress_case")
+            ):
                 notes.append(
                     f"Weak-plan positive control applied repair: verified_issue_count={format_value(row.get('verified_issue_count'))}, "
                     f"applied_issue_count={format_value(row.get('applied_issue_count'))}, "
@@ -602,6 +664,10 @@ def comparison_notes(rows: list[dict[str, Any]]) -> list[str]:
                     f"before={format_value(row.get('llm_query_before_example'))}, "
                     f"after={format_value(row.get('llm_query_after_example'))}."
                 )
+            elif row.get("llm_query_critic_enabled") and bool(row.get("applied_issue_count")):
+                notes.append(
+                    "LLM critic repair was applied by the deterministic rule applier; this is a safety-pilot mechanism signal, not proof of retrieval quality improvement."
+                )
             if (
                 row.get("llm_query_critic_enabled")
                 and not row.get("applied_issue_count")
@@ -610,9 +676,14 @@ def comparison_notes(rows: list[dict[str, Any]]) -> list[str]:
                     "llm_intent_plus_query_critic_repair",
                 }
             ):
-                notes.append(
-                    "Repair flag enabled, but no verified grounded issue was available."
-                )
+                if row.get("llm_query_critic_repair_enabled"):
+                    notes.append(
+                        "LLM repair apply flag enabled, but no verified grounded issue was available; clean plan remained unchanged."
+                    )
+                else:
+                    notes.append(
+                        "LLM repair disabled; critic diagnostics only."
+                    )
             if config_name == "llm_query_critic_diagnostic_only" or config_name == "llm_query_critic_only":
                 notes.append(
                     "`llm_query_critic_diagnostic_only` is plan-level diagnostic only: it records verified/rejected critique issues but must not mutate final provider queries."
@@ -626,9 +697,14 @@ def comparison_notes(rows: list[dict[str, Any]]) -> list[str]:
                     "`llm_intent_frame_only` tests controlled intent-frame suggestions entering SearchContract provenance after deterministic verification."
                 )
             elif config_name == "llm_intent_plus_query_critic_repair":
-                notes.append(
-                    "`llm_intent_plus_query_critic_repair` is still plan-level only; it does not prove full retrieval or ranking improvement."
-                )
+                if is_full_llm_pilot:
+                    notes.append(
+                        "`llm_intent_plus_query_critic_repair` is a small full-retrieval safety pilot config; it does not prove retrieval precision, ranking, or screening improvement."
+                    )
+                else:
+                    notes.append(
+                        "`llm_intent_plus_query_critic_repair` is still plan-level only; it does not prove full retrieval or ranking improvement."
+                    )
             else:
                 notes.append(
                     f"`{config_name}` is an LLM plan-level pilot signal, not a formal full ablation conclusion."
@@ -688,12 +764,99 @@ def write_markdown_summary(rows: list[dict[str, Any]], path: Path) -> None:
             lines.append("- None observed in this summary.")
         lines.append("")
 
+    full_pilot_rows = [
+        row
+        for row in rows
+        if str(row.get("mode") or "") == "full"
+        and str(row.get("case_id") or "")
+        in {"sei_lithium_battery", "oer_spin_state"}
+        and str(row.get("config_name") or "")
+        in {
+            "full_system",
+            "llm_intent_plus_query_critic_repair",
+            "llm_query_critic_repair_applied",
+        }
+    ]
+    if full_pilot_rows:
+        lines.extend(
+            [
+                "## Small full-retrieval LLM pilot",
+                "",
+                "This is a safety pilot, not a formal LLM ablation conclusion.",
+                "It checks whether LLM-enhanced planning can run through full retrieval without breaking guardrails, ranking, reading_path, or reports.",
+                "Any quality improvement claims are tentative.",
+                "If no verified LLM repair was available, this is not a failure; it means the query plan may already have been strong.",
+                "If full retrieval changes, interpret cautiously because provider ranking and retrieval stochasticity may affect results.",
+                "LLM modules do not make paper-level decisions.",
+                "",
+                "| Case | Config | Retrieval status | Retrieval performed | Real retrieval | Raw | Merged | Provider success | Provider errors | Must-read | Include | Optional | Exclude | Forbidden must-read | Negative must-read | Reading leaks | Intent called | Critic called | Repair enabled | Verified issues | Applied issues | Query modified | Direct paper/evidence/ranking mutations |",
+                "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- |",
+            ]
+        )
+        for row in sorted(
+            full_pilot_rows,
+            key=lambda item: (str(item.get("case_id", "")), str(item.get("config_name", ""))),
+        ):
+            reading_leaks = (
+                f"exclude={format_value(row.get('reading_path_exclude_count'))}; "
+                f"out_of_scope={format_value(row.get('reading_path_out_of_scope_count'))}; "
+                f"duplicate={format_value(row.get('reading_path_duplicate_count'))}; "
+                f"negative={format_value(row.get('reading_path_negative_context_count'))}"
+            )
+            direct_mutations = (
+                f"paper={format_value(row.get('llm_direct_paper_decision_mutation_count'))}; "
+                f"evidence={format_value(row.get('llm_direct_evidence_validation_mutation_count'))}; "
+                f"ranking={format_value(row.get('llm_direct_ranking_mutation_count'))}"
+            )
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        md_cell(row["case_id"]),
+                        md_cell(row["config_name"]),
+                        md_cell(row["retrieval_status"]),
+                        md_cell(row["retrieval_performed"]),
+                        md_cell(row["ranked_papers_based_on_real_retrieval"]),
+                        md_cell(row["raw_retrieved_count"]),
+                        md_cell(row["merged_count"]),
+                        md_cell(row["provider_success_rate"]),
+                        md_cell(row["provider_error_count"]),
+                        md_cell(row["must_read_count"]),
+                        md_cell(row["include_count"]),
+                        md_cell(row["optional_count"]),
+                        md_cell(row["exclude_count"]),
+                        md_cell(row["forbidden_pattern_must_read_count"]),
+                        md_cell(row["negative_context_must_read"]),
+                        md_cell(reading_leaks),
+                        md_cell(row["llm_intent_called"]),
+                        md_cell(row["llm_query_critic_called"]),
+                        md_cell(row["llm_query_critic_repair_enabled"]),
+                        md_cell(row["verified_issue_count"]),
+                        md_cell(row["applied_issue_count"]),
+                        md_cell(row["query_modified_count"]),
+                        md_cell(direct_mutations),
+                    ]
+                )
+                + " |"
+            )
+        lines.extend(
+            [
+                "",
+                "- Do not claim LLM improves retrieval precision from this section unless independent metrics clearly support it.",
+                "- Use this section to check full-pipeline safety signals: retrieval completed, reading-path leaks stayed bounded, negative-context papers were not promoted, and LLM direct mutation counters stayed zero.",
+                "",
+            ]
+        )
+
     llm_rows = [
         row
         for row in rows
-        if str(row.get("config_name", "")).startswith("llm_")
-        or row.get("llm_intent_enabled")
-        or row.get("llm_query_critic_enabled")
+        if str(row.get("mode") or "") != "full"
+        and (
+            str(row.get("config_name", "")).startswith("llm_")
+            or row.get("llm_intent_enabled")
+            or row.get("llm_query_critic_enabled")
+        )
     ]
     if llm_rows:
         lines.extend(
